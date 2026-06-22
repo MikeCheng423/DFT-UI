@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from pathlib import Path
+
+# Job folders are prefixed with a zero-padded global sequence number so a re-run
+# never overwrites an earlier one, e.g. ``0001_Fe``, ``0002_Si``, ``0003_Fe``.
+_JOB_NUMBER_RE = re.compile(r"^(\d+)_(.*)$")
+_JOB_NUMBER_WIDTH = 4
 
 from vasp_auto.ase_tools import interpolate_neb_with_ase
 from vasp_auto.incar import apply_spin_to_incar, spin_incar_text
@@ -106,7 +112,65 @@ def load_incar_template(calc_type: str) -> str:
         ) from None
 
 
-def make_case_info(case_dir, output_root, single_mode=False):
+def _max_job_number(output_root: Path) -> int:
+    """Highest ``NNNN_`` prefix already used under ``output_root`` (0 if none)."""
+    if not output_root.is_dir():
+        return 0
+    numbers = [
+        int(m.group(1))
+        for child in output_root.iterdir()
+        if child.is_dir() and (m := _JOB_NUMBER_RE.match(child.name))
+    ]
+    return max(numbers, default=0)
+
+
+def _allocate_numbered_dir(output_root: Path, case_name: str, create: bool) -> Path:
+    """Return the next free ``NNNN_<case>`` dir under ``output_root``.
+
+    With ``create=True`` the directory is claimed atomically (exclusive mkdir) so
+    concurrent runs (``--parallel``) never collide on a number; with
+    ``create=False`` it just predicts the name (for dry-run previews).
+    """
+    output_root.mkdir(parents=True, exist_ok=True)
+    number = _max_job_number(output_root) + 1
+    while True:
+        candidate = output_root / f"{number:0{_JOB_NUMBER_WIDTH}d}_{case_name}"
+        if not create:
+            return candidate
+        try:
+            candidate.mkdir(exist_ok=False)
+            return candidate
+        except FileExistsError:
+            number += 1
+
+
+def _latest_numbered_dir(output_root: Path, case_name: str) -> Path:
+    """The most recent existing job dir for ``case_name`` (highest number, else a
+    bare ``<case>``). Used to re-read / continue a previous run. Falls back to the
+    bare path when nothing exists yet."""
+    best_number, best = -1, None
+    if output_root.is_dir():
+        for child in output_root.iterdir():
+            if not child.is_dir():
+                continue
+            if child.name == case_name and best_number < 0:
+                best_number, best = 0, child
+            elif (m := _JOB_NUMBER_RE.match(child.name)) and m.group(2) == case_name:
+                if int(m.group(1)) > best_number:
+                    best_number, best = int(m.group(1)), child
+    return best if best is not None else output_root / case_name
+
+
+def make_case_info(case_dir, output_root, single_mode=False, job_mode="bare"):
+    """Build the case/job descriptor.
+
+    ``job_mode`` controls how the job directory is named (ignored in single_mode,
+    which always runs in ``output_root`` itself):
+      - ``"bare"``    : ``output_root/<case>`` (legacy; the default).
+      - ``"new"``     : allocate & claim the next ``NNNN_<case>`` (a fresh run).
+      - ``"preview"`` : predict the next ``NNNN_<case>`` without creating it.
+      - ``"latest"``  : the most recent existing job dir (re-read / retry).
+    """
     case_dir = Path(case_dir).resolve()
     output_root = Path(output_root).resolve()
     calculation_type = get_case_type(case_dir)
@@ -117,7 +181,19 @@ def make_case_info(case_dir, output_root, single_mode=False):
             "Use POSCAR for SCF, or initial/POSCAR and final/POSCAR for TSS."
         )
 
-    job_dir = output_root if single_mode else output_root / case_dir.name
+    # Numbered modes apply in single mode too: a single-case run lands in
+    # output_root/<NNNN>_<case> (e.g. jobs/Cu/0001_Cu) so reruns are kept side by
+    # side. Only the legacy "bare" mode honours single_mode's run-in-place layout.
+    if job_mode == "new":
+        job_dir = _allocate_numbered_dir(output_root, case_dir.name, create=True)
+    elif job_mode == "preview":
+        job_dir = _allocate_numbered_dir(output_root, case_dir.name, create=False)
+    elif job_mode == "latest":
+        job_dir = _latest_numbered_dir(output_root, case_dir.name)
+    elif single_mode:
+        job_dir = output_root
+    else:
+        job_dir = output_root / case_dir.name
 
     return {
         "case_name": case_dir.name,

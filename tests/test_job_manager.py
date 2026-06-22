@@ -110,3 +110,50 @@ def test_create_job_from_case_tss_interpolates_images(tss_case, potcar_library, 
     assert image_dirs == ["00", "01", "02", "03", "04"]
     assert "IMAGES = 3" in (job_dir / "INCAR").read_text()
     assert (job_dir / "POTCAR").exists()
+
+
+# ----------------------------------------------------- numbered job folders
+
+def test_make_case_info_new_allocates_sequential(scf_case, tmp_path):
+    out = tmp_path / "jobs"
+    name = scf_case.name
+    first = make_case_info(scf_case, out, job_mode="new")["job_dir"]
+    second = make_case_info(scf_case, out, job_mode="new")["job_dir"]
+    assert first.name == f"0001_{name}"
+    assert second.name == f"0002_{name}"
+    # "new" claims the directory atomically, so reruns never overwrite.
+    assert first.is_dir() and second.is_dir()
+    assert first != second
+
+
+def test_make_case_info_new_is_global_across_cases(scf_case, tmp_path):
+    # A second case sharing the same output_root continues the same counter.
+    other = tmp_path / "Other"
+    other.mkdir()
+    (other / "POSCAR").write_text((scf_case / "POSCAR").read_text(), encoding="utf-8")
+    out = tmp_path / "jobs"
+    a = make_case_info(scf_case, out, job_mode="new")["job_dir"]
+    b = make_case_info(other, out, job_mode="new")["job_dir"]
+    assert a.name == f"0001_{scf_case.name}"
+    assert b.name == "0002_Other"
+
+
+def test_make_case_info_latest_resolves_highest(scf_case, tmp_path):
+    out = tmp_path / "jobs"
+    make_case_info(scf_case, out, job_mode="new")          # 0001
+    make_case_info(scf_case, out, job_mode="new")          # 0002
+    latest = make_case_info(scf_case, out, job_mode="latest")["job_dir"]
+    assert latest.name == f"0002_{scf_case.name}"
+
+
+def test_make_case_info_preview_does_not_create(scf_case, tmp_path):
+    out = tmp_path / "jobs"
+    predicted = make_case_info(scf_case, out, job_mode="preview")["job_dir"]
+    assert predicted.name == f"0001_{scf_case.name}"
+    assert not predicted.exists()
+
+
+def test_make_case_info_bare_is_unchanged(scf_case, tmp_path):
+    out = tmp_path / "jobs"
+    job_dir = make_case_info(scf_case, out, job_mode="bare")["job_dir"]
+    assert job_dir == (out / scf_case.name)
