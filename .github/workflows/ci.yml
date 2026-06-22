@@ -1,0 +1,20 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package
+        run: pip install -e .[dev]
+      - name: Run unit tests (no VASP needed)
+        run: python -m pytest -q
+      - name: Run end-to-end selfcheck (fake mpirun/vasp)
+        run: bash selfcheck/run_selfcheck.sh

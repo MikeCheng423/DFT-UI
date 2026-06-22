@@ -1,0 +1,43 @@
+# ---------------------------------------------------------------------------
+# vasp-auto .gitignore
+# Keep the repo to source + tests + docs + examples. Everything below is heavy,
+# machine-specific, generated, or license-restricted and must NOT be published.
+# ---------------------------------------------------------------------------
+
+# VASP pseudopotentials — proprietary, licensed; users supply their own.
+POTCAR/
+
+# Calculation inputs/outputs and run artifacts (large, machine-specific).
+jobs/
+inputs/
+TSS/
+ui_logs/
+vasp_auto_background_logs/
+*_logs/
+*.log
+
+# Local machine config / private remote infrastructure. Ship the *.example only.
+config.yaml
+remotes.json
+
+# Python virtual environments and build artifacts.
+venv/
+.venv/
+build/
+dist/
+*.egg-info/
+src/*.egg-info/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Editors / OS / tooling cruft.
+.trash_*/
+.local-apt/
+ase-gui
+*:Zone.Identifier
+
+# Stray scratch files left under src/.
+src/CRASH
+src/MEMO.txt
+src/input_tmp.in

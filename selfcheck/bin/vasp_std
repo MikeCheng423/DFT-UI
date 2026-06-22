@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Fake VASP for the selfcheck: writes plausible output files into the current
+# directory so every vasp_auto parsing path can be exercised without VASP.
+# Set FAKE_VASP_ERROR=1 to emit a known error signature (ZBRENT) on stdout.
+
+cat > OUTCAR <<'EOF'
+ vasp.6.4.2 fake output for vasp_auto selfcheck
+  free  energy   TOTEN  =       -10.12345678 eV
+  some intermediate line
+  aborting loop because EDIFF is reached
+  free  energy   TOTEN  =       -12.50000000 eV
+  reached required accuracy - stopping structural energy minimisation
+EOF
+
+cat > OSZICAR <<'EOF'
+       N       E                     dE             d eps
+DAV:   1    -0.10E+02   -0.1E+02
+   1 F= -.12500000E+02 E0= -.12500000E+02  d E =-.125000E+02
+EOF
+
+if [ -f POSCAR ]; then
+  { cat POSCAR; echo "! fake relaxed"; } > CONTCAR
+fi
+
+echo "fake charge density" > CHGCAR
+
+cat > vasprun.xml <<'EOF'
+<?xml version="1.0" encoding="ISO-8859-1"?>
+<modeling>
+ <calculation>
+  <energy>
+   <i name="e_fr_energy">  -12.50000000 </i>
+  </energy>
+  <varray name="forces">
+   <v>  0.00000000 0.00000000 0.10000000 </v>
+   <v>  0.00000000 0.00000000 -0.05000000 </v>
+  </varray>
+  <varray name="stress">
+   <v>  12.0 0.0 0.0 </v>
+   <v>  0.0 12.0 0.0 </v>
+   <v>  0.0 0.0 12.0 </v>
+  </varray>
+  <dos>
+   <i name="efermi">  2.00000000 </i>
+  </dos>
+  <eigenvalues>
+   <array>
+    <set>
+     <set comment="spin 1">
+      <set comment="kpoint 1">
+       <r>  1.0000 1.0000 </r>
+       <r>  3.5000 0.0000 </r>
+      </set>
+     </set>
+    </set>
+   </array>
+  </eigenvalues>
+ </calculation>
+</modeling>
+EOF
+
+echo " running on 1 total cores (fake)"
+echo "   1 F= -.12500000E+02"
+if [ -n "${FAKE_VASP_ERROR:-}" ]; then
+  echo "ZBRENT: fatal error in bracketing"
+fi
+exit 0

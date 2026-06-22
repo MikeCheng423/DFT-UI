@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Fake mpirun for the selfcheck: strips "-np N" and runs the program directly
+# in the current working directory.
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -np|-n) shift 2 ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+exec "${args[@]}"

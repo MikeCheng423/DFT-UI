@@ -1,0 +1,341 @@
+vasp_auto command and file structure
+====================================
+
+This note describes the current command implemented in src/vasp_auto and the
+main folders in this workspace.
+
+
+1. Command entry point
+----------------------
+
+The easiest command is now:
+
+    ./vasp_auto [target] [options]
+
+This wrapper uses the repository virtual environment and sets PYTHONPATH for
+the user.
+
+The Python entry point is still:
+
+    PYTHONPATH=src venv/bin/python -m vasp_auto.cli [target] [options]
+
+Use venv/bin/python in this workspace. The system Python may not have the
+required packages such as PyYAML and pandas.
+
+The target is a directory. It can be one of these beginner-friendly structures:
+
+    Single case:
+        A directory containing POSCAR.
+        INCAR and KPOINTS are optional. If they are missing, vasp_auto creates
+        simple default versions in the input case directory, then copies them
+        into the job directory.
+        Example: inputs/Al
+
+    TSS / NEB case:
+        A directory containing initial/POSCAR and final/POSCAR.
+        INCAR.neb, INCAR, and KPOINTS are optional. If they are missing,
+        vasp_auto creates simple default versions in the input case directory
+        and interpolates NEB image folders.
+        Example: TSS/cases/A
+
+    Project:
+        A directory whose direct child directories are SCF or TSS cases.
+        Example: inputs/Project_1, with inputs/Project_1/Al,
+        inputs/Project_1/Al2, and inputs/Project_1/Al3.
+
+Options:
+
+    -n, --cpus N
+        Pass N as the MPI rank count to mpirun.
+
+    --prepare
+        Create missing input-side INCAR/KPOINTS/POTCAR, copy required inputs
+        into the job folder, but do not run VASP.
+
+    --parse-only
+        Read existing job outputs and regenerate the Excel summary. This does
+        not run VASP or recreate job input files.
+
+    --retry-failed
+        Rerun only cases whose existing OUTCAR is missing or not converged.
+
+    --cases NAME [NAME ...]
+        In project mode, restrict work to selected case directory names.
+
+    --neb-images N
+        Number of intermediate images to create for TSS/NEB cases. Default is
+        config neb_images or 5.
+
+    --ase-import FILE
+        Read an ASE-supported structure file and write a VASP POSCAR case
+        before continuing with the normal prepare/run flow.
+
+    --ase-output DIR
+        Case directory written by --ase-import or --ase-build-bulk.
+
+    --ase-build-bulk ELEMENT
+        Build a bulk crystal case with ASE. Useful with --ase-crystalstructure,
+        --ase-a, --ase-c, and --ase-cubic.
+
+    --ase-only
+        Stop after writing the ASE-generated POSCAR case.
+
+    --ase-neb
+        Use ASE NEB interpolation when preparing TSS/NEB cases. The default
+        method is idpp; use --ase-neb-method linear for linear interpolation.
+
+
+2. Configuration
+----------------
+
+Configuration is loaded by src/vasp_auto/config_loader.py. A config file is now
+optional for simple local use.
+
+Search order:
+
+    1. Explicit path passed inside code to load_config(), currently not exposed
+       as a CLI flag.
+    2. config.yaml in the current working directory.
+    3. ~/.vasp_auto/config.yaml
+    4. /opt/vasp_auto/config.yaml
+
+The root config.yaml currently contains:
+
+    vasp_executable: /home/vv/src/vasp.6.4.2/bin/vasp_std
+    jobs_root: /home/vv/vasp_auto/jobs
+    potcar_root: /home/vv/vasp_auto/potcar
+
+Default values when no config file is found:
+
+    vasp_executable: VASP_EXECUTABLE environment variable, or vasp_std on PATH
+    jobs_root: ./jobs
+    potcar_root: ./potcar
+    neb_images: 5
+
+potcar_root is used when a case does not already provide a POTCAR.
+The tool now prefers automatic POTCAR assembly from the element symbols in
+POSCAR. It searches the configured potcar_root and nearby POTCAR/potcar folders,
+then writes a fresh input-side POTCAR from element subfolders such as
+POTCAR/Al/POTCAR and POTCAR/O/POTCAR. That input POTCAR is copied into the job.
+
+
+3. What the command does
+------------------------
+
+For each case, src/vasp_auto/cli.py:
+
+    1. Loads config.yaml.
+    2. Inspects the target path to decide single-case or project mode.
+    3. Creates a job directory under jobs_root.
+    4. Copies POSCAR for SCF, or prepares NEB image folders from
+       initial/POSCAR and final/POSCAR for TSS.
+    5. Creates missing INCAR, KPOINTS, and POTCAR in the input case directory.
+    6. Copies input INCAR/KPOINTS/POTCAR into the job directory.
+    7. Uses potcar_root to build input POTCAR from POSCAR line 6 when needed.
+    8. Unless --prepare or --parse-only is used, runs:
+
+           mpirun -np <cpus or 1> <vasp_executable>
+
+       inside the job directory.
+
+    9. Writes run output to run.log.
+    10. Parses OUTCAR and OSZICAR for energy, convergence, and ionic step count.
+        For TSS/NEB jobs it also reads image folders and reports a NEB barrier
+        when image OUTCAR files exist.
+    11. Writes an Excel summary to:
+
+           jobs_root/<project_name>.xlsx
+
+Job directory placement:
+
+    Single case target inputs/Al:
+        jobs/Al
+        jobs/Al/Al.xlsx
+
+    Project target inputs/Project_1:
+        jobs/Project_1/Al
+        jobs/Project_1/Al2
+        jobs/Project_1/Al3
+        jobs/Project_1/Project_1.xlsx
+
+
+4. Source file structure
+------------------------
+
+src/vasp_auto/cli.py
+    Argparse command-line interface. Coordinates config loading, target
+    inspection, job creation, running, parsing, retry behavior, and Excel
+    output.
+
+src/vasp_auto/config_loader.py
+    Finds and loads config.yaml. Normalizes important configured paths to
+    absolute paths.
+
+src/vasp_auto/target_utils.py
+    Decides whether a target is a single VASP case, a TSS/NEB case, or a
+    project folder. SCF cases are identified by POSCAR. TSS cases are
+    identified by initial/POSCAR and final/POSCAR, or by an already-prepared
+    NEB folder with numeric image directories.
+
+src/vasp_auto/job_manager.py
+    Creates job directories. Copies user inputs when present, creates default
+    INCAR/KPOINTS in the input case directory when missing, interpolates NEB
+    image folders for TSS, builds input POTCAR from potcar_root if missing,
+    and copies all calculation inputs into the job directory.
+
+src/vasp_auto/ase_tools.py
+    Optional ASE integration. Converts ASE-readable structures to POSCAR,
+    builds simple bulk crystal cases, and performs ASE NEB interpolation.
+
+src/vasp_auto/potcar_finder.py
+    Reads element symbols from POSCAR line 6, locates the POTCAR library, and
+    concatenates matching POTCAR/<element>/POTCAR files in POSCAR order.
+
+src/vasp_auto/runner.py
+    Runs VASP through mpirun and writes stdout/stderr to run.log. It also pins
+    common BLAS/OpenMP thread environment variables to 1.
+
+src/vasp_auto/workflow.py
+    Parses OUTCAR and OSZICAR for energy, convergence, and ionic steps. Provides
+    helpers for parse-only and retry-failed behavior.
+
+src/vasp_auto/parser.py
+    Older or alternate parsing helpers for OSZICAR, OUTCAR, and run.log. The
+    active CLI currently uses workflow.py directly.
+
+src/vasp_auto/excel_writer.py
+    Writes result rows to an Excel file with pandas.
+
+src/vasp_auto/__init__.py
+    Package marker.
+
+
+5. Workspace file structure
+---------------------------
+
+config.yaml
+    Root configuration used when running commands from /home/vv/vasp_auto.
+
+inputs/
+    Example SCF-style inputs and outputs.
+
+inputs/Al/
+    Single-case example with INCAR, POSCAR, KPOINTS, POTCAR, and existing VASP
+    outputs.
+
+inputs/Project_1/
+    Project-style example. Its child folders Al, Al2, and Al3 are individual
+    cases.
+
+jobs/
+    Default output root. The CLI creates job folders and Excel summaries here.
+
+potcar/
+    Pseudopotential library. build_potcar expects subdirectories named by
+    element or POTCAR variant, each containing a POTCAR file.
+
+TSS/
+    Transition-state-search / NEB example material. The active CLI now accepts
+    TSS cases that contain initial/POSCAR and final/POSCAR.
+
+TSS/cases/A/
+    Contains initial/POSCAR, final/POSCAR, INCAR.neb, INCAR, and KPOINTS.
+    The optional files can be removed in new cases if the default settings are
+    acceptable.
+
+TSS/neb_run/
+    Existing NEB-style output directory with image folders 00, 01, ..., 06,
+    shared INCAR/KPOINTS/POTCAR, and neb_summary outputs.
+
+venv/
+    Python virtual environment used for the tested commands below.
+
+
+6. Tested commands
+------------------
+
+Help command:
+
+    ./vasp_auto --help
+
+Result:
+
+    Succeeded. Printed the available target, --cpus, --prepare, --parse-only,
+    --retry-failed, --cases, and --neb-images options.
+
+Minimal SCF prepare example:
+
+    PYTHONPATH=/home/vv/vasp_auto/src /home/vv/vasp_auto/venv/bin/python -m vasp_auto.cli simple --prepare
+
+Result:
+
+    Succeeded using a temporary case that only contained POSCAR. vasp_auto
+    created:
+
+        INCAR
+        KPOINTS
+        POSCAR
+        POTCAR
+
+Minimal TSS/NEB prepare example:
+
+    PYTHONPATH=/home/vv/vasp_auto/src /home/vv/vasp_auto/venv/bin/python -m vasp_auto.cli tss --prepare --neb-images 3
+
+Result:
+
+    Succeeded using a temporary case that only contained initial/POSCAR and
+    final/POSCAR. vasp_auto created:
+
+        00/POSCAR
+        01/POSCAR
+        02/POSCAR
+        03/POSCAR
+        04/POSCAR
+        INCAR
+        KPOINTS
+        POTCAR
+
+
+7. Practical examples
+---------------------
+
+Prepare a single SCF case without running VASP:
+
+    ./vasp_auto inputs/Al --prepare
+
+Run a single SCF case with 4 MPI ranks:
+
+    ./vasp_auto inputs/Al -n 4
+
+Parse existing outputs for a single SCF case:
+
+    ./vasp_auto inputs/Al --parse-only
+
+Prepare a TSS/NEB case with 5 intermediate images:
+
+    ./vasp_auto TSS/cases/A --prepare --neb-images 5
+
+Prepare all cases in a project:
+
+    ./vasp_auto inputs/Project_1 --prepare
+
+Run only selected cases in a project:
+
+    ./vasp_auto inputs/Project_1 --cases Al Al3 -n 4
+
+Retry only non-converged or missing jobs:
+
+    ./vasp_auto inputs/Project_1 --retry-failed -n 4
+
+
+8. Current limitations
+----------------------
+
+The simplified defaults are intentionally conservative, not universal. Serious
+production calculations may still need a domain expert to review ENCUT,
+KPOINTS, magnetic settings, DFT+U, dispersion, solvation, and convergence
+criteria.
+
+TSS interpolation assumes initial/POSCAR and final/POSCAR have the same element
+order, atom counts, and coordinate mode. It uses a simple linear interpolation
+of atomic coordinates.

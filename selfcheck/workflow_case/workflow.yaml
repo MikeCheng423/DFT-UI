@@ -1,0 +1,7 @@
+steps:
+  - calc_type: relax
+  - calc_type: scf
+    incar:
+      ENCUT: 450
+  - calc_type: dos
+    kpoints: 6x6x6
