@@ -1970,7 +1970,17 @@ def _process_case(case_dir, args, base_config, mode, project_name, output_root, 
     config = merge_local_config(base_config, case_dir)
     engine, config = resolve_engine(args, config)
     remote = resolve_remote(args, config)
-    case_info = make_case_info(case_dir, output_root, single_mode=(mode == "single"))
+    # Numbered job folders (0001_Fe, 0002_Si …) so a re-run never overwrites an
+    # earlier one. --retry-failed continues the latest existing job; --dry-run
+    # only predicts the name; a normal run/prepare claims the next number.
+    if args.retry_failed:
+        job_mode = "latest"
+    elif args.dry_run:
+        job_mode = "preview"
+    else:
+        job_mode = "new"
+    case_info = make_case_info(case_dir, output_root, single_mode=(mode == "single"),
+                               job_mode=job_mode)
     case_info["project"] = project_name
     print(f"Case      : {case_dir.name}")
     print(f"Type      : {case_info['calculation_type']}")
@@ -2242,7 +2252,8 @@ def main():
         case_infos = []
         all_results = []
         for case_dir in case_dirs:
-            case_info = make_case_info(case_dir, output_root, single_mode=(mode == "single"))
+            case_info = make_case_info(case_dir, output_root, single_mode=(mode == "single"),
+                                       job_mode="latest")
             case_infos.append(case_info)
             all_results.append(parse_existing_job(project_name, mode, case_info))
 

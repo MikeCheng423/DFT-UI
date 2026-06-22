@@ -80,6 +80,10 @@ A simple SCF case only needs a `POSCAR`; missing `INCAR`, `KPOINTS`, and `POTCAR
 are generated during `--prepare`. Background runs print a log path under
 `vasp_auto_background_logs/`; each job's VASP stdout/stderr stays in its `run.log`.
 
+Each run is written to a **numbered job folder** (`jobs/<project>/0001_Fe`,
+`0002_Si`, …) using one global counter, so re-running never overwrites an earlier
+result. `--retry-failed` and `--parse-only` act on the latest numbered run.
+
 ### Automatic SCF convergence
 
 Scan `NELM`, then `KPOINTS` using the best `NELM`:

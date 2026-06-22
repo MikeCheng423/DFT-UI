@@ -447,7 +447,8 @@ def _case_info_for(target: Path, config: dict):
     job_root = Path(config["jobs_root"])
     output_root = job_root / info["project_name"]
     case_infos = [
-        make_case_info(case_dir, output_root, single_mode=(info["mode"] == "single"))
+        make_case_info(case_dir, output_root, single_mode=(info["mode"] == "single"),
+                       job_mode="latest")
         for case_dir in info["case_dirs"]
     ]
     return info, case_infos
@@ -557,7 +558,8 @@ def _result_case_infos(info: dict, config: dict):
             output_root = jobs_root / project
         else:
             output_root = jobs_root
-        case_infos.append(make_case_info(case_dir, output_root, single_mode=False))
+        case_infos.append(make_case_info(case_dir, output_root, single_mode=False,
+                                         job_mode="latest"))
     return info, case_infos
 
 
