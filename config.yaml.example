@@ -7,10 +7,25 @@ jobs_root: /path/to/vasp_auto/jobs                  # where job folders are writ
 potcar_root: /path/to/POTCAR                         # your VASP POTCAR library (not shipped)
 neb_images: 5
 
-# DFT engine: "vasp" (default) or "qe" (open-source Quantum ESPRESSO, pw.x).
-# Override per run with --engine, per project/case with a local config.yaml,
-# or in the UI's engine dropdown. VASP needs a licence; QE is free.
+# DFT engine: "vasp" (default), "qe" (Quantum ESPRESSO, pw.x), or "ase" (any
+# ASE calculator). Override per run with --engine, per project/case with a local
+# config.yaml, or in the UI's engine dropdown. VASP needs a licence; QE is free.
 engine: vasp
+
+# Generic ASE-calculator engine (engine: ase). Runs any code ASE can drive on
+# your structures; supports calc-types scf and relax. Needs the `ase` extra
+# (pip install "vasp-auto[builder]" or "[local]"). The calculator's own binary,
+# if any, is configured through ase_calc_params.
+# ase_calculator: emt          # emt | lj | morse | espresso | gpaw | abinit |
+#                              # castep | siesta | nwchem | vasp | mace
+# ase_calc_params: {}          # kwargs passed to the calculator, e.g. for
+#                              # Espresso: {pseudopotentials: {Si: Si.upf}, input_data: {...}}
+#                              # Reach any calculator not listed above with the
+#                              # special keys __module__ and __class__.
+# ase_fmax: 0.05               # relax force tolerance (eV/A)
+# ase_steps: 200               # relax: max optimizer steps
+# ase_python:                  # python that runs the driver (default: the one
+#                              # running vasp-auto)
 
 # Quantum ESPRESSO settings (used when engine: qe or --engine qe):
 qe_executable: /path/to/q-e/bin/pw.x   # path to the pw.x binary

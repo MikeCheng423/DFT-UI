@@ -18,7 +18,7 @@ installs only what it needs.
 | *(core, no extra)* | `PyYAML` | Remote compute node — engine only, runs VASP. |
 | `remote` | *(nothing; core is enough)* | Same as core; named so `pip install vasp-auto[remote]` reads clearly. |
 | `results` | `pandas`, `openpyxl` | You want Excel summaries of finished jobs. |
-| `builder` | `ase` | Structure builders (CLI build commands, the web Builder, the AI builder). |
+| `builder` | `ase` | Structure builders (CLI build commands, the web Builder, the AI builder) **and the `engine: ase` calculator backend** (scf/relax via any ASE calculator). |
 | `local` | `pandas`, `openpyxl`, `ase` | **Full control machine** — UI + builders + results. |
 | `ml` | `ase`, `fairchem-core` | ML pre-relax (OMat24 / UMA) before VASP. |
 | `dev` | `pytest` + the heavy deps | Running the test suite. |

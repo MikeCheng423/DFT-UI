@@ -8,6 +8,7 @@ from vasp_auto.incar import set_incar_value
 from vasp_auto.parser import parse_pw_output, parse_vasprun
 from vasp_auto.runner import (
     remote_run_mode,
+    run_ase,
     run_qe,
     run_vasp,
     run_vasp_remote,
@@ -566,12 +567,38 @@ def _build_qe_row(project_name, mode, case_info, status_override=None):
     return row
 
 
+def _build_ase_row(project_name, mode, case_info, status_override=None):
+    """Summary row for an ASE-engine job (ase_results.json), mirroring build_row."""
+    from vasp_auto.ase_engine import parse_ase_output
+
+    job_dir = Path(case_info["job_dir"])
+    summary = parse_ase_output(job_dir) or {}
+    row = {
+        "project": project_name,
+        "case": case_info["case_name"],
+        "engine": "ase",
+        "calculator": summary.get("calculator"),
+        "calculation_type": case_info.get("calculation_type", "scf"),
+        "job_dir": str(job_dir),
+        "status": status_override if status_override else ("done" if summary else "missing"),
+        "energy_eV": summary.get("energy_eV"),
+        "converged": summary.get("converged", False),
+        "ionic_steps": summary.get("ionic_steps", 0),
+    }
+    if summary.get("max_force_eV_A") is not None:
+        row["max_force_eV_A"] = summary["max_force_eV_A"]
+    return row
+
+
 def build_row(project_name, mode, case_info, status_override=None):
     if case_info.get("calculation_type") == "tss":
         return _build_neb_row(project_name, mode, case_info, status_override=status_override)
 
-    if job_engine(Path(case_info["job_dir"])) == "qe":
+    engine_name = job_engine(Path(case_info["job_dir"]))
+    if engine_name == "qe":
         return _build_qe_row(project_name, mode, case_info, status_override=status_override)
+    if engine_name == "ase":
+        return _build_ase_row(project_name, mode, case_info, status_override=status_override)
 
     job_dir = Path(case_info["job_dir"])
     outcar = job_dir / "OUTCAR"
@@ -624,8 +651,16 @@ def should_retry_failed(case_info):
             return True
         return not all(is_converged(outcar) for outcar in outcars)
 
-    if job_engine(job_dir) == "qe":
+    engine_name = job_engine(job_dir)
+    if engine_name == "qe":
         summary = parse_pw_output(job_dir / "pw.out")
+        if not summary:
+            return True
+        return not summary.get("converged", False)
+
+    if engine_name == "ase":
+        from vasp_auto.ase_engine import parse_ase_output
+        summary = parse_ase_output(job_dir)
         if not summary:
             return True
         return not summary.get("converged", False)
@@ -650,14 +685,17 @@ def run_one_case(
     remote=None,
     engine="vasp",
     qe_executable=None,
+    ase_python=None,
 ):
     job_dir = Path(case_info["job_dir"])
     executable = qe_executable if engine == "qe" else vasp_executable
 
     # Remote execution: ship every input file to another machine and run it there.
     if remote:
-        if engine == "qe":
-            raise ValueError("Remote execution currently supports VASP only, not --engine qe.")
+        if engine in ("qe", "ase"):
+            raise ValueError(
+                f"Remote execution currently supports VASP only, not --engine {engine}."
+            )
 
         # Direct SSH: run mpirun on the remote synchronously and pull results back
         # (for single-workstation machines with no working scheduler).
@@ -694,6 +732,11 @@ def run_one_case(
         return row
 
     if scheduler and scheduler != "local":
+        if engine == "ase":
+            raise ValueError(
+                "Scheduler submission is not available for --engine ase yet; run it "
+                "locally (scheduler: local)."
+            )
         submission = submit_job(
             str(job_dir),
             str(executable),
@@ -712,6 +755,15 @@ def run_one_case(
         # Quantum ESPRESSO: run pw.x; VASP error-signature auto-retry does not
         # apply, so the row is built straight from pw.out.
         return_code = run_qe(str(job_dir), str(executable), cpus=cpus, on_progress=on_progress)
+        row = build_row(project_name, mode, case_info)
+        row["return_code"] = return_code
+        return row
+
+    if engine == "ase":
+        # Generic ASE calculator: run the run_ase.py driver; results come from
+        # ase_results.json. VASP error-signature auto-retry does not apply.
+        return_code = run_ase(str(job_dir), python_exe=ase_python, cpus=cpus,
+                              on_progress=on_progress)
         row = build_row(project_name, mode, case_info)
         row["return_code"] = return_code
         return row
