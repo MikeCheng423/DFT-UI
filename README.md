@@ -25,7 +25,7 @@ Requires Python ≥ 3.12.
 ### Control machine (full stack)
 
 ```bash
-git clone <your-fork-url> vasp-auto
+git clone https://github.com/MikeCheng423/DFT-UI vasp-auto
 cd vasp-auto
 python -m venv venv && source venv/bin/activate
 pip install -e ".[local]"        # UI + structure builders + Excel results
