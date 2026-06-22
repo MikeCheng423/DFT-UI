@@ -251,6 +251,38 @@ def run_qe(job_dir: str, qe_executable: str, cpus: int | None = None, on_progres
         return process.wait()
 
 
+def run_ase(job_dir: str, python_exe: str | None = None, cpus: int | None = None,
+            on_progress=None):
+    """Run the ASE engine driver (run_ase.py) locally as a subprocess.
+
+    The driver reads POSCAR + ase_calc.json, runs the chosen ASE calculator, and
+    writes ase_results.json (the parse contract) + CONTCAR. Output is streamed to
+    run.log so the progress callback and UI log viewer behave as for VASP/QE.
+    ``cpus`` is exported as OMP_NUM_THREADS for threaded calculators (EMT and the
+    like ignore it). on_progress(line) streams output lines.
+    """
+    job_dir = Path(job_dir)
+    log_file = job_dir / "run.log"
+    driver = job_dir / "run_ase.py"
+    if not driver.exists():
+        raise FileNotFoundError(f"no run_ase.py in {job_dir}; prepare the ASE job first")
+    python = python_exe or sys.executable or "python3"
+
+    env = os.environ.copy()
+    env["OMP_NUM_THREADS"] = str(cpus if cpus is not None else 1)
+
+    with open(log_file, "w", encoding="utf-8") as log:
+        process = subprocess.Popen(
+            [python, "run_ase.py"], cwd=job_dir, env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        for line in process.stdout:
+            log.write(line)
+            if on_progress is not None:
+                on_progress(line.rstrip("\n"))
+        return process.wait()
+
+
 def write_submit_script(
     job_dir: str,
     vasp_executable: str,

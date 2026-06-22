@@ -1,8 +1,10 @@
 # vasp-auto
 
-Automated preparation, execution, and parsing of **VASP** (and Quantum ESPRESSO)
-DFT calculations — with a command-line tool, a local web UI (structure builders,
-job console, results browser), and one-command offloading to remote clusters.
+Automated preparation, execution, and parsing of **VASP** DFT calculations —
+plus open-source backends: **Quantum ESPRESSO** (`engine: qe`) and **any ASE
+calculator** (`engine: ase`). Comes with a command-line tool, a local web UI
+(structure builders, job console, results browser), and one-command offloading
+to remote clusters.
 
 vasp-auto is built around a **two-machine model**:
 

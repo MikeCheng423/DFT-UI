@@ -98,10 +98,11 @@ def parse_args():
     )
     parser.add_argument(
         "--engine",
-        choices=["vasp", "qe"],
+        choices=["vasp", "qe", "ase"],
         default=None,
-        help="DFT engine: vasp (default) or qe (open-source Quantum ESPRESSO, pw.x). "
-        "Overrides 'engine:' in config.yaml.",
+        help="DFT engine: vasp (default), qe (open-source Quantum ESPRESSO, pw.x), "
+        "or ase (any ASE calculator, set via ase_calculator/ase_calc_params in "
+        "config.yaml). Overrides 'engine:' in config.yaml.",
     )
     parser.add_argument(
         "--qe-executable",
@@ -1729,6 +1730,12 @@ def _print_preview(preview: dict):
         print(preview["pw.in"].rstrip())
         print("-------------")
         return
+    if preview.get("engine") == "ase":
+        print(f"calculator: {preview.get('calculator')}")
+        print("--- ase_calc.json ---")
+        print(preview["ase_calc.json"].rstrip())
+        print("-------------")
+        return
     print(f"POTCAR    : {preview['POTCAR']}")
     if preview.get("neb_images"):
         print(f"NEB images: {preview['neb_images']}")
@@ -1971,19 +1978,19 @@ def _process_case(case_dir, args, base_config, mode, project_name, output_root, 
     is_tss = case_info["calculation_type"] == "tss"
     converge_requested = args.converge_scf or args.converge_encut or args.converge_sigma
 
-    if engine == "qe":
-        # Quantum ESPRESSO core scope: scf/relax/vc-relax/dos/bands. The VASP-only
+    if engine in ("qe", "ase"):
+        # Non-VASP engines have a narrower scope (scf/relax). The VASP-only
         # features below are documented follow-ups.
         if is_tss:
             raise ValueError(
-                f"{case_dir.name}: TSS/NEB is not supported by the QE engine yet; use --engine vasp."
+                f"{case_dir.name}: TSS/NEB is not supported by the {engine} engine yet; use --engine vasp."
             )
         if converge_requested:
-            raise ValueError("Convergence scans are VASP-only; not yet available for --engine qe.")
+            raise ValueError(f"Convergence scans are VASP-only; not yet available for --engine {engine}.")
         if load_workflow_spec(case_dir, config, args.workflow):
-            raise ValueError("Chained workflows are VASP-only; not yet available for --engine qe.")
+            raise ValueError(f"Chained workflows are VASP-only; not yet available for --engine {engine}.")
         if args.solvation:
-            raise ValueError("--solvation (VASPsol) is not available for --engine qe.")
+            raise ValueError(f"--solvation (VASPsol) is not available for --engine {engine}.")
 
     magmom_map = parse_magmom_map(args.magmom) if args.magmom else config.get("magmom_map")
     if args.spin:
@@ -1997,8 +2004,8 @@ def _process_case(case_dir, args, base_config, mode, project_name, output_root, 
     # Detached offload: the whole calculation (incl. convergence/workflow) runs on
     # the remote engine and we return immediately, so the local host can power off.
     if remote and remote_run_mode(remote) == "ssh_detached" and not args.dry_run and not args.prepare:
-        if engine == "qe":
-            raise ValueError("Offload (ssh_detached) supports VASP only, not --engine qe.")
+        if engine in ("qe", "ase"):
+            raise ValueError(f"Offload (ssh_detached) supports VASP only, not --engine {engine}.")
         return _run_detached_offload(
             case_dir, case_info, args, config, remote, calc_type, kpoints_spec, mode, project_name,
         )
@@ -2129,7 +2136,7 @@ def _process_case(case_dir, args, base_config, mode, project_name, output_root, 
         project_name=project_name,
         mode=mode,
         case_info=case_info,
-        vasp_executable=config["vasp_executable"],
+        vasp_executable=config.get("vasp_executable"),
         cpus=args.cpus,
         scheduler=scheduler,
         job_template=config.get("job_template"),
@@ -2138,6 +2145,7 @@ def _process_case(case_dir, args, base_config, mode, project_name, output_root, 
         remote=remote,
         engine=engine,
         qe_executable=config.get("qe_executable", "pw.x"),
+        ase_python=config.get("ase_python"),
     )
     if not remote:
         print(f"Finished  : {case_dir.name}")
@@ -2200,6 +2208,8 @@ def main():
     engine = args.engine or config.get("engine", "vasp")
     if engine == "qe":
         print(f"Engine    : Quantum ESPRESSO ({config.get('qe_executable', 'pw.x')})")
+    elif engine == "ase":
+        print(f"Engine    : ASE calculator ({config.get('ase_calculator', 'emt')})")
     print(f"CPU       : {args.cpus if args.cpus else 'default'}")
     print(f"NEB images: {neb_images}")
     if calc_type:

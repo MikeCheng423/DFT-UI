@@ -425,6 +425,21 @@ def create_job_from_case(
             magmom_map=magmom_map,
         )
 
+    if engine == "ase":
+        # Generic ASE-calculator path: write run_ase.py + ase_calc.json instead of
+        # INCAR/KPOINTS/POTCAR. NEB/TSS is VASP-only for now.
+        from vasp_auto.ase_engine import create_ase_job
+        if calculation_type == "tss":
+            raise ValueError("ASE engine does not support TSS/NEB yet; use the VASP engine.")
+        return create_ase_job(
+            case_info,
+            config or {},
+            calc_type=calc_type,
+            kpoints_spec=kpoints_spec,
+            spin=spin,
+            magmom_map=magmom_map,
+        )
+
     if calculation_type == "tss":
         _copy_neb_inputs(
             case_dir,
@@ -475,6 +490,19 @@ def preview_job_from_case(
                 "Quantum ESPRESSO backend does not support TSS/NEB yet; use the VASP engine."
             )
         return preview_qe_job(
+            case_info,
+            config or {},
+            calc_type=calc_type,
+            kpoints_spec=kpoints_spec,
+            spin=spin,
+            magmom_map=magmom_map,
+        )
+
+    if engine == "ase":
+        from vasp_auto.ase_engine import preview_ase_job
+        if calculation_type == "tss":
+            raise ValueError("ASE engine does not support TSS/NEB yet; use the VASP engine.")
+        return preview_ase_job(
             case_info,
             config or {},
             calc_type=calc_type,
