@@ -1,0 +1,23 @@
+{
+  "_comment": "Copy to remotes.json (git-ignored) or, better, add machines via the web UI Remote tab or `vasp-auto-setup-remote`. One entry per remote machine.",
+  "mycluster": {
+    "host": "cluster.example.edu",
+    "user": "myuser",
+    "port": "22",
+    "remote_root": "/scratch/myuser/vasp_jobs",
+    "vasp_executable": "/opt/vasp/6.5.1/bin/vasp_std",
+    "scheduler": "slurm",
+    "run_mode": "ssh_detached",
+    "env_setup": "module load vasp"
+  },
+  "myworkstation": {
+    "host": "192.168.1.50",
+    "user": "myuser",
+    "port": "22",
+    "remote_root": "/home/myuser/runs",
+    "vasp_executable": "/usr/local/bin/vasp_std",
+    "scheduler": "slurm",
+    "run_mode": "ssh",
+    "env_setup": "source /opt/intel/oneapi/setvars.sh"
+  }
+}

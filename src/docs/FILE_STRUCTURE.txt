@@ -1,0 +1,111 @@
+============================================================================
+vasp_auto — OVERALL CODE STRUCTURE
+============================================================================
+
+Introduction
+------------
+`vasp_auto` is a Python toolkit that automates preparing, running and parsing
+VASP DFT calculations (with a Quantum ESPRESSO engine alongside). It turns a
+bare POSCAR into a full input set (INCAR / KPOINTS / POTCAR), launches the run
+locally or on a remote HPC machine, parses the output, and writes an Excel
+summary. The same engine is driven three ways:
+
+    vasp-auto                CLI            -> vasp_auto.cli:main
+    vasp-auto-ui             web UI         -> vasp_auto_ui.server:main
+    vasp-auto-setup-remote   remote setup   -> vasp_auto.remote_setup:main
+
+The engine (`src/vasp_auto/`) is the single source of truth; both the CLI and
+the web UI call the same functions, so they behave identically.
+
+For the authoritative, always-current module-by-module description and the
+list of known problems / next jobs, see CLAUDE.md in this directory. This file
+is the directory map; CLAUDE.md is the narrative.
+
+----------------------------------------------------------------------------
+Top-level tree
+----------------------------------------------------------------------------
+vasp_auto/
+|-- README.txt                 project entry / quick-start
+|-- config.yaml                global defaults + per-case / remotes config
+|-- remotes.json               remote-machine inventory (read by the UI)
+|-- pyproject.toml             package metadata + the 3 console scripts
+|-- pytest.ini                 test config
+|-- vasp_auto                  convenience launcher script
+|-- ase-gui                    ASE GUI launcher script
+|
+|-- src/                       ALL Python source lives here
+|   |-- vasp_auto/             the engine package (see below)
+|   |-- vasp_auto_ui/          the localhost web app
+|   |   |-- server.py          HTTP server + /api/* endpoints
+|   |   |-- __init__.py
+|   |   `-- static/index.html  single dependency-free HTML/JS front end
+|   `-- docs/                  developer / code-structure docs (this folder)
+|       |-- CLAUDE.md          architecture, conventions, work loop (canonical)
+|       |-- FILE_STRUCTURE.txt  this file
+|       |-- VASP_AUTO_CAPABILITIES.md
+|       |-- VASP_AUTO_COMMAND_AND_STRUCTURE.txt
+|       `-- Rebuild.md         results/workflow UI redesign spec
+|
+|-- docs/                      user-facing prose (manuals + tutorials)
+|   |-- MANUAL.md
+|   |-- TUTORIAL_*.md, TUTORIALS_INDEX.md
+|   |-- PORTABILITY.md
+|   `-- IMPROVEMENT_MEMO.md
+|
+|-- example/                   reference INCAR templates (scf/dos/optimize/...)
+|-- inputs/                    source calculation cases (hand-authored)
+|-- jobs/                      generated job outputs + summaries (do not commit)
+|-- TSS/                       NEB / transition-state example inputs and jobs
+|-- POTCAR/                    per-element POTCAR library (proprietary)
+|-- tests/                     pytest suite
+|-- selfcheck/                 self-check job fixtures
+|-- ui_logs/                   logs from runs launched by the web UI
+|-- _archive/                  historical outputs, not source
+`-- .venv/, venv/              local virtualenvs (generated)
+
+----------------------------------------------------------------------------
+The engine: src/vasp_auto/  (23 modules)
+----------------------------------------------------------------------------
+Entry / orchestration
+  cli.py            argparse entry point, orchestrates everything
+  calc_types.py     CalcType enum + descriptions + per-type chain inputs
+  config_loader.py  config.yaml search, normalisation, per-case merging
+  target_utils.py   case-type detection, project vs single mode
+
+Input preparation
+  job_manager.py    input-file prep, INCAR templates, dry-run preview
+  incar.py          INCAR editing helpers (set_incar_value, spin/MAGMOM)
+  kpoints.py        KPOINTS generation (gamma/MP mesh, density, line-mode)
+  potcar_finder.py  POTCAR library lookup, variant map, concatenation
+  structure.py      pure-Python POSCAR tools (supercell, vacancy, substitution,
+                    interstitial, prototypes, supercell matching, adsorbates)
+  ase_tools.py      ASE import + bulk/slab/molecule/crystal/nanotube builders
+  ml_tools.py       MLIP pre-relax/screening (fairchem UMA/OMat24, EMT demo)
+
+Execution
+  runner.py         mpirun invocation + SLURM/PBS submit scripts; remote checks
+  remote_setup.py   `vasp-auto-setup-remote`: SSH keys + register a remote
+  workflow.py       OUTCAR parsing, error detection + auto-retry, run-one-case
+  convergence.py    automatic ENCUT + SIGMA + NELM + KPOINTS scan
+  chain.py          chained workflows (converge -> relax -> scf -> dos)
+
+Output / analysis
+  parser.py         vasprun.xml parsing (PDOS, bands, k-point labels)
+  analysis.py       adsorption energy, vib thermochemistry, d-band, work func
+  chgcar.py         CHGCAR/LOCPOT/AECCAR volumetrics + Bader helper
+  trajectory.py     XDATCAR/NEB frames -> cartesian animation data
+  report.py         per-job Markdown calculation report (--report)
+  excel_writer.py   pandas -> styled Excel summary + energy bar chart
+
+Other engine
+  qe_tools.py       Quantum ESPRESSO (pw.x) engine: POSCAR -> pw.in, UPF pseudos
+
+----------------------------------------------------------------------------
+Notes
+----------------------------------------------------------------------------
+- src/vasp_auto/ is the active package; the CLI and UI both import it.
+- inputs/ is authored by the user; jobs/ is generated output (never committed).
+- POTCAR/ is proprietary: never commit it, never print its contents.
+- .venv/, venv/, __pycache__/, *.egg-info/ and logs are local/generated.
+- Keep this map and CLAUDE.md in sync whenever modules are added or moved.
+============================================================================

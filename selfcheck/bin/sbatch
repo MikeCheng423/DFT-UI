@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Fake sbatch for the selfcheck.
+echo "Submitted batch job 4242"
