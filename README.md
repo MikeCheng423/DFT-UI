@@ -104,7 +104,7 @@ Trials and a `scf_convergence_report.md` / `.csv` are written under
 
 ## Web UI highlights
 
-`vasp-auto-ui` provides a MedeA-style front end:
+`vasp-auto-ui` provides a front end:
 
 - **Structure builders** — bulk, surface/slab, molecule, nanotube, space-group
   crystal, Materials Project search, interface combine, adsorption.
