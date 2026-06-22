@@ -131,6 +131,5 @@ bash selfcheck/run_selfcheck.sh     # end-to-end with fake binaries
 
 ## License
 
-No license file is included yet — add one before publishing if you intend others
-to reuse the code. Note again that VASP/POTCAR are separately licensed and not
-distributed here.
+Released under the [MIT License](LICENSE). Note that VASP and its POTCAR
+pseudopotentials are separately licensed and are **not** distributed here.
