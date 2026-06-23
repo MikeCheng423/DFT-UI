@@ -233,12 +233,19 @@
         <div id="fnlist"></div>
       </div>
       <div class="card buildfn" id="fn-ai" style="display:none">
-        <h3>✨ AI builder <span style="text-transform:none">(Groq)</span></h3>
+        <h3>✨ AI builder <span style="text-transform:none">(any AI API)</span></h3>
         <p class="sub">Describe the structure in plain words and the AI turns it into a build command — bulk, surface, molecule, nanotube, an adsorbate on a slab, or a combined interface. The result loads into the editor; review and 💾 Save when happy. The AI only picks the recipe — coordinates are always built exactly by the code.</p>
-        <span class="inline wide"><label>Groq API key</label><input id="ai-key" type="password" placeholder="gsk_…  (stored in this browser only)" style="width:200px" oninput="localStorage.setItem('va-groq-key', this.value)" title="Get a free key at console.groq.com. Kept in this browser's localStorage; sent to the server only to make the call. Leave blank to use the GROQ_API_KEY env var on the server."></span>
-        <p class="sub">Free key from <code>console.groq.com</code>. Kept in this browser only; never written to disk on the server.</p>
+        <span class="inline"><label>provider</label><select id="ai-provider" onchange="aiProviderChanged()" title="Any OpenAI-compatible chat API. Pick a preset, or 'Custom…' to point at any endpoint (e.g. a local Ollama / LM Studio / vLLM server)."></select></span>
+        <span class="inline"><label>API key</label><input id="ai-key" type="password" placeholder="paste key (browser only)" style="width:170px" oninput="aiSaveKey()" title="Kept in this browser's localStorage, per provider; sent to the server only to make the call. Leave blank to use the provider's env var on the server. Local servers need no key."></span>
+        <span class="inline wide" id="ai-baseurl-wrap" style="display:none"><label>base URL</label><input id="ai-baseurl" placeholder="https://host/v1/chat/completions" style="width:260px" oninput="aiSaveField()" title="Full OpenAI-compatible chat-completions endpoint."></span>
+        <span class="inline"><label>model</label><input id="ai-model" placeholder="(provider default)" style="width:200px" oninput="aiSaveField()" title="Optional model id override; leave blank to use the provider's default for the selected mode."></span>
+        <p class="sub" id="ai-provider-hint" style="margin:4px 0 8px"></p>
         <span class="inline wide"><label>describe the structure</label><input id="ai-text" placeholder="Pt(111) slab, 4 layers, 3x3, with O adsorbed on top" onkeydown="if(event.key==='Enter')nlBuild()"></span>
         <div class="sub" style="margin:4px 0 8px">Try: <code>bulk fcc copper</code> · <code>CO2 molecule</code> · <code>(5,5) carbon nanotube</code> · <code>graphene under a 2x2 Au fcc(111) slab</code></div>
+        <span class="inline"><label>mode</label><select id="ai-mode" title="Quick = one build command (fast, simple requests; uses the provider's small model). Worker = a tool-calling agent that composes several steps for open-ended requests; needs a tool-capable model.">
+          <option value="quick">Quick · 1 step</option>
+          <option value="agent">Worker · agent (multi-step)</option>
+        </select></span>
         <button class="act" onclick="nlBuild()">✨ Build → editor</button>
         <div id="ai-msg" class="sub" style="margin-top:8px"></div>
       </div>
@@ -487,15 +494,21 @@
     <div class="grow">
       <div class="card">
         <h3>DFT engine</h3>
-        <p class="sub">VASP needs a paid licence. Quantum ESPRESSO (pw.x) is free and open source — pick it if you don't have VASP.</p>
+        <p class="sub">VASP needs a paid licence. Quantum ESPRESSO (pw.x) is free and open source. <b>ASE calculator</b> connects to any code ASE can drive (EMT, Quantum ESPRESSO, GPAW, ABINIT, CASTEP, SIESTA, NWChem, MACE …) — pick the calculator and point at its binary.</p>
         <span class="inline"><label>engine</label>
-          <select id="c-engine" onchange="engineChanged()" title="VASP writes INCAR/KPOINTS/POTCAR; Quantum ESPRESSO writes pw.in + UPF pseudopotentials">
+          <select id="c-engine" onchange="engineChanged()" title="VASP writes INCAR/KPOINTS/POTCAR; Quantum ESPRESSO writes pw.in; ASE writes a run_ase.py driver that attaches the chosen ASE calculator.">
             <option value="vasp">VASP</option>
             <option value="qe">Quantum ESPRESSO (pw.x)</option>
+            <option value="ase">ASE calculator (any code)</option>
           </select></span>
         <span class="inline wide qe-only" style="display:none"><label>pw.x path (optional)</label><input id="c-qe-exe" placeholder="pw.x" title="Path to the Quantum ESPRESSO pw.x binary"></span>
         <span class="inline wide qe-only" style="display:none"><label>pseudopotential dir (UPF)</label><input id="c-pseudo" placeholder="/path/to/pseudo" title="Directory of .UPF pseudopotentials (or set pseudo_dir in config.yaml)"></span>
         <p class="sub qe-only" style="display:none">QE supports scf, relax, vc-relax, dos, bands. NEB/phonon/convergence scans are VASP-only for now.</p>
+        <span class="inline ase-only" style="display:none"><label>ASE calculator</label>
+          <select id="c-ase-calc" onchange="aseCalcChanged()" title="The ASE calculator class to attach. 'emt' needs no external code and runs anywhere."></select></span>
+        <span class="inline wide ase-only" style="display:none"><label>calculation path / command</label><input id="c-ase-command" placeholder="e.g. pw.x   or   mpirun -np 4 pw.x" title="Run command or binary path for the calculator (sets ase_calc_params.command). Leave blank for in-process calculators like emt, gpaw, mace."></span>
+        <span class="inline wide ase-only" style="display:none"><label>extra params (JSON, optional)</label><input id="c-ase-params" oninput="aseParamsEdited()" placeholder='{"xc":"PBE","kpts":[4,4,4]}' title="Extra keyword args for the calculator, merged into ase_calc_params. Selecting a calculator pre-fills sensible defaults you can edit. Use the special keys __module__/__class__ to reach a calculator not in the menu."></span>
+        <p class="sub ase-only" style="display:none">ASE supports <b>scf</b> and <b>relax</b> only (single-point energy / BFGS). Writes CONTCAR + ase_results.json. Make sure the chosen code (and ASE) is installed where the job runs.</p>
       </div>
       <div class="card">
         <h3>What do you want to calculate?</h3>
@@ -870,10 +883,6 @@ function banner(msg, kind) {
 }
 function dismissWelcome() { $("welcome").style.display = "none"; localStorage.setItem("va-welcome", "1"); }
 if (localStorage.getItem("va-welcome")) document.addEventListener("DOMContentLoaded", () => { $("welcome").style.display = "none"; });
-document.addEventListener("DOMContentLoaded", () => {
-  const saved = localStorage.getItem("va-groq-key");
-  if (saved && $("ai-key")) $("ai-key").value = saved;
-});
 $("themebtn").onclick = () => {
   document.body.classList.toggle("light");
   localStorage.setItem("va-theme", document.body.classList.contains("light") ? "light" : "dark");
@@ -890,7 +899,15 @@ async function api(path, body, silent) {
   let res, data;
   try { res = await fetch(path, opts); data = await res.json(); }
   catch (e) { if (!silent) banner("Cannot reach the vasp_auto server — is it still running?"); throw e; }
-  if (data.error) { if (!silent) banner(data.error); throw new Error(data.error); }
+  if (data.error) {
+    if (!silent) {
+      const stale = res.status === 404 && /Unknown endpoint/.test(data.error);
+      banner(stale
+        ? data.error + " — this server is running an older build. Restart vasp-auto-ui to load it."
+        : data.error);
+    }
+    throw new Error(data.error);
+  }
   return data;
 }
 
@@ -917,10 +934,17 @@ async function init() {
   for (const m of (META.ml_models || [])) mlSel.add(new Option(m.label || m.name, m.name));
   // default to the configured/engine default if it's installable here, else the first (emt)
   if ([...mlSel.options].some(o => o.value === META.ml_model_default)) mlSel.value = META.ml_model_default;
+  initAiProviders();
   $("c-sched").value = META.config.scheduler || "local";
   $("c-engine").value = META.config.engine || "vasp";
   if (META.config.qe_executable) $("c-qe-exe").placeholder = META.config.qe_executable;
   if (META.config.pseudo_dir) $("c-pseudo").placeholder = META.config.pseudo_dir;
+  const aseSel = $("c-ase-calc");
+  for (const c of (META.ase_calculators || [])) aseSel.add(new Option(c, c));
+  if ([...aseSel.options].some(o => o.value === META.config.ase_calculator))
+    aseSel.value = META.config.ase_calculator;
+  if (META.config.ase_command) $("c-ase-command").value = META.config.ase_command;
+  aseCalcChanged();   // seed default params/command hint for the selected calculator
   engineChanged();
   if (META.config.jobs_root) $("r-root").value = META.config.jobs_root;
   await refreshCases();
@@ -1777,16 +1801,98 @@ async function built(data) {      // for builders that do write folders (NEB, ML
   await refreshCases(data.case);
   banner("Created " + data.case, "info");
 }
+/* ---------- AI builder: any OpenAI-compatible provider ---------- */
+let AI_PROVIDERS = {};
+function aiKeyStore() { return "va-ai-key:" + ($("ai-provider").value || "groq"); }
+function aiModelStore() { return "va-ai-model:" + ($("ai-provider").value || "groq"); }
+function aiSaveKey() { localStorage.setItem(aiKeyStore(), $("ai-key").value); }
+function aiSaveField() {
+  localStorage.setItem(aiModelStore(), $("ai-model").value);
+  localStorage.setItem("va-ai-baseurl", $("ai-baseurl").value);
+}
+function initAiProviders() {
+  const sel = $("ai-provider");
+  if (!sel) return;
+  sel.innerHTML = "";
+  AI_PROVIDERS = {};
+  for (const p of (META.ai_providers || [])) {
+    AI_PROVIDERS[p.name] = p;
+    sel.add(new Option(p.label, p.name));
+  }
+  sel.add(new Option("Custom… (any endpoint)", "custom"));
+  const saved = localStorage.getItem("va-ai-provider");
+  sel.value = (saved && [...sel.options].some(o => o.value === saved))
+    ? saved : (META.ai_provider_default || "groq");
+  $("ai-baseurl").value = localStorage.getItem("va-ai-baseurl") || "";
+  const savedMode = localStorage.getItem("va-ai-mode");
+  if (savedMode) $("ai-mode").value = savedMode;
+  $("ai-mode").addEventListener("change", () =>
+    localStorage.setItem("va-ai-mode", $("ai-mode").value));
+  aiProviderChanged();
+}
+function aiProviderChanged() {
+  const name = $("ai-provider").value;
+  const p = AI_PROVIDERS[name];
+  localStorage.setItem("va-ai-provider", name);
+  $("ai-baseurl-wrap").style.display = (name === "custom") ? "" : "none";
+  // restore the per-provider key (legacy groq key as a fallback) and model
+  $("ai-key").value = localStorage.getItem(aiKeyStore())
+    || (name === "groq" ? (localStorage.getItem("va-groq-key") || "") : "");
+  $("ai-model").value = localStorage.getItem(aiModelStore()) || "";
+  $("ai-key").placeholder = (p && p.local) ? "(none needed)" : "paste key (browser only)";
+  let hint = "";
+  if (name === "custom") {
+    hint = "Point base URL at any OpenAI-compatible chat-completions endpoint (e.g. a local Ollama / LM Studio / vLLM server).";
+  } else if (p) {
+    hint = "Default model: <code>" + p.model + "</code> (quick) · <code>" + p.agent_model + "</code> (worker).";
+    if (p.local) hint += " Local server — no key needed.";
+    else if (p.key_env) hint += " Leave key blank to use the <code>" + p.key_env + "</code> env var on the server.";
+  }
+  $("ai-provider-hint").innerHTML = hint;
+}
 function nlBuild() {
   const text = $("ai-text").value.trim();
   if (!text) { banner("Describe the structure you want to build."); return; }
-  const key = $("ai-key").value.trim() || localStorage.getItem("va-groq-key") || "";
+  const provider = $("ai-provider").value;
+  const base_url = provider === "custom" ? ($("ai-baseurl").value.trim() || null) : null;
+  const key = $("ai-key").value.trim() || null;
+  const model = $("ai-model").value.trim() || null;
+  const mode = $("ai-mode") ? $("ai-mode").value : "quick";
+  const common = { text, api_key: key, provider, base_url, model };
   const msg = $("ai-msg");
-  msg.textContent = "✨ thinking…";
-  api("/api/nl_build", { text, api_key: key })
+  const nameHint = text.slice(0, 24).replace(/[^A-Za-z0-9]+/g, "_").replace(/^_|_$/g, "") || "ai_build";
+  msg.textContent = mode === "quick" ? "✨ thinking…" : "🤖 working…";
+  if (mode === "quick") {
+    api("/api/nl_build", common)
+      .then(d => {
+        intoEditor(d, nameHint);
+        msg.innerHTML = "";
+        const plan = document.createElement("div");
+        plan.innerHTML = "<b>AI plan:</b> ";
+        plan.appendChild(document.createTextNode(d.summary || ""));
+        const code = document.createElement("code");
+        code.style.display = "block";
+        code.textContent = JSON.stringify(d.command);
+        msg.append(plan, code);
+      })
+      .catch(() => { msg.textContent = ""; });   // banner() already showed the error
+    return;
+  }
+  api("/api/nl_agent", common)
     .then(d => {
-      intoEditor(d, text.slice(0, 24).replace(/[^A-Za-z0-9]+/g, "_").replace(/^_|_$/g, "") || "ai_build");
-      msg.textContent = "Built: " + JSON.stringify(d.command);
+      intoEditor(d, nameHint);
+      msg.innerHTML = "";
+      const head = document.createElement("div");
+      head.innerHTML = "<b>Worker steps:</b>";
+      msg.append(head);
+      const ol = document.createElement("ol");
+      ol.style.margin = "4px 0 0 18px";
+      for (const step of (d.transcript || [])) {
+        const li = document.createElement("li");
+        li.textContent = step.tool + "(" + JSON.stringify(step.args) + ") → " + step.result;
+        ol.appendChild(li);
+      }
+      msg.append(ol);
     })
     .catch(() => { msg.textContent = ""; });   // banner() already showed the error
 }
@@ -2078,8 +2184,29 @@ function kSpec() {
 }
 function curEngine() { return $("c-engine") ? $("c-engine").value : "vasp"; }
 function engineChanged() {
-  const qe = curEngine() === "qe";
-  document.querySelectorAll(".qe-only").forEach(e => e.style.display = qe ? "" : "none");
+  const e = curEngine();
+  document.querySelectorAll(".qe-only").forEach(el => el.style.display = e === "qe" ? "" : "none");
+  document.querySelectorAll(".ase-only").forEach(el => el.style.display = e === "ase" ? "" : "none");
+}
+// Sensible per-calculator defaults pre-filled into the params/command fields.
+const ASE_PARAM_DEFAULTS = {
+  dmol3: { functional: "pbe", basis: "dnd", symmetry: "off" },
+};
+const ASE_COMMAND_HINTS = {
+  dmol3: "RunDMol3.sh PREFIX > PREFIX.out",   // must contain PREFIX (ASE substitutes the label)
+};
+let aseParamsAuto = true;   // false once the user hand-edits the params field
+function aseParamsEdited() { aseParamsAuto = false; }
+function aseCalcChanged() {
+  const name = $("c-ase-calc") ? $("c-ase-calc").value : "";
+  const cmd = $("c-ase-command"), params = $("c-ase-params");
+  if (cmd) cmd.placeholder = ASE_COMMAND_HINTS[name] || "e.g. pw.x   or   mpirun -np 4 pw.x";
+  // Pre-fill the default JSON, but never clobber a value the user typed.
+  if (params && (aseParamsAuto || !params.value.trim())) {
+    const def = ASE_PARAM_DEFAULTS[name];
+    params.value = def ? JSON.stringify(def) : "";
+    aseParamsAuto = true;
+  }
 }
 function runPayload(mode) {
   return {
@@ -2087,6 +2214,9 @@ function runPayload(mode) {
     engine: curEngine(),
     qe_executable: $("c-qe-exe").value || null,
     pseudo_dir: $("c-pseudo").value || null,
+    ase_calculator: $("c-ase-calc") ? ($("c-ase-calc").value || null) : null,
+    ase_command: $("c-ase-command") ? ($("c-ase-command").value.trim() || null) : null,
+    ase_params: $("c-ase-params") ? ($("c-ase-params").value.trim() || null) : null,
     calc_type: calcType === "scf" ? null : calcType,
     kpoints: kSpec(),
     cpus: $("c-cpus").value || null, parallel: $("c-par").value || null,

@@ -118,6 +118,42 @@ def parse_args():
         "(overrides config pseudo_dir).",
     )
     parser.add_argument(
+        "--ase-calculator",
+        default=None,
+        metavar="NAME",
+        help="ASE calculator for the ase engine, e.g. emt, espresso, gpaw, mace "
+        "(overrides config ase_calculator).",
+    )
+    parser.add_argument(
+        "--ase-command",
+        default=None,
+        metavar="PATH",
+        help="Run command / binary path for the ASE calculator (overrides "
+        "ase_calc_params.command), e.g. 'pw.x' or 'mpirun -np 4 pw.x'.",
+    )
+    parser.add_argument(
+        "--ase-params",
+        default=None,
+        metavar="JSON",
+        help="Extra ASE calculator keyword args as a JSON object, merged into "
+        'ase_calc_params, e.g. \'{"xc":"PBE","kpts":[4,4,4]}\'. Use the special '
+        'keys "__module__"/"__class__" to reach a calculator not in the menu.',
+    )
+    parser.add_argument(
+        "--ase-fmax",
+        default=None,
+        type=float,
+        metavar="EV_PER_A",
+        help="Force tolerance (eV/A) for the ase engine's relax (overrides ase_fmax).",
+    )
+    parser.add_argument(
+        "--ase-steps",
+        default=None,
+        type=int,
+        metavar="N",
+        help="Max optimizer steps for the ase engine's relax (overrides ase_steps).",
+    )
+    parser.add_argument(
         "--prepare",
         action="store_true",
         help="Prepare jobs only, do not run VASP.",
@@ -1836,6 +1872,27 @@ def resolve_engine(args, config) -> tuple[str, dict]:
         overrides["qe_executable"] = args.qe_executable
     if args.pseudo_dir:
         overrides["pseudo_dir"] = str(Path(args.pseudo_dir).expanduser().resolve())
+    if getattr(args, "ase_calculator", None):
+        overrides["ase_calculator"] = args.ase_calculator
+    if getattr(args, "ase_fmax", None) is not None:
+        overrides["ase_fmax"] = args.ase_fmax
+    if getattr(args, "ase_steps", None) is not None:
+        overrides["ase_steps"] = args.ase_steps
+    # ase_calc_params is a dict: start from config, merge --ase-params JSON, then
+    # set the command path. So --ase-command and explicit params compose cleanly.
+    ase_params = dict(config.get("ase_calc_params") or {})
+    if getattr(args, "ase_params", None):
+        try:
+            extra = json.loads(args.ase_params)
+        except ValueError as exc:
+            raise SystemExit(f"--ase-params is not valid JSON: {exc}") from None
+        if not isinstance(extra, dict):
+            raise SystemExit("--ase-params must be a JSON object (e.g. '{\"xc\":\"PBE\"}').")
+        ase_params.update(extra)
+    if getattr(args, "ase_command", None):
+        ase_params["command"] = args.ase_command
+    if ase_params != (config.get("ase_calc_params") or {}):
+        overrides["ase_calc_params"] = ase_params
     if overrides:
         config = {**config, **overrides}
     return engine, config
@@ -1860,6 +1917,20 @@ def _forward_calc_flags(args) -> list[str]:
         add("--calc-type", args.calc_type)
     if getattr(args, "engine", None):
         add("--engine", args.engine)
+    if getattr(args, "qe_executable", None):
+        add("--qe-executable", args.qe_executable)
+    if getattr(args, "pseudo_dir", None):
+        add("--pseudo-dir", args.pseudo_dir)
+    if getattr(args, "ase_calculator", None):
+        add("--ase-calculator", args.ase_calculator)
+    if getattr(args, "ase_command", None):
+        add("--ase-command", args.ase_command)
+    if getattr(args, "ase_params", None):
+        add("--ase-params", args.ase_params)
+    if getattr(args, "ase_fmax", None) is not None:
+        add("--ase-fmax", args.ase_fmax)
+    if getattr(args, "ase_steps", None) is not None:
+        add("--ase-steps", args.ase_steps)
 
     converge = bool(args.converge_scf or args.converge_encut or args.converge_sigma)
     if args.converge_scf:
@@ -2244,9 +2315,10 @@ def main():
         print(f"Conv. scan: enabled (tol {args.energy_tol} eV)")
     print()
 
-    output_root = job_root / project_name
-    if mode == "project":
-        output_root.mkdir(parents=True, exist_ok=True)
+    # Every job lands directly under the jobs root as a numbered folder
+    # (jobs/0001_Fe, jobs/0002_Si …) — no per-project sub-folder. One machine
+    # keeps one global number list, regardless of project or calculation engine.
+    output_root = job_root
 
     if args.parse_only:
         case_infos = []

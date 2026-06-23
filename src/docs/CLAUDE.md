@@ -86,22 +86,21 @@ jobs/                   generated job directories + Excel summaries
 TSS/                    NEB example inputs and jobs
 POTCAR/                 per-element POTCAR library (POTCAR/<El>/POTCAR)
 example/                INCAR templates (scf, dos, optimize, charge_density)
-docs/                   user-facing prose: MANUAL, TUTORIAL_*, PORTABILITY,
-                        IMPROVEMENT_MEMO (manuals / readmes / tutorials)
+docs/                   user-facing prose: MANUAL, TUTORIAL_*, PORTABILITY
+                        (manuals / tutorials)
 src/docs/               developer / code-structure docs: this CLAUDE.md,
                         VASP_AUTO_CAPABILITIES, FILE_STRUCTURE,
-                        VASP_AUTO_COMMAND_AND_STRUCTURE, Rebuild
+                        VASP_AUTO_COMMAND_AND_STRUCTURE
 _archive/               historical outputs, not source
 ```
 
 ### Documentation layout (where .md files live)
 
 - **`src/docs/`** — anything describing the *code structure* of the engine:
-  this `CLAUDE.md`, capability/command/file-structure references, and the
-  `Rebuild` UI redesign spec. Edit these when the architecture changes.
+  this `CLAUDE.md` and the capability/command/file-structure references.
+  Edit these when the architecture changes.
 - **`docs/`** — anything a *user* reads: `MANUAL.md`, the `TUTORIAL_*` series,
-  `PORTABILITY.md`, `IMPROVEMENT_MEMO.md`. Edit these when behaviour or usage
-  changes.
+  and `PORTABILITY.md`. Edit these when behaviour or usage changes.
 
 ---
 
@@ -172,9 +171,8 @@ _archive/               historical outputs, not source
  into the later steps; `api_run` accepts a `workflow_yaml` it writes to the
 > case; the Workflow tab got a Converge→…→DOS preset + a convergence-settings
 > panel (the Calculate tab already had a standalone scan). Tests: 251 total;
-> selfcheck check 28 (47 total). See `docs/IMPROVEMENT_MEMO.md` for the
-> remaining backlog (symmetry k-paths, queue polling, dataclass rows,
-> solvation). An eleventh pass (v0.9.0, 2026-06-14) fixed and added:
+> selfcheck check 28 (47 total). Remaining backlog at that point: symmetry
+> k-paths, queue polling, dataclass rows, solvation. An eleventh pass (v0.9.0, 2026-06-14) fixed and added:
 > **NEB retry** (`should_retry_failed` now excludes both first and last endpoint
 > dirs; `_build_neb_row` uses `_neb_image_energy` that falls back OUTCAR→OSZICAR
 > →vasprun.xml for endpoint energies); **phonon description** corrected to DFPT
@@ -183,8 +181,7 @@ _archive/               historical outputs, not source
 > query (`runner.poll_job_status`, SLURM/PBS, graceful unknown when binary
 > absent); **`--kpath auto`** pure-Python lattice-type heuristic
 > (`kpoints.guess_lattice_type`/`auto_kpath`, no spglib); **`--solvation`**
-> implicit solvent via VASPsol (`LSOL`/`EB_K`, `--solvation-eps`);
-> **`docs/IMPROVEMENT_MEMO.md`** created (was referenced but missing).
+> implicit solvent via VASPsol (`LSOL`/`EB_K`, `--solvation-eps`).
 > Tests: 281 total; selfcheck: 47 (unchanged). A twelfth pass (2026-06-16)
 > added an **open-source DFT engine: Quantum ESPRESSO (pw.x)** so users without
 > a VASP licence can run the same cases: new `qe_tools.py` (POSCAR->pw.in
@@ -199,7 +196,7 @@ _archive/               historical outputs, not source
 > VASP-only, guarded with clear errors). Tests: `tests/test_qe.py` (21);
 > selfcheck checks 29-30 (fake `pw.x` + UPF stubs, 55 total). Docs: MANUAL.md
 > "Open-source engine" section, `example/pw_scf.in`, config.yaml QE block.
-> A thirteenth pass (2026-06-18, per `Rebuild.md`) **rebuilt the Results tab and
+> A thirteenth pass (2026-06-18) **rebuilt the Results tab and
 > connected the Workflow tab to remote machines**. Results: one unified table
 > across **All machines / Local / one remote** (`r-machine` gained an "All
 > machines" option that aggregates local `/api/results` + each remote's
@@ -585,7 +582,7 @@ add any follow-up that surfaced. Keep this list current on every code change.
 - [ ] Workflow page does not reach the remote machine: clicking **Run Workflow**
       on a selected case must submit to the chosen remote, not run locally.
 
-### Results page rebuild (from `src/docs/Rebuild.md`)
+### Results page rebuild
 - [ ] List results by date (no other sort option).
 - [ ] Clicking a file name opens the remote folder, shows the file, allows download.
 - [ ] Redesign the Results list; make all fonts clear.
@@ -593,7 +590,7 @@ add any follow-up that surfaced. Keep this list current on every code change.
 - [ ] Per-page count, from-date/to-date range, and search-by-case-name inputs.
 - [ ] Remove the "Energy per case" box; clarify or remove the "Analysis" box.
 
-### ML / MLIP (from `src/MEMO.txt`)
+### ML / MLIP
 - [ ] fairchem-core 2.21.0 is installed; UMA weights are gated on Hugging Face.
       Once an HF token is available, run a UMA relax on `inputs/Au13_uma`
       (`--ml-model uma-s-1p1 --ml-task omat`) and compare against EMT and the

@@ -97,6 +97,8 @@ def _config() -> dict:
 # ---------------------------------------------------------------- API helpers
 
 def api_meta(_query, _body):
+    from vasp_auto.ai_providers import DEFAULT_PROVIDER, provider_catalog
+    from vasp_auto.ase_engine import ASE_CALCULATORS, ASE_SUPPORTED_CALC_TYPES
     from vasp_auto.ml_tools import ML_MODELS
 
     config = _config()
@@ -105,6 +107,10 @@ def api_meta(_query, _body):
         "calc_type_info": {t.value: CALC_TYPE_INFO.get(t, "") for t in CalcType},
         "kpath_presets": sorted(KPATH_PRESETS),
         "ml_models": ML_MODELS,
+        "ai_providers": provider_catalog(),
+        "ai_provider_default": DEFAULT_PROVIDER,
+        "ase_calculators": list(ASE_CALCULATORS),
+        "ase_calc_types": list(ASE_SUPPORTED_CALC_TYPES),
         # UI default: the user's configured model if set, else 'emt' (always runs,
         # no download) — the gated UMA models would otherwise fail on first click.
         "ml_model_default": config.get("ml_model") or "emt",
@@ -119,6 +125,8 @@ def api_meta(_query, _body):
             "potcar_root": config.get("potcar_root"),
             "scheduler": config.get("scheduler", "local"),
             "potcar_map": config.get("potcar_map") or {},
+            "ase_calculator": config.get("ase_calculator") or "emt",
+            "ase_command": (config.get("ase_calc_params") or {}).get("command"),
         },
     }
 
@@ -204,15 +212,42 @@ def api_structure_save(_query, body):
 
 
 def api_nl_build(_query, body):
-    """AI builder chatbox: free text -> Groq -> JSON command -> ASE-built
-    structure for the editor. Nothing is written. The Groq key comes from the
-    request (`api_key`, pasted in the UI) or the GROQ_API_KEY env var."""
-    from vasp_auto.nl_builder import build_from_text
+    """AI builder chatbox: free text -> AI API -> JSON command -> ASE-built
+    structure for the editor. Nothing is written. The endpoint, key and model
+    come from the request (`provider`/`base_url`/`api_key`/`model`, set in the
+    UI) or the provider's env var — any OpenAI-compatible API works."""
+    from vasp_auto.nl_builder import build_from_text, describe_command
 
     cmd, struct = build_from_text(
-        str(body.get("text", "")), api_key=(body.get("api_key") or None)
+        str(body.get("text", "")),
+        api_key=(body.get("api_key") or None),
+        provider=(body.get("provider") or None),
+        base_url=(body.get("base_url") or None),
+        model=(body.get("model") or None),
     )
-    return {"command": cmd, "structure": _struct_payload(struct)}
+    return {
+        "command": cmd,
+        "summary": describe_command(cmd),
+        "structure": _struct_payload(struct),
+    }
+
+
+def api_nl_agent(_query, body):
+    """AI builder, agentic mode: free text -> tool-calling worker that composes
+    the structure primitives step by step. Returns the finished structure plus
+    the transcript of tool calls. Nothing is written. `provider`/`base_url`/
+    `model` pick the AI API and model (any OpenAI-compatible function-calling
+    endpoint; needs a tool-capable model)."""
+    from vasp_auto.nl_agent import agent_build_from_text
+
+    struct, transcript = agent_build_from_text(
+        str(body.get("text", "")),
+        api_key=(body.get("api_key") or None),
+        model=(body.get("model") or None),
+        provider=(body.get("provider") or None),
+        base_url=(body.get("base_url") or None),
+    )
+    return {"transcript": transcript, "structure": _struct_payload(struct)}
 
 
 def api_combine(_query, body):
@@ -444,8 +479,9 @@ def api_build(_query, body):
 
 def _case_info_for(target: Path, config: dict):
     info = inspect_target(target)
-    job_root = Path(config["jobs_root"])
-    output_root = job_root / info["project_name"]
+    # Jobs live directly under the jobs root (jobs/NNNN_<case>), no project
+    # sub-folder; the numbered run is resolved by make_case_info's "latest" mode.
+    output_root = Path(config["jobs_root"])
     case_infos = [
         make_case_info(case_dir, output_root, single_mode=(info["mode"] == "single"),
                        job_mode="latest")
@@ -532,35 +568,40 @@ def _scan_result_jobs(root: Path) -> list[Path]:
 def _result_case_infos(info: dict, config: dict):
     """Resolve each case to the job directory it was actually run in.
 
-    A case can live in either valid layout:
-      * ``<jobs_root>/<case_name>``                 — a single-case run
-      * ``<jobs_root>/<project_name>/<case_name>``  — a project run
-
-    The UI launches cases individually (single-case runs), so the default is the
-    flat ``<jobs_root>/<case_name>`` layout; we switch to the nested project
-    layout when that is where the results actually are. (Earlier this always used
-    the nested layout, so the per-row buttons pointed at a directory that did not
-    exist.) Both are built with ``single_mode=False`` so the path is simply
-    ``output_root / case_name``.
+    Every job lives directly under the jobs root as ``<jobs_root>/<NNNN>_<case>``
+    (one global number list per machine; no project sub-folder). ``"latest"``
+    picks the highest-numbered run, falling back to a legacy bare ``<case>`` dir.
     """
     jobs_root = Path(config["jobs_root"])
-    project = info["project_name"]
-    case_infos = []
-    for case_dir in info["case_dirs"]:
-        name = Path(case_dir).name
-        flat_jd = jobs_root / name
-        nested_jd = jobs_root / project / name
-        # Prefer whichever layout already holds output; for a genuine project
-        # run (the target folder is the project) fall back to the nested layout.
-        if _job_has_output(flat_jd):
-            output_root = jobs_root
-        elif _job_has_output(nested_jd) or (info["mode"] == "project" and nested_jd.exists()):
-            output_root = jobs_root / project
-        else:
-            output_root = jobs_root
-        case_infos.append(make_case_info(case_dir, output_root, single_mode=False,
-                                         job_mode="latest"))
+    case_infos = [
+        make_case_info(case_dir, jobs_root, single_mode=False, job_mode="latest")
+        for case_dir in info["case_dirs"]
+    ]
     return info, case_infos
+
+
+def _overlay_ase_config(config: dict, body: dict) -> dict:
+    """Merge the UI's ASE-engine choices (calculator, command path, extra params)
+    onto a config dict — the same overlay the CLI's resolve_engine does, so a
+    dry-run preview matches the eventual run."""
+    overlay = dict(config)
+    if body.get("ase_calculator"):
+        overlay["ase_calculator"] = str(body["ase_calculator"])
+    if body.get("ase_fmax"):
+        overlay["ase_fmax"] = float(body["ase_fmax"])
+    if body.get("ase_steps"):
+        overlay["ase_steps"] = int(body["ase_steps"])
+    params = dict(config.get("ase_calc_params") or {})
+    extra = body.get("ase_params")
+    if isinstance(extra, str) and extra.strip():
+        extra = json.loads(extra)
+    if isinstance(extra, dict):
+        params.update(extra)
+    if body.get("ase_command"):
+        params["command"] = str(body["ase_command"])
+    if params:
+        overlay["ase_calc_params"] = params
+    return overlay
 
 
 def api_preview(_query, body):
@@ -571,6 +612,8 @@ def api_preview(_query, body):
     engine = body.get("engine") or config.get("engine", "vasp")
     if body.get("pseudo_dir"):
         config = {**config, "pseudo_dir": body["pseudo_dir"]}
+    if engine == "ase":
+        config = _overlay_ase_config(config, body)
     kpoints = body.get("kpoints") or None
     previews = [
         preview_job_from_case(
@@ -670,7 +713,7 @@ def api_results(query, _body):
     first = case_infos[0] if case_infos else None
     excel = _first_existing_excel(
         Path(first["job_dir"]) / f"{first['case_name']}.xlsx" if first else None,
-        jobs_root / info["project_name"] / f"{info['project_name']}.xlsx",
+        jobs_root / f"{info['project_name']}.xlsx",
     )
     return {"project": info["project_name"], "rows": rows, "excel": excel}
 
@@ -1207,6 +1250,17 @@ def build_cli_args(body: dict) -> list[str]:
             args += ["--qe-executable", str(body["qe_executable"])]
         if body.get("pseudo_dir"):
             args += ["--pseudo-dir", str(body["pseudo_dir"])]
+        if body.get("ase_calculator"):
+            args += ["--ase-calculator", str(body["ase_calculator"])]
+        if body.get("ase_command"):
+            args += ["--ase-command", str(body["ase_command"])]
+        if body.get("ase_params"):
+            params = body["ase_params"]
+            args += ["--ase-params", params if isinstance(params, str) else json.dumps(params)]
+        if body.get("ase_fmax"):
+            args += ["--ase-fmax", str(body["ase_fmax"])]
+        if body.get("ase_steps"):
+            args += ["--ase-steps", str(body["ase_steps"])]
     kpoints = body.get("kpoints") or {}
     if kpoints.get("mode"):
         args += ["--kpoints-mode", kpoints["mode"]]
@@ -1657,6 +1711,7 @@ POST_ROUTES = {
     "/api/structure": api_structure_save,
     "/api/combine": api_combine,
     "/api/nl_build": api_nl_build,
+    "/api/nl_agent": api_nl_agent,
     "/api/match": api_match,
     "/api/chgdiff": api_chgdiff,
     "/api/adsorption": api_adsorption,

@@ -67,7 +67,7 @@ ln -sf ~/vasp_auto/venv/bin/vasp-auto ~/.local/bin/vasp-auto
   TSS/                    NEB example inputs and jobs
   tests/                  pytest unit tests   (venv/bin/python -m pytest)
   selfcheck/              end-to-end feature check with a fake VASP (see §10)
-  docs/                   this manual + IMPROVEMENT_MEMO.md
+  docs/                   this manual + tutorials
   venv/                   the virtualenv that runs vasp-auto
   .venv/ + ase-gui        separate ASE GUI toolchain (./ase-gui opens it)
 ```
@@ -213,6 +213,52 @@ qe_ecutrho: 400     # density cutoff (Ry)
 overrides the generated one (same rule as a case-supplied INCAR). Each QE job
 directory carries a `.engine` marker and writes `pw.out`, which the parser reads
 for energy, convergence, forces and pressure into the summary.
+
+### Generic ASE-calculator engine (any code, including DMol3)
+
+`--engine ase` runs a case through **any calculator the [ASE](https://wiki.fysik.dtu.dk/ase/)
+library can drive** — EMT, Lennard-Jones, Morse, Quantum ESPRESSO, GPAW, ABINIT,
+CASTEP, SIESTA, NWChem, **DMol3** (BIOVIA Materials Studio), an ASE-driven VASP,
+or an MLIP (MACE). Instead of INCAR/KPOINTS/POTCAR it writes a small,
+self-contained `run_ase.py` driver plus `ase_calc.json`, so the job directory can
+be re-run without vasp_auto on the path. `emt` is the default and needs no
+external code, so the engine is testable anywhere.
+
+```bash
+# single-point with the built-in EMT potential (no external code):
+vasp-auto inputs/Cu --engine ase --ase-calculator emt
+
+# DMol3 geometry relaxation:
+vasp-auto inputs/Au13 --engine ase --calc-type relax \
+  --ase-calculator dmol3 \
+  --ase-command "RunDMol3.sh PREFIX > PREFIX.out" \
+  --ase-params '{"functional":"pbe","basis":"dnd","symmetry":"off"}'
+```
+
+or make it the default in `config.yaml`:
+
+```yaml
+engine: ase
+ase_calculator: dmol3
+ase_calc_params:
+  command: RunDMol3.sh PREFIX > PREFIX.out   # the PREFIX token is required
+  functional: pbe
+  basis: dnd
+  symmetry: "off"
+ase_fmax: 0.05      # force tolerance for relax (eV/Å)
+ase_steps: 200      # max BFGS optimiser steps
+```
+
+Supported calc types: `scf` (single-point energy) and `relax` (BFGS). The chosen
+code and ASE must be installed where the job runs. Flags: `--ase-calculator NAME`,
+`--ase-command PATH` (run command/binary → `ase_calc_params.command`; for file-IO
+codes like DMol3 it **must contain the `PREFIX` placeholder**, which ASE replaces
+with the job label — or set the code's env var, e.g. `DMOL_COMMAND`, and leave it
+blank), `--ase-params JSON` (extra calculator keywords; use the special keys
+`__module__`/`__class__` to reach a calculator not in the built-in menu),
+`--ase-fmax`, `--ase-steps`. Each ASE job writes `CONTCAR` and `ase_results.json`
+(energy, max force, ionic steps, converged), which the summary reads. NEB,
+phonons, convergence scans and implicit solvation remain VASP-only for now.
 
 ### Spin-polarised runs
 
@@ -664,7 +710,12 @@ theme, and a first-run guide:
   its form opens — you no longer scroll a stack of every builder at once.
   Builders (ASE bulk, prototype crystals, **space-group crystal from a Wyckoff
   basis**, slab with facet control, molecule-in-box, **single-wall nanotube**,
-  CIF/XYZ import, two-structure combine, adsorption quick build, ML pre-relax)
+  CIF/XYZ import, two-structure combine, adsorption quick build, ML pre-relax,
+  and an **AI builder** — describe a structure in plain words and it picks the
+  recipe; works with **any OpenAI-compatible API** (Groq by default, or OpenAI,
+  OpenRouter, DeepSeek, Anthropic, a local Ollama/LM Studio server, … — pick the
+  provider, paste a key, optionally name a model; the AI only chooses the build
+  command, coordinates are always built exactly by the code)
   load the result into an in-memory editor; **nothing is written until you press
   💾 Save** — only calculation outputs are saved automatically. In the 3D
   viewer you control single atoms with the cursor: click to select
@@ -683,12 +734,14 @@ theme, and a first-run guide:
   (hideable, copyable, and editable — apply text back to the editor).
   Relaxations/NEB paths can still be **animated** in the same viewer
   (play/pause + frame slider).
-- **Calculate** — calculation types shown as cards with plain-language
-  descriptions; spin/magnetism options; k-point fields that adapt to the
-  chosen mode; convergence testing (ENCUT/SIGMA/NELM/k-mesh) in a collapsible
-  panel; an auto-fix-and-retry switch; Preview/Prepare/Run/Parse buttons; an
-  INCAR editor; and a live job console with elapsed time and a stop (✕)
-  button per job (logs under `ui_logs/`).
+- **Calculate** — a **DFT engine** selector (VASP, Quantum ESPRESSO, or any
+  **ASE calculator** — choose the calculator, e.g. DMol3, its run command/path,
+  and JSON parameters, which pre-fill with sensible defaults); calculation types
+  shown as cards with plain-language descriptions; spin/magnetism options;
+  k-point fields that adapt to the chosen mode; convergence testing
+  (ENCUT/SIGMA/NELM/k-mesh) in a collapsible panel; an auto-fix-and-retry switch;
+  Preview/Prepare/Run/Parse buttons; an INCAR editor; and a live job console with
+  elapsed time and a stop (✕) button per job (logs under `ui_logs/`).
 - **Workflow** — one-click presets (Optimise → SCF → DOS …, including
   **Converge → Optimise → SCF → DOS**), reorderable steps, optional spin, a
   *Convergence step settings* panel (ENCUT/SIGMA/NELM/k-mesh) whose values a
