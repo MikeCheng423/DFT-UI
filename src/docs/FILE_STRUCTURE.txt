@@ -25,7 +25,7 @@ is the directory map; CLAUDE.md is the narrative.
 Top-level tree
 ----------------------------------------------------------------------------
 vasp_auto/
-|-- README.txt                 project entry / quick-start
+|-- README.md                  project entry / quick-start
 |-- config.yaml                global defaults + per-case / remotes config
 |-- remotes.json               remote-machine inventory (read by the UI)
 |-- pyproject.toml             package metadata + the 3 console scripts
@@ -43,14 +43,12 @@ vasp_auto/
 |       |-- CLAUDE.md          architecture, conventions, work loop (canonical)
 |       |-- FILE_STRUCTURE.txt  this file
 |       |-- VASP_AUTO_CAPABILITIES.md
-|       |-- VASP_AUTO_COMMAND_AND_STRUCTURE.txt
-|       `-- Rebuild.md         results/workflow UI redesign spec
+|       `-- VASP_AUTO_COMMAND_AND_STRUCTURE.txt
 |
 |-- docs/                      user-facing prose (manuals + tutorials)
 |   |-- MANUAL.md
 |   |-- TUTORIAL_*.md, TUTORIALS_INDEX.md
-|   |-- PORTABILITY.md
-|   `-- IMPROVEMENT_MEMO.md
+|   `-- PORTABILITY.md
 |
 |-- example/                   reference INCAR templates (scf/dos/optimize/...)
 |-- inputs/                    source calculation cases (hand-authored)

@@ -34,6 +34,14 @@ from pathlib import Path
 # calc-types this engine understands today (mirrors QE's limited scope).
 ASE_SUPPORTED_CALC_TYPES = ("scf", "relax")
 
+# Named ASE calculators the driver's CALC_REGISTRY knows out of the box (for the
+# CLI/GUI to offer as a menu). Anything else is reachable via the special params
+# __module__ / __class__. Keep in sync with CALC_REGISTRY in ASE_DRIVER below.
+ASE_CALCULATORS = (
+    "emt", "lj", "morse", "espresso", "gpaw", "abinit",
+    "castep", "siesta", "nwchem", "vasp", "dmol3", "mace",
+)
+
 # Driver script written into every ASE job directory. Standalone — it depends
 # only on ASE + numpy and reads its settings from ase_calc.json next to it, so a
 # job directory can be shipped/rerun without vasp_auto on PYTHONPATH.
@@ -59,6 +67,7 @@ CALC_REGISTRY = {
     "siesta": ("ase.calculators.siesta", "Siesta"),
     "nwchem": ("ase.calculators.nwchem", "NWChem"),
     "vasp": ("ase.calculators.vasp", "Vasp"),
+    "dmol3": ("ase.calculators.dmol", "DMol3"),
     "mace": ("mace.calculators", "MACECalculator"),
 }
 
