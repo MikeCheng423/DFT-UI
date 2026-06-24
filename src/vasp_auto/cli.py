@@ -934,6 +934,25 @@ def summary_excel_path(job_root: Path, output_root: Path, project_name: str, mod
     return output_root / f"{project_name}.xlsx"
 
 
+def _write_excel_summary(excel_path, all_results) -> bool:
+    """Write the Excel results summary, skipping cleanly on a lean offload engine.
+
+    The remote offload engine installs only the core dep (PyYAML); pandas/openpyxl
+    are intentionally absent (docs/INSTALL.md, "Why the engine is lean"). When they
+    are missing there is nothing to write here — the control machine re-parses the
+    fetched results into Excel locally — so we skip rather than crash the run after
+    VASP has already finished. Returns True iff an Excel file was written.
+    """
+    try:
+        from vasp_auto.excel_writer import write_results_to_excel  # lazy: pandas optional (not on remote engine)
+    except ImportError:
+        print(f"Skipped Excel summary ({excel_path.name}): pandas/openpyxl not installed (lean engine).")
+        return False
+    write_results_to_excel(str(excel_path), all_results)
+    print(f"Wrote Excel: {excel_path}")
+    return True
+
+
 def _parse_int_triplet(text: str) -> tuple[int, int, int]:
     parts = [int(p) for p in str(text).replace(",", " ").replace("x", " ").split()]
     if len(parts) != 3:
@@ -2332,9 +2351,7 @@ def main():
         if args.report:
             _write_reports(all_results)
         excel_path = summary_excel_path(job_root, output_root, project_name, mode, case_infos)
-        from vasp_auto.excel_writer import write_results_to_excel  # lazy: pandas optional (not on remote engine)
-        write_results_to_excel(str(excel_path), all_results)
-        print(f"Wrote Excel: {excel_path}")
+        _write_excel_summary(excel_path, all_results)
         return
 
     def process(case_dir):
@@ -2372,10 +2389,8 @@ def main():
         _write_reports(all_results)
 
     excel_path = summary_excel_path(job_root, output_root, project_name, mode, case_infos)
-    from vasp_auto.excel_writer import write_results_to_excel  # lazy: pandas optional (not on remote engine)
-    write_results_to_excel(str(excel_path), all_results)
     print()
-    print(f"Wrote Excel: {excel_path}")
+    _write_excel_summary(excel_path, all_results)
 
 
 if __name__ == "__main__":

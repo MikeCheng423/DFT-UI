@@ -383,7 +383,11 @@ def _ssh_options(remote: dict) -> list[str]:
 
 def _run_checked(cmd: list[str], what: str) -> str:
     """Run a command, raising RuntimeError with stderr context on failure."""
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    # Decode as UTF-8 (not the host locale) so non-ASCII paths/errors from the
+    # remote survive; errors="replace" keeps a stray byte from crashing us.
+    result = subprocess.run(
+        cmd, capture_output=True, encoding="utf-8", errors="replace",
+    )
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
         raise RuntimeError(f"{what} failed: {detail}")
@@ -518,7 +522,8 @@ def run_vasp_remote(
     result = subprocess.run(
         ["ssh", "-x", *ssh_opts, target, f"bash -lc {shlex.quote(remote_script)}"],
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     return_code = result.returncode
 
@@ -737,11 +742,15 @@ def setup_remote_engine(remote: dict, timeout: int = 600, on_progress=None) -> d
             "|| wget -q https://bootstrap.pypa.io/get-pip.py -O get-pip.py); "
             "venv/bin/python get-pip.py --quiet; fi",
             f"venv/bin/pip install --quiet {shlex.quote(wheel_remote)}",
-            "venv/bin/python -c 'import vasp_auto, pandas, openpyxl, yaml; print(\"ENGINE_OK\")'",
+            # Verify only the lean engine: vasp_auto plus its sole core dep (PyYAML).
+            # pandas/openpyxl live in the [results] extra and are intentionally NOT
+            # installed here — the offload engine is lean (docs/INSTALL.md, "Why the
+            # engine is lean"). Importing them in the check made setup always fail.
+            "venv/bin/python -c 'import vasp_auto, yaml; print(\"ENGINE_OK\")'",
         ])
         res = subprocess.run(
             ["ssh", "-x", *ssh_opts, target, f"bash -lc {shlex.quote(script)}"],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, encoding="utf-8", errors="replace", timeout=timeout,
         )
 
     ok = res.returncode == 0 and "ENGINE_OK" in res.stdout
@@ -758,7 +767,7 @@ def remote_engine_installed(remote: dict) -> bool:
         res = subprocess.run(
             ["ssh", "-x", *ssh_opts, target,
              f"test -x {shlex.quote(paths['vasp_auto'])} && echo yes || echo no"],
-            capture_output=True, text=True, timeout=20,
+            capture_output=True, encoding="utf-8", errors="replace", timeout=20,
         )
     except (subprocess.TimeoutExpired, OSError):
         return False
@@ -900,7 +909,7 @@ def poll_detached_job(remote: dict, control_dir: str, pid: str | None = None) ->
     )
     try:
         res = subprocess.run(["ssh", "-x", *ssh_opts, target, cmd],
-                             capture_output=True, text=True, timeout=30)
+                             capture_output=True, encoding="utf-8", errors="replace", timeout=30)
     except (subprocess.TimeoutExpired, OSError) as exc:
         return {"state": "unknown", "return_code": None, "raw": str(exc)}
     lines = res.stdout.strip().splitlines()
@@ -991,7 +1000,7 @@ def remote_command(remote: dict, command: str, timeout: int = 60) -> subprocess.
     ssh_opts = _ssh_options(remote)
     return subprocess.run(
         ["ssh", "-o", "BatchMode=yes", *ssh_opts, target, command],
-        capture_output=True, text=True, timeout=timeout,
+        capture_output=True, encoding="utf-8", errors="replace", timeout=timeout,
     )
 
 
@@ -1119,7 +1128,7 @@ def fetch_remote_results(
     # A single scp call pulling each wanted file; missing files just warn (rc may be !=0).
     subprocess.run(
         ["scp", *scp_opts, *[f"{target}:{remote_dir.rstrip('/')}/{n}" for n in wanted], f"{local}/"],
-        capture_output=True, text=True,
+        capture_output=True, encoding="utf-8", errors="replace",
     )
     return {"local_dir": str(local), "remote_dir": remote_dir, "transferred": True}
 
