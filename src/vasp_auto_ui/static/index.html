@@ -332,8 +332,10 @@
       </div>
       <div class="card buildfn" id="fn-import" style="display:none">
         <h3>📥 Import a structure file</h3>
-        <p class="sub">CIF, XYZ, POSCAR and most other formats.</p>
-        <span class="inline wide"><label>file path (cif/xyz/…)</label><input id="i-path" placeholder="/path/to/structure.cif"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('i-path',{files:true})" title="Browse for a structure file">📁</button></span>
+        <p class="sub">CIF, XYZ, POSCAR and most other formats — from this computer or a remote machine.</p>
+        <span class="inline"><label>machine</label>
+          <select id="i-machine" onchange="importMachineChanged()" title="This computer, or a saved remote machine to pull the file from over SSH. Editing always happens locally; the structure re-ships to the remote when you run it from the Calculate tab."></select></span>
+        <span class="inline wide"><label>file path (cif/xyz/…)</label><input id="i-path" placeholder="/path/to/structure.cif"><button class="iconbtn" style="padding:3px 7px" onclick="importBrowse()" title="Browse for a structure file">📁</button></span>
         <button class="act" onclick="importFile()">Import → editor</button>
       </div>
       <div class="card buildfn" id="fn-combine" style="display:none">
@@ -1915,8 +1917,34 @@ function buildMolecule() {
 }
 function importFile() {
   if (!$("i-path").value.trim()) { banner("Give the path of the structure file to import."); return; }
-  api("/api/build", { action: "import", to_editor: true, source: $("i-path").value })
+  const machine = ($("i-machine") && $("i-machine").value) || "local";
+  api("/api/build", { action: "import", to_editor: true, source: $("i-path").value, machine })
     .then(d => intoEditor(d, $("i-path").value.trim().split("/").pop().replace(/\.[^.]+$/, "")));
+}
+/* Populate the Import card's machine dropdown (local + saved remotes). */
+function refreshImportMachineSelect() {
+  const sel = $("i-machine"); if (!sel) return;
+  const keep = sel.value;
+  sel.innerHTML = "<option value='local'>💻 Local — this computer</option>";
+  for (const r of REMOTES) sel.add(new Option(`🖥 ${r.name} — ${r.host}`, r.name));
+  sel.value = REMOTES.some(r => r.name === keep) ? keep : "local";
+  importMachineChanged();
+}
+/* Reset the path + placeholder when the import machine changes. */
+function importMachineChanged() {
+  const m = $("i-machine").value, r = REMOTES.find(x => x.name === m);
+  $("i-path").value = "";
+  $("i-path").placeholder = (m !== "local" && r && r.remote_root)
+    ? r.remote_root + "/…/structure.cif" : "/path/to/structure.cif";
+}
+/* Browse for the import file — local picker, or the remote one over SSH. */
+function importBrowse() {
+  const m = $("i-machine").value, r = REMOTES.find(x => x.name === m);
+  if (m && m !== "local") {
+    openPicker("i-path", { files: true, machine: m, root: (r && r.remote_root) || "" });
+  } else {
+    openPicker("i-path", { files: true });
+  }
 }
 function buildTss() {
   if (!$("nb-init").value.trim() || !$("nb-final").value.trim()) {
@@ -2309,6 +2337,7 @@ async function loadRemotes() {
   refreshRemoteSelect();
   refreshWorkflowRemoteSelect();
   refreshResultMachineSelect();
+  refreshImportMachineSelect();
 }
 /* Populate the Workflow tab's "run on machine" dropdown. */
 function refreshWorkflowRemoteSelect() {
@@ -3497,12 +3526,15 @@ let PICKER_ENTRIES = [];
 let PICKER_LAST = null;  // last browsed folder — picking related paths in a row stays put
 function openPicker(targetId, opts = {}) {
   PICKER = { target: targetId, files: !!opts.files, onpick: opts.onpick || null,
-             onchoose: opts.onchoose || null };
+             onchoose: opts.onchoose || null,
+             machine: opts.machine || null, root: opts.root || null };
   $("pickerwhat").textContent = PICKER.files ? "a file" : (opts.what || "a folder");
   $("pickerchoose").style.display = PICKER.files ? "none" : "inline-block";
   $("pickermodal").style.display = "block";
   const current = (targetId && $(targetId).value.trim()) || opts.start || "";
-  pickerGo(current && current.startsWith("/") ? current : PICKER_LAST);
+  const start = current && current.startsWith("/") ? current
+              : (PICKER.machine ? (PICKER.root || "") : PICKER_LAST);
+  pickerGo(start);
 }
 function closePicker() { $("pickermodal").style.display = "none"; }
 $("pickermodal").onclick = e => { if (e.target === $("pickermodal")) closePicker(); };
@@ -3510,10 +3542,19 @@ $("jobdetailmodal").onclick = e => { if (e.target === $("jobdetailmodal")) close
 async function pickerGo(path) {
   let data;
   try {
-    data = await api("/api/browse?files=" + (PICKER.files ? 1 : 0) +
-                     (path ? "&path=" + encodeURIComponent(path) : ""));
+    if (PICKER.machine && PICKER.machine !== "local") {
+      // Browse a remote machine over SSH and reshape into the picker's format.
+      const rd = await api("/api/remote/files", { machine: PICKER.machine, dir: path || PICKER.root });
+      data = { path: rd.path, parent: rd.parent,
+               dirs: rd.entries.filter(e => e.is_dir),
+               files: rd.entries.filter(e => !e.is_dir),
+               roots: PICKER.root ? [{ name: "remote_root", path: PICKER.root }] : [] };
+    } else {
+      data = await api("/api/browse?files=" + (PICKER.files ? 1 : 0) +
+                       (path ? "&path=" + encodeURIComponent(path) : ""));
+    }
   } catch (e) { return; }
-  PICKER_LAST = data.path;
+  if (!(PICKER.machine && PICKER.machine !== "local")) PICKER_LAST = data.path;
   $("pickerpath").value = data.path;
   $("pickerroots").innerHTML = data.roots.map((r, i) =>
     `<span class="chip" onclick="pickerGo(PICKER_ROOTS[${i}])">${r.name}</span>`).join("");
