@@ -411,12 +411,34 @@ def api_build(_query, body):
         )
     elif action == "import":
         from vasp_auto.ase_tools import import_structure_to_case
-        source = Path(body["source"]).expanduser()
-        poscar = import_structure_to_case(
-            structure_path=source,
-            case_dir=_output_dir(body, inputs / source.stem),
-            input_format=body.get("format") or None,
-        )
+        machine = (body.get("machine") or "").strip()
+        if machine and machine != "local":
+            # Pull the structure file off a remote machine over SSH into a local
+            # temp file. Editing always happens in the local engine; the edited
+            # structure re-ships to the remote when you run it from Calculate.
+            import shutil
+            import tempfile
+            from vasp_auto.runner import fetch_remote_file
+            remote = _resolve_remote(machine)
+            remote_path = str(body["source"])
+            rtmp = tempfile.mkdtemp(prefix="vasp_auto_import_")
+            try:
+                source = Path(fetch_remote_file(
+                    remote, remote_path, Path(rtmp) / Path(remote_path).name))
+                poscar = import_structure_to_case(
+                    structure_path=source,
+                    case_dir=_output_dir(body, inputs / source.stem),
+                    input_format=body.get("format") or None,
+                )
+            finally:
+                shutil.rmtree(rtmp, ignore_errors=True)
+        else:
+            source = Path(body["source"]).expanduser()
+            poscar = import_structure_to_case(
+                structure_path=source,
+                case_dir=_output_dir(body, inputs / source.stem),
+                input_format=body.get("format") or None,
+            )
     elif action == "tss":
         case_dir = _output_dir(body, inputs / (body.get("output") or "neb_case"))
         for endpoint, source_text in (("initial", body["initial"]), ("final", body["final"])):
