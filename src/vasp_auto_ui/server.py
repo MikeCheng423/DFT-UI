@@ -54,6 +54,7 @@ from vasp_auto.report import build_job_report, write_job_report
 from vasp_auto.runner import (
     fetch_remote_file,
     fetch_remote_results,
+    list_remote_cases,
     list_remote_dir,
     list_remote_jobs,
     poll_detached_job,
@@ -135,6 +136,16 @@ def api_meta(_query, _body):
 
 
 def api_cases(query, _body):
+    machine = (query.get("machine", ["local"])[0] or "local").strip()
+    if _is_remote_machine(machine):
+        # Browse cases that physically live on the selected machine over SSH.
+        remote = _resolve_remote(machine)
+        root = query.get("path", [None])[0] or _default_remote_cases_dir(remote)
+        listing = list_remote_cases(remote, root)
+        cases = [{"name": c["name"], "path": c["path"], "type": c["type"],
+                  "machine": machine, "remote": True} for c in listing["cases"]]
+        return {"path": listing["path"], "machine": machine, "cases": cases}
+
     root = Path(query.get("path", [str(REPO_ROOT / "inputs")])[0]).expanduser().resolve()
     if not root.exists():
         return {"path": str(root), "cases": []}
@@ -206,13 +217,14 @@ def _find_poscar(case_dir: Path) -> Path:
     return poscar
 
 
-# ---------------------------------------------------------- remote-built cases
+# ------------------------------------------------------ working-machine cases
 #
-# A "remote case" is built straight onto a machine: its real inputs (POSCAR plus
-# any INCAR/KPOINTS) live under <remote_root>/inputs/<name> — the same place an
-# offload run ships to, so it runs in place without a second copy — and the only
-# thing kept on this computer is a tiny .remote_case.json pointer so the case
-# still shows up in the Build/Calculate case list.
+# The Working-case selector picks a machine. When it is a remote, every case
+# operation (list/load/edit/build/preview/run) targets a path *on that machine*
+# over SSH — its files and results live there, nothing is kept on this computer.
+# `_remote_loc` resolves an operation to that machine, and also still honours an
+# older local .remote_case.json pointer (the previous build-on-remote flow) so
+# any case created that way keeps working.
 
 REMOTE_CASE_MARKER = ".remote_case.json"
 
@@ -228,54 +240,65 @@ def _remote_case_marker(case_dir: Path) -> dict | None:
         return None
 
 
-def _remote_inputs_dir(remote: dict, case_name: str) -> str:
-    """Where a case's inputs live on the remote — matches the offload run target
-    (<remote_root>/inputs/<name>) so a build-on-remote case runs in place."""
+def _default_remote_cases_dir(remote: dict) -> str:
+    """Default working-cases directory on a machine (its <remote_root>/inputs)."""
     root = (remote.get("remote_root") or "").rstrip("/")
-    if not root:
-        raise ValueError("remote machine config needs a 'remote_root'")
-    return f"{root}/inputs/{case_name}"
+    return f"{root}/inputs" if root else "/"
 
 
-def _ship_case_to_remote(local_dir: Path, machine: str, case_name: str) -> dict:
-    """Push a freshly built case folder to its machine; return a pointer dict."""
+def _is_remote_machine(machine) -> bool:
+    machine = (machine or "").strip()
+    return bool(machine) and machine != "local"
+
+
+def _remote_loc(path_str: str, machine, case_type=None) -> dict | None:
+    """Resolve a working-case operation to a remote location, or None for local.
+
+    With a remote working `machine` (the Working-case selector), `path_str` is a
+    path *on that machine*, used directly. Otherwise a local case dir that holds a
+    .remote_case.json pointer still resolves to its remote (the build-on-remote
+    flow). Returns a marker-shaped {machine, remote_dir, case_name, type} or None.
+    """
+    if _is_remote_machine(machine):
+        remote_dir = str(path_str).rstrip("/")
+        return {"machine": machine.strip(), "remote_dir": remote_dir,
+                "case_name": remote_dir.rsplit("/", 1)[-1] or remote_dir,
+                "type": case_type or "single"}
+    return _remote_case_marker(Path(path_str).expanduser().resolve())
+
+
+def _ship_dir_to_remote(local_dir: Path, machine: str, remote_dir: str) -> str:
+    """Push a local directory's contents to an explicit remote directory."""
     import shlex
     from vasp_auto.runner import _run_checked, _ssh_options, _ssh_target, _transfer_dir
     remote = _resolve_remote(machine)
-    remote_dir = _remote_inputs_dir(remote, case_name)
+    remote_dir = remote_dir.rstrip("/")
     target = _ssh_target(remote)
     ssh_opts = _ssh_options(remote)
     _run_checked(["ssh", "-x", *ssh_opts, target, f"mkdir -p {shlex.quote(remote_dir)}"],
                  "remote mkdir case")
     _transfer_dir(local_dir, target, remote_dir, remote)
-    return {"machine": machine, "host": remote.get("host"),
-            "remote_dir": remote_dir, "case_name": case_name, "type": "single"}
-
-
-def _write_remote_case_pointer(case_dir: Path, pointer: dict) -> None:
-    case_dir.mkdir(parents=True, exist_ok=True)
-    # A previous local save of the same name would otherwise shadow the pointer.
-    for stale in ("POSCAR", "INCAR", "KPOINTS"):
-        (case_dir / stale).unlink(missing_ok=True)
-    (case_dir / REMOTE_CASE_MARKER).write_text(json.dumps(pointer, indent=2), encoding="utf-8")
+    return remote_dir
 
 
 def _finalize_built_case(result: dict, body: dict, ctype: str = "single") -> dict:
     """Common tail for the direct-write builders (NEB/TSS, prototype, Materials
-    Project, …): if a remote machine was chosen, ship the freshly built case
-    folder onto it and leave only a pointer locally; otherwise return unchanged."""
+    Project, …): when the working machine is a remote, ship the freshly built case
+    straight onto it under the working cases folder and leave nothing on this
+    computer; otherwise return the local result unchanged."""
     machine = (body.get("machine") or "").strip()
-    if not machine or machine == "local":
+    if not _is_remote_machine(machine):
         return result
+    remote = _resolve_remote(machine)
     case_dir = Path(result["case"])
-    pointer = _ship_case_to_remote(case_dir, machine, case_dir.name)
-    pointer["type"] = ctype
+    base = (body.get("root") or _default_remote_cases_dir(remote)).rstrip("/")
+    remote_case = f"{base}/{case_dir.name}"
+    _ship_dir_to_remote(case_dir, machine, remote_case)
     rel_poscar = Path(result["poscar"]).relative_to(case_dir).as_posix()
     shutil.rmtree(case_dir, ignore_errors=True)  # nothing left on this computer
-    _write_remote_case_pointer(case_dir, pointer)
-    return {**result, "case": str(case_dir), "machine": machine, "remote": True,
-            "remote_dir": pointer["remote_dir"],
-            "poscar": f"{pointer['remote_dir']}/{rel_poscar}"}
+    return {**result, "case": remote_case, "machine": machine, "remote": True,
+            "remote_dir": remote_case, "type": ctype,
+            "poscar": f"{remote_case}/{rel_poscar}"}
 
 
 def _fetch_remote_case(marker: dict, dest: Path, names=None) -> Path:
@@ -307,32 +330,35 @@ def _fetch_remote_case(marker: dict, dest: Path, names=None) -> Path:
 
 
 @contextmanager
-def _local_case(target: Path):
-    """Yield a local case dir for `target`. For a remote-built case this fetches
-    its inputs into a temp dir (cleaned up on exit); a normal local case is
-    yielded unchanged. Returns (case_dir, marker-or-None)."""
-    marker = _remote_case_marker(target)
-    if not marker:
-        yield target, None
+def _local_case(target, machine=None):
+    """Yield a local case dir for `target`. For a case that lives on a remote
+    machine (either a remote working machine, or a local .remote_case.json
+    pointer) this fetches its inputs into a temp dir (cleaned up on exit); a plain
+    local case is yielded unchanged. Returns (case_dir, loc-or-None)."""
+    loc = _remote_loc(str(target), machine)
+    if not loc:
+        yield Path(target).expanduser().resolve(), None
         return
     tmp = tempfile.mkdtemp(prefix="vasp_auto_rc_")
     try:
-        staging = Path(tmp) / marker["case_name"]
+        staging = Path(tmp) / (loc.get("case_name") or "case")
         staging.mkdir(parents=True)
-        _fetch_remote_case(marker, staging)
-        yield staging, marker
+        _fetch_remote_case(loc, staging)
+        yield staging, loc
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
 def api_structure(query, _body):
-    case_dir = Path(query["path"][0]).expanduser().resolve()
-    marker = _remote_case_marker(case_dir)
-    if marker:
+    path_str = query["path"][0]
+    machine = query.get("machine", ["local"])[0]
+    loc = _remote_loc(path_str, machine, (query.get("type", [None])[0]))
+    if loc:
         with tempfile.TemporaryDirectory(prefix="vasp_auto_rc_") as tmp:
-            dest = _fetch_remote_case(marker, Path(tmp))
-            return _struct_payload(read_poscar(_find_poscar(dest)), case_dir / "POSCAR")
-    poscar = _find_poscar(case_dir)
+            dest = _fetch_remote_case(loc, Path(tmp))
+            return _struct_payload(read_poscar(_find_poscar(dest)),
+                                   Path(loc["remote_dir"]) / "POSCAR")
+    poscar = _find_poscar(Path(path_str).expanduser().resolve())
     return _struct_payload(read_poscar(poscar), poscar)
 
 
@@ -340,21 +366,31 @@ def api_structure_save(_query, body):
     """Save the editor's working structure as a case POSCAR (the explicit
     Save button — building/editing alone never writes case folders)."""
     struct = _struct_from_payload(body["structure"])
+    machine = (body.get("machine") or "").strip()
+    if _is_remote_machine(machine):
+        # Working machine is a remote: write the case straight onto it (under the
+        # working cases folder) so the structure and every later calculation live
+        # on that machine — nothing is kept on this computer.
+        remote = _resolve_remote(machine)
+        if body.get("dir") and str(body["dir"]).startswith("/"):
+            remote_case = str(body["dir"]).rstrip("/")
+        else:
+            name = body.get("name")
+            if not name:
+                raise ValueError("Give a case name to save")
+            base = (body.get("root") or _default_remote_cases_dir(remote)).rstrip("/")
+            remote_case = f"{base}/{Path(str(name)).name}"
+        with tempfile.TemporaryDirectory(prefix="vasp_auto_rc_") as tmp:
+            write_poscar(struct, Path(tmp) / "POSCAR")
+            _ship_dir_to_remote(Path(tmp), machine, remote_case)
+        return {"case": remote_case, "poscar": f"{remote_case}/POSCAR",
+                "machine": machine, "remote_dir": remote_case, "remote": True}
+
     target = body.get("dir") or body.get("name")
     if not target:
         raise ValueError("Give a case name or directory to save into")
     path = Path(str(target)).expanduser()
     case_dir = path if path.is_absolute() else REPO_ROOT / "inputs" / path
-    machine = (body.get("machine") or "").strip()
-    if machine and machine != "local":
-        # Build on the remote: write the POSCAR straight onto the machine and keep
-        # only a pointer locally (nothing else is left on this computer).
-        with tempfile.TemporaryDirectory(prefix="vasp_auto_rc_") as tmp:
-            write_poscar(struct, Path(tmp) / "POSCAR")
-            pointer = _ship_case_to_remote(Path(tmp), machine, case_dir.name)
-        _write_remote_case_pointer(case_dir, pointer)
-        return {"case": str(case_dir), "poscar": f"{pointer['remote_dir']}/POSCAR",
-                "machine": machine, "remote_dir": pointer["remote_dir"], "remote": True}
     write_poscar(struct, case_dir / "POSCAR")
     return {"case": str(case_dir), "poscar": str(case_dir / "POSCAR")}
 
@@ -780,8 +816,7 @@ def _overlay_ase_config(config: dict, body: dict) -> dict:
 
 
 def api_preview(_query, body):
-    requested = Path(body["target"]).expanduser().resolve()
-    with _local_case(requested) as (target, _marker):
+    with _local_case(body["target"], body.get("machine")) as (target, _loc):
         return _preview_for_target(target, body)
 
 
@@ -1393,39 +1428,39 @@ def api_report(_query, body):
 
 
 def api_file_get(query, _body):
-    directory = Path(query["dir"][0]).expanduser().resolve()
     name = query["name"][0]
     if name not in EDITABLE_FILES:
         raise ValueError(f"Not an editable file: {name}")
-    marker = _remote_case_marker(directory)
-    if marker:
-        remote = _resolve_remote(marker["machine"])
-        remote_path = f"{str(marker['remote_dir']).rstrip('/')}/{name}"
+    dir_str = query["dir"][0]
+    loc = _remote_loc(dir_str, query.get("machine", ["local"])[0])
+    if loc:
+        remote = _resolve_remote(loc["machine"])
+        remote_path = f"{str(loc['remote_dir']).rstrip('/')}/{name}"
         try:
             with tempfile.TemporaryDirectory(prefix="vasp_auto_rc_") as tmp:
                 local = fetch_remote_file(remote, remote_path, Path(tmp) / name)
                 return {"exists": True, "text": local.read_text(encoding="utf-8")}
         except Exception:
             return {"exists": False, "text": ""}
-    path = directory / name
+    path = Path(dir_str).expanduser().resolve() / name
     return {"exists": path.exists(), "text": path.read_text(encoding="utf-8") if path.exists() else ""}
 
 
 def api_file_save(_query, body):
-    directory = Path(body["dir"]).expanduser().resolve()
     name = body["name"]
     if name not in EDITABLE_FILES:
         raise ValueError(f"Not an editable file: {name}")
-    marker = _remote_case_marker(directory)
-    if marker:
+    loc = _remote_loc(body["dir"], body.get("machine"))
+    if loc:
         from vasp_auto.runner import _ship_file, _ssh_options, _ssh_target
-        remote = _resolve_remote(marker["machine"])
-        remote_dir = str(marker["remote_dir"]).rstrip("/")
+        remote = _resolve_remote(loc["machine"])
+        remote_dir = str(loc["remote_dir"]).rstrip("/")
         with tempfile.TemporaryDirectory(prefix="vasp_auto_rc_") as tmp:
             src = Path(tmp) / name
             src.write_text(body["text"], encoding="utf-8")
             _ship_file(src, _ssh_target(remote), f"{remote_dir}/{name}", remote, _ssh_options(remote))
-        return {"saved": f"{marker['machine']}:{remote_dir}/{name}"}
+        return {"saved": f"{loc['machine']}:{remote_dir}/{name}"}
+    directory = Path(body["dir"]).expanduser().resolve()
     if not directory.is_dir():
         raise FileNotFoundError(f"Directory not found: {directory}")
     (directory / name).write_text(body["text"], encoding="utf-8")
@@ -1510,18 +1545,17 @@ def build_cli_args(body: dict) -> list[str]:
 
 
 def api_run(_query, body):
-    # A case built on a remote machine has no local POSCAR — only a pointer. Fetch
-    # its inputs into a staging dir to run from, and force its machine as the run
-    # target so the offload ships them back to where they already live and runs in
-    # place. (The staging dir is read by the async CLI subprocess, so it is left
-    # for the OS temp cleaner rather than removed here.)
-    target_path = Path(body["target"]).expanduser().resolve()
-    marker = _remote_case_marker(target_path)
-    if marker:
-        staging = Path(tempfile.mkdtemp(prefix="vasp_auto_rc_")) / marker["case_name"]
+    # A case that lives on a remote machine (the working machine, or a local
+    # pointer) has no local POSCAR — fetch its inputs into a staging dir to run
+    # from, and force its machine as the run target so the calculation happens and
+    # is stored on that machine. (The staging dir is read by the async CLI
+    # subprocess, so it is left for the OS temp cleaner rather than removed here.)
+    loc = _remote_loc(body["target"], body.get("machine"), body.get("case_type"))
+    if loc:
+        staging = Path(tempfile.mkdtemp(prefix="vasp_auto_rc_")) / (loc.get("case_name") or "case")
         staging.mkdir(parents=True)
-        _fetch_remote_case(marker, staging)
-        body = {**body, "target": str(staging), "remote": marker["machine"]}
+        _fetch_remote_case(loc, staging)
+        body = {**body, "target": str(staging), "remote": loc["machine"]}
 
     # A structured workflow (e.g. one with a convergence step that carries its
     # own scan settings) is written to the case's workflow.yaml, which the CLI

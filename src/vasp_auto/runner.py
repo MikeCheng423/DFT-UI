@@ -1228,6 +1228,40 @@ def list_remote_dir(remote: dict, path: str) -> dict:
     return {"path": p, "parent": parent, "entries": entries}
 
 
+def list_remote_cases(remote: dict, path: str) -> dict:
+    """List VASP case directories under a remote directory (one SSH round-trip).
+
+    A "case" is a directory with a POSCAR file (single) or initial/POSCAR plus
+    final/POSCAR (TSS/NEB). If ``path`` itself is a case it is returned alone;
+    otherwise its immediate subdirectories are scanned. Returns
+    {"path", "cases": [{"name", "path", "type"}]}.
+    """
+    p = (path or "").rstrip("/") or "/"
+    pq = shlex.quote(p)
+    script = (
+        f"r={pq}; "
+        'emit() { if [ -f "$1/POSCAR" ]; then printf "scf\\t%s\\n" "$1"; '
+        'elif [ -f "$1/initial/POSCAR" ] && [ -f "$1/final/POSCAR" ]; then '
+        'printf "tss\\t%s\\n" "$1"; fi; }; '
+        'if [ -f "$r/POSCAR" ] || { [ -f "$r/initial/POSCAR" ] && [ -f "$r/final/POSCAR" ]; }; '
+        'then emit "$r"; '
+        'else for d in "$r"/*/; do d="${d%/}"; [ -d "$d" ] && emit "$d"; done; fi'
+    )
+    try:
+        res = remote_command(remote, script, timeout=45)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise RuntimeError(f"could not reach {remote.get('host')}: {exc}") from exc
+    cases: list[dict] = []
+    for line in res.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 2:
+            continue
+        ctype, cpath = parts
+        cases.append({"name": cpath.rstrip("/").rsplit("/", 1)[-1], "path": cpath, "type": ctype})
+    cases.sort(key=lambda c: c["name"].lower())
+    return {"path": p, "cases": cases}
+
+
 def fetch_remote_file(remote: dict, remote_path: str, local_path) -> Path:
     """Copy one file off the remote machine (for a UI download). Returns the path."""
     local = Path(local_path)

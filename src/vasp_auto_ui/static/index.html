@@ -211,8 +211,10 @@
 
 <div class="card">
   <h3>Working case</h3>
-  <p class="sub">A “case” is one folder with a structure. Scan a folder to list its cases, then select the one to work on.</p>
-  <span class="inline wide"><label>cases folder</label><input id="root" title="Folder containing case directories (each with a POSCAR)"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('root',{onpick:refreshCases})" title="Browse for the cases folder">📁</button></span>
+  <p class="sub">Pick the machine you want to work on, then a case folder there. Building, editing and calculations all happen on the selected machine — pick a remote and the files and results stay on it.</p>
+  <span class="inline"><label>working machine</label>
+    <select id="wc-machine" onchange="workingMachineChanged()" title="This computer (local) or a saved remote machine. Picking a remote lists its cases over SSH; building, editing and running then all happen on that machine and nothing is kept here."></select></span>
+  <span class="inline wide"><label>cases folder</label><input id="root" title="Folder containing case directories (each with a POSCAR). On a remote machine this is a path on that machine." onkeydown="if(event.key==='Enter')refreshCases()"><button class="iconbtn" style="padding:3px 7px" onclick="browseCasesFolder()" title="Browse for the cases folder">📁</button></span>
   <button class="ghost" onclick="refreshCases()" title="Re-scan the folder for cases">⟳ Scan</button>
   <span class="inline wide"><label>selected case</label>
     <select id="case" onchange="onCaseChange()"></select></span>
@@ -424,10 +426,8 @@
     <div style="flex:0 1 360px;min-width:330px">
       <div class="card" id="savecard">
         <h3>💾 Save structure <span class="badge warn" id="dirtybadge" style="display:none">unsaved changes</span></h3>
-        <p class="sub">Building and editing happen in memory — nothing is written until you save. Saved cases appear in the case list for calculations.</p>
+        <p class="sub">Building and editing happen in memory — nothing is written until you save. The case is saved on the <b>working machine</b> chosen at the top, and appears in its case list. <span id="sv-machine-hint"></span></p>
         <span class="inline wide"><label>case name (a folder; choose its location next) or absolute path</label><input id="sv-name" placeholder="my_structure"></span>
-        <span class="inline"><label>build on machine</label>
-          <select id="b-machine" title="Local keeps the case on this computer. Picking a remote writes the structure straight onto that machine (only a small pointer stays here) and Calculate then runs it in place on that machine — nothing is left on this computer."></select></span>
         <br><button class="act" onclick="saveStructure()">💾 Save as case…</button>
         <button class="ghost" id="sv-over" style="display:none" onclick="saveStructure(true)">Save over original</button>
       </div>
@@ -968,8 +968,17 @@ function pickType(t) {
   if (t === "bands" && !$("k-mode").value) { $("k-mode").value = "line"; kModeChanged(); }
   if (changed) syncIncarToType();
 }
+/* The machine the Working-case area is pointed at ("local" or a remote name). */
+function workingMachine() { return ($("wc-machine") && $("wc-machine").value) || "local"; }
+function isRemoteWorking() { return workingMachine() !== "local"; }
 async function refreshCases(selectPath) {
-  const data = await api("/api/cases?path=" + encodeURIComponent($("root").value));
+  const m = workingMachine();
+  const url = "/api/cases?machine=" + encodeURIComponent(m)
+            + ($("root").value.trim() ? "&path=" + encodeURIComponent($("root").value.trim()) : "");
+  let data;
+  try { data = await api(url); }
+  catch (e) { $("casemsg").textContent = "Could not list cases on " + m + ": " + e.message; return; }
+  if (data.path) $("root").value = data.path;
   const sel = $("case"), guest = $("cb-guest");
   sel.innerHTML = "";
   guest.innerHTML = "<option value=''>— pick a case —</option>";
@@ -982,7 +991,9 @@ async function refreshCases(selectPath) {
     guest.add(new Option(c.name + tag, c.path));
   }
   $("casemsg").textContent = data.cases.length ? "" :
-    "No cases found here — build a structure below, or point this at a folder whose subfolders contain a POSCAR.";
+    (isRemoteWorking()
+      ? "No cases in this folder on " + m + " — build a structure below to create one here."
+      : "No cases found here — build a structure below, or point this at a folder whose subfolders contain a POSCAR.");
   if (selectPath) sel.value = selectPath;
   onCaseChange();
 }
@@ -991,11 +1002,24 @@ function currentCaseType() {
   const sel = $("case");
   return sel.value ? sel.selectedOptions[0].dataset.type : null;
 }
-/* The machine a remote-built case lives on, or null for a local case. */
+/* The machine the selected case lives on, or null when working locally. When the
+   working machine is remote, every case in the list lives on it; when local, the
+   server resolves any legacy remote-pointer case on its own (no machine sent). */
 function currentCaseMachine() {
-  const sel = $("case");
-  return sel.value && sel.selectedOptions[0].dataset.remote
-    ? (sel.selectedOptions[0].dataset.machine || null) : null;
+  return isRemoteWorking() ? workingMachine() : null;
+}
+/* machine (+ case type) query suffix for GET URLs that act on the current case. */
+function caseQS() {
+  const m = currentCaseMachine(), t = currentCaseType();
+  return (m ? "&machine=" + encodeURIComponent(m) : "")
+       + (t ? "&type=" + encodeURIComponent(t) : "");
+}
+/* Add machine (+ case type) to a POST body acting on the current case. */
+function caseBody(obj) {
+  obj = obj || {};
+  const m = currentCaseMachine();
+  if (m) { obj.machine = m; obj.case_type = currentCaseType() || "single"; }
+  return obj;
 }
 async function onCaseChange() {
   const isTss = currentCaseType() === "tss";
@@ -1003,16 +1027,11 @@ async function onCaseChange() {
     : (currentCaseMachine() ? "structure on " + currentCaseMachine()
     : (currentCase() ? "single structure" : ""));
   $("nebimgs").style.display = isTss ? "inline-block" : "none";
-  // A case built on a remote machine runs there in place — point the Calculate
-  // "run on machine" and Build "build on machine" selectors at it so the UI
-  // matches what the server does (and re-saving an edit goes back to the same
-  // machine rather than silently landing on this computer).
+  // A case on a remote machine runs there in place — point the Calculate
+  // "run on machine" selector at it so the UI matches what the server does.
   const rm = currentCaseMachine();
-  if (rm && REMOTES.some(r => r.name === rm)) {
-    if ($("c-remote")) { $("c-remote").value = rm; machineChanged(); }
-    if ($("b-machine")) $("b-machine").value = rm;
-  } else if (currentCase() && $("b-machine")) {
-    $("b-machine").value = "local";
+  if (rm && $("c-remote") && REMOTES.some(r => r.name === rm)) {
+    $("c-remote").value = rm; machineChanged();
   }
   if (!currentCase() || SUPPRESS_LOAD) return;
   if (ED && ED.dirty &&
@@ -1021,11 +1040,31 @@ async function onCaseChange() {
     return;
   }
   try {
-    const p = await api("/api/structure?path=" + encodeURIComponent(currentCase()));
+    const p = await api("/api/structure?path=" + encodeURIComponent(currentCase()) + caseQS());
     edFromPayload(p, currentCase());
     $("sv-name").value = currentCase().split("/").pop();
   }
   catch (e) { /* no POSCAR preview */ }
+}
+/* Working-machine selector: switch the cases folder to that machine and rescan. */
+function workingMachineChanged() {
+  const m = workingMachine();
+  const r = REMOTES.find(x => x.name === m);
+  $("root").value = (m === "local")
+    ? (META && META.inputs_root ? META.inputs_root : "")
+    : ((r && r.remote_root ? r.remote_root.replace(/\/+$/, "") : "") + "/inputs");
+  if ($("c-remote") && (m === "local" || REMOTES.some(x => x.name === m))) {
+    $("c-remote").value = m; machineChanged();
+  }
+  if ($("sv-machine-hint")) $("sv-machine-hint").textContent =
+    m === "local" ? "" : `New cases are created on ${m} (nothing is kept on this computer).`;
+  refreshCases();
+}
+/* Browse for the cases folder — local picker, or the remote one over SSH. */
+function browseCasesFolder() {
+  const m = workingMachine(), r = REMOTES.find(x => x.name === m);
+  if (m !== "local") openPicker("root", { machine: m, root: (r && r.remote_root) || "", onpick: refreshCases });
+  else openPicker("root", { onpick: refreshCases });
 }
 
 /* ================= structure editor: model + math ================= */
@@ -1794,9 +1833,15 @@ async function saveStructure(overwrite) {
   if (!ED) { banner("Nothing to save — build or load a structure first."); return; }
   if (overwrite && ED.savedPath) { writeStructure({ dir: ED.savedPath }); return; }
   const name = $("sv-name").value.trim();
-  if (!name) { banner("Give the case a name — it becomes the folder created in the directory you choose."); return; }
+  if (!name) { banner("Give the case a name — it becomes the folder created on the working machine."); return; }
+  if (isRemoteWorking()) {
+    // Working machine is a remote: create the case straight on it under the
+    // cases folder — no local location picker.
+    writeStructure({ name, root: $("root").value.trim() });
+    return;
+  }
   if (name.startsWith("/") || name.startsWith("~")) { writeStructure({ dir: name }); return; }
-  // pop a window to choose where the <name> case folder is created
+  // pop a window to choose where the <name> case folder is created (local)
   openPicker(null, {
     what: "where to save the case",
     start: ($("root").value.trim()) || null,
@@ -1804,13 +1849,12 @@ async function saveStructure(overwrite) {
   });
 }
 async function writeStructure(loc) {
-  const machine = ($("b-machine") && $("b-machine").value) || "local";
+  const machine = workingMachine();
   const res = await api("/api/structure",
     Object.assign({ structure: payloadFromED(), machine }, loc));
   ED.savedPath = res.case; ED.dirty = false;
   updateDirty();
-  banner(res.remote ? `Saved onto ${res.machine}: ${res.remote_dir} — Calculate will run it there.`
-                    : "Saved " + res.poscar, "info");
+  banner(res.remote ? `Saved on ${res.machine}: ${res.case}` : "Saved " + res.poscar, "info");
   SUPPRESS_LOAD = true;
   try {
     $("root").value = res.case.replace(/\/[^/]+$/, "");
@@ -1978,7 +2022,7 @@ function buildTss() {
   }
   api("/api/build", { action: "tss", initial: $("nb-init").value, final: $("nb-final").value,
     output: $("nb-name").value || null,
-    machine: ($("b-machine") && $("b-machine").value) || "local" }).then(built);
+    machine: workingMachine(), root: isRemoteWorking() ? $("root").value.trim() : null }).then(built);
 }
 function combineBody() {
   const body = { mode: $("cb-mode").value, gap: $("cb-gap").value || 2.0,
@@ -2264,7 +2308,7 @@ function aseCalcChanged() {
   }
 }
 function runPayload(mode) {
-  return {
+  return caseBody({
     target: currentCase(), mode,
     engine: curEngine(),
     qe_executable: $("c-qe-exe").value || null,
@@ -2288,14 +2332,14 @@ function runPayload(mode) {
     kpoints_values: $("v-kpts").value || null,
     energy_tol: $("v-tol").value || null,
     reuse_wavecar: $("v-reuse").checked || null,
-  };
+  });
 }
 async function doPreview() {
   if (!currentCase()) { banner("Select a case first."); return; }
   const p0 = runPayload();
-  const data = await api("/api/preview", {
+  const data = await api("/api/preview", caseBody({
     target: currentCase(), calc_type: p0.calc_type, kpoints: kSpec(), spin: p0.spin,
-    engine: p0.engine, pseudo_dir: p0.pseudo_dir });
+    engine: p0.engine, pseudo_dir: p0.pseudo_dir }));
   const p = data.previews[0];
   activeConsole = "console";
   if (p.engine === "qe") {
@@ -2365,11 +2409,11 @@ async function loadRemotes() {
   refreshWorkflowRemoteSelect();
   refreshResultMachineSelect();
   refreshImportMachineSelect();
-  refreshBuildMachineSelect();
+  refreshWorkingMachineSelect();
 }
-/* Populate the Build tab's "build on machine" dropdown (local + saved remotes). */
-function refreshBuildMachineSelect() {
-  const sel = $("b-machine"); if (!sel) return;
+/* Populate the Working-case "working machine" dropdown (local + saved remotes). */
+function refreshWorkingMachineSelect() {
+  const sel = $("wc-machine"); if (!sel) return;
   const keep = sel.value;
   sel.innerHTML = "<option value='local'>💻 Local — this computer</option>";
   for (const r of REMOTES) sel.add(new Option(`🖥 ${r.name} — ${r.host}`, r.name));
@@ -2546,7 +2590,7 @@ async function loadIncar(fromTemplate) {
     incarTemplateText = text;
   } else {
     if (!currentCase()) { banner("Select a case first."); return; }
-    const data = await api(`/api/file?dir=${encodeURIComponent(currentCase())}&name=INCAR`);
+    const data = await api(`/api/file?dir=${encodeURIComponent(currentCase())}&name=INCAR` + caseQS());
     $("incar").value = data.exists ? data.text : "(no INCAR in this case — load a template, edit, then save)";
     incarTemplateText = null;
   }
@@ -2563,7 +2607,7 @@ async function syncIncarToType() {
 }
 async function saveIncar() {
   if (!currentCase()) { banner("Select a case first."); return; }
-  await api("/api/file", { dir: currentCase(), name: "INCAR", text: $("incar").value });
+  await api("/api/file", caseBody({ dir: currentCase(), name: "INCAR", text: $("incar").value }));
   incarTemplateText = null;
   banner("INCAR saved to the case — it now overrides templates.", "info");
 }
@@ -2633,7 +2677,7 @@ async function runWorkflow() {
 }
 async function saveWorkflowYaml() {
   if (!currentCase()) { banner("Select a case first."); return; }
-  await api("/api/file", { dir: currentCase(), name: "workflow.yaml", text: $("w-yaml").value });
+  await api("/api/file", caseBody({ dir: currentCase(), name: "workflow.yaml", text: $("w-yaml").value }));
   banner("workflow.yaml saved — the CLI will use it automatically for this case.", "info");
 }
 
