@@ -17,6 +17,23 @@ def test_get_case_type_unknown(tmp_path):
     assert get_case_type(empty) is None
 
 
+def test_get_case_type_ignores_poscar_named_subdir(tmp_path):
+    # A project root holding a case folder literally named "POSCAR" must not be
+    # mistaken for a case itself (POSCAR must be a *file*), or the whole case
+    # list collapses to one bogus entry instead of listing the real cases.
+    project = tmp_path / "project"
+    (project / "POSCAR").mkdir(parents=True)        # a case folder named POSCAR
+    (project / "POSCAR" / "POSCAR").write_text("x")  # ...whose POSCAR is a file
+    (project / "Fe").mkdir()
+    (project / "Fe" / "POSCAR").write_text("x")
+
+    assert get_case_type(project) is None  # the parent is not itself a case
+
+    info = inspect_target(project)
+    assert info["mode"] == "project"
+    assert set(info["case_types"]) == {"POSCAR", "Fe"}
+
+
 def test_inspect_target_single_mode(scf_case):
     info = inspect_target(scf_case)
     assert info["mode"] == "single"
