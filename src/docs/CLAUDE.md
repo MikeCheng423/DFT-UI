@@ -1,5 +1,7 @@
 # CLAUDE.md — vasp_auto
 
+**Repository:** https://github.com/MikeCheng423/DFT-UI
+
 ## Project summary
 
 `vasp_auto` is a Python CLI that automates preparing, running, and parsing VASP
