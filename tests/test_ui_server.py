@@ -153,16 +153,17 @@ def test_api_run_writes_workflow_yaml(tmp_path, monkeypatch):
     assert "--workflow" not in captured["command"]
 
 
-def test_build_on_remote_pointer_roundtrip(tmp_path, monkeypatch, scf_case):
-    """Saving a case 'on a remote machine' keeps only a pointer locally, ships the
-    inputs to the machine, lists it tagged remote, and fetches it back on demand.
-    The SSH layer is faked with a local directory standing in for the remote."""
+def test_working_machine_direct_roundtrip(tmp_path, monkeypatch, scf_case):
+    """With a remote working machine, saving writes the case straight onto that
+    machine (nothing kept locally), api_cases lists the machine's cases, and the
+    editor fetches a case back from it. The SSH layer is faked with a local dir."""
     import shutil as _sh
     from pathlib import Path as _P
 
     from vasp_auto import runner as _runner
 
     fake_root = tmp_path / "remote"
+    inputs_dir = fake_root / "inputs"
     remote = {"name": "fake", "machine": "fake", "host": "h", "remote_root": str(fake_root)}
     monkeypatch.setattr(ui_server, "_resolve_remote", lambda name: remote)
     monkeypatch.setattr(_runner, "_run_checked", lambda *a, **k: "")
@@ -176,26 +177,46 @@ def test_build_on_remote_pointer_roundtrip(tmp_path, monkeypatch, scf_case):
         _sh.copy(remote_path, local_path)
         return _P(local_path)
 
+    def fake_ship_file(local, target, remote_path, rmt, ssh_opts):
+        _P(remote_path).parent.mkdir(parents=True, exist_ok=True)
+        _sh.copy(local, remote_path)
+
+    def fake_list_cases(rmt, path):
+        cases = [{"name": d.name, "path": str(d), "type": "scf"}
+                 for d in sorted(_P(path).glob("*")) if (d / "POSCAR").is_file()]
+        return {"path": path, "cases": cases}
+
     monkeypatch.setattr(_runner, "_transfer_dir", fake_transfer)
+    monkeypatch.setattr(_runner, "_ship_file", fake_ship_file)
     monkeypatch.setattr(ui_server, "fetch_remote_file", fake_fetch)
+    monkeypatch.setattr(ui_server, "list_remote_cases", fake_list_cases)
 
     payload = ui_server.api_structure({"path": [str(scf_case)]}, None)
-    case_dir = tmp_path / "inputs" / "remcase"
     res = ui_server.api_structure_save(
-        {}, {"structure": payload, "dir": str(case_dir), "machine": "fake"})
+        {}, {"structure": payload, "name": "remcase", "machine": "fake"})
 
+    # The case lives on the machine; nothing is created on this computer.
     assert res["remote"] is True and res["machine"] == "fake"
-    # nothing left on this computer but the pointer
-    assert [p.name for p in case_dir.iterdir()] == [".remote_case.json"]
-    # the real inputs landed on the (fake) remote
-    assert (fake_root / "inputs" / "remcase" / "POSCAR").is_file()
-    # listed and tagged as remote
-    cases = ui_server.api_cases({"path": [str(case_dir.parent)]}, None)["cases"]
-    assert any(c["name"] == "remcase" and c.get("remote") and c["machine"] == "fake"
-               for c in cases)
-    # the editor can fetch the structure back from the remote
-    fetched = ui_server.api_structure({"path": [str(case_dir)]}, None)
+    assert res["case"] == str(inputs_dir / "remcase")
+    assert (inputs_dir / "remcase" / "POSCAR").is_file()
+
+    # api_cases lists the machine's cases (default <remote_root>/inputs).
+    listed = ui_server.api_cases({"machine": ["fake"]}, None)
+    assert listed["machine"] == "fake"
+    assert any(c["name"] == "remcase" and c["remote"] and c["machine"] == "fake"
+               for c in listed["cases"])
+
+    # The editor fetches a case back from the machine by its remote path.
+    fetched = ui_server.api_structure(
+        {"path": [str(inputs_dir / "remcase")], "machine": ["fake"]}, None)
     assert fetched["natoms"] == payload["natoms"]
+
+    # INCAR edits round-trip to the machine.
+    ui_server.api_file_save({}, {"dir": str(inputs_dir / "remcase"), "name": "INCAR",
+                                 "machine": "fake", "text": "ENCUT = 333\n"})
+    got = ui_server.api_file_get(
+        {"dir": [str(inputs_dir / "remcase")], "name": ["INCAR"], "machine": ["fake"]}, None)
+    assert got["exists"] and "ENCUT = 333" in got["text"]
 
 
 # ------------------------------------------------ interactive builder API
