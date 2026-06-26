@@ -426,6 +426,8 @@
         <h3>💾 Save structure <span class="badge warn" id="dirtybadge" style="display:none">unsaved changes</span></h3>
         <p class="sub">Building and editing happen in memory — nothing is written until you save. Saved cases appear in the case list for calculations.</p>
         <span class="inline wide"><label>case name (a folder; choose its location next) or absolute path</label><input id="sv-name" placeholder="my_structure"></span>
+        <span class="inline"><label>build on machine</label>
+          <select id="b-machine" title="Local keeps the case on this computer. Picking a remote writes the structure straight onto that machine (only a small pointer stays here) and Calculate then runs it in place on that machine — nothing is left on this computer."></select></span>
         <br><button class="act" onclick="saveStructure()">💾 Save as case…</button>
         <button class="ghost" id="sv-over" style="display:none" onclick="saveStructure(true)">Save over original</button>
       </div>
@@ -972,10 +974,12 @@ async function refreshCases(selectPath) {
   sel.innerHTML = "";
   guest.innerHTML = "<option value=''>— pick a case —</option>";
   for (const c of data.cases) {
-    const opt = new Option(`${c.name} (${c.type})`, c.path);
+    const tag = c.remote ? ` @${c.machine}` : "";
+    const opt = new Option(`${c.name} (${c.type})${tag}`, c.path);
     opt.dataset.type = c.type;
+    if (c.remote) { opt.dataset.remote = "1"; opt.dataset.machine = c.machine || ""; }
     sel.add(opt);
-    guest.add(new Option(c.name, c.path));
+    guest.add(new Option(c.name + tag, c.path));
   }
   $("casemsg").textContent = data.cases.length ? "" :
     "No cases found here — build a structure below, or point this at a folder whose subfolders contain a POSCAR.";
@@ -987,10 +991,29 @@ function currentCaseType() {
   const sel = $("case");
   return sel.value ? sel.selectedOptions[0].dataset.type : null;
 }
+/* The machine a remote-built case lives on, or null for a local case. */
+function currentCaseMachine() {
+  const sel = $("case");
+  return sel.value && sel.selectedOptions[0].dataset.remote
+    ? (sel.selectedOptions[0].dataset.machine || null) : null;
+}
 async function onCaseChange() {
   const isTss = currentCaseType() === "tss";
-  $("casetype").textContent = isTss ? "NEB / transition state case" : (currentCase() ? "single structure" : "");
+  $("casetype").textContent = isTss ? "NEB / transition state case"
+    : (currentCaseMachine() ? "structure on " + currentCaseMachine()
+    : (currentCase() ? "single structure" : ""));
   $("nebimgs").style.display = isTss ? "inline-block" : "none";
+  // A case built on a remote machine runs there in place — point the Calculate
+  // "run on machine" and Build "build on machine" selectors at it so the UI
+  // matches what the server does (and re-saving an edit goes back to the same
+  // machine rather than silently landing on this computer).
+  const rm = currentCaseMachine();
+  if (rm && REMOTES.some(r => r.name === rm)) {
+    if ($("c-remote")) { $("c-remote").value = rm; machineChanged(); }
+    if ($("b-machine")) $("b-machine").value = rm;
+  } else if (currentCase() && $("b-machine")) {
+    $("b-machine").value = "local";
+  }
   if (!currentCase() || SUPPRESS_LOAD) return;
   if (ED && ED.dirty &&
       !confirm("The editor has unsaved changes — discard them and load the selected case?")) {
@@ -1781,10 +1804,13 @@ async function saveStructure(overwrite) {
   });
 }
 async function writeStructure(loc) {
-  const res = await api("/api/structure", Object.assign({ structure: payloadFromED() }, loc));
+  const machine = ($("b-machine") && $("b-machine").value) || "local";
+  const res = await api("/api/structure",
+    Object.assign({ structure: payloadFromED(), machine }, loc));
   ED.savedPath = res.case; ED.dirty = false;
   updateDirty();
-  banner("Saved " + res.poscar, "info");
+  banner(res.remote ? `Saved onto ${res.machine}: ${res.remote_dir} — Calculate will run it there.`
+                    : "Saved " + res.poscar, "info");
   SUPPRESS_LOAD = true;
   try {
     $("root").value = res.case.replace(/\/[^/]+$/, "");
@@ -1801,7 +1827,7 @@ async function intoEditor(data, nameHint) {
 async function built(data) {      // for builders that do write folders (NEB, ML relax)
   $("root").value = data.case.replace(/\/[^/]+$/, "");
   await refreshCases(data.case);
-  banner("Created " + data.case, "info");
+  banner(data.remote ? `Created on ${data.machine}: ${data.remote_dir}` : ("Created " + data.case), "info");
 }
 /* ---------- AI builder: any OpenAI-compatible provider ---------- */
 let AI_PROVIDERS = {};
@@ -1951,7 +1977,8 @@ function buildTss() {
     banner("A NEB case needs both an initial and a final structure."); return;
   }
   api("/api/build", { action: "tss", initial: $("nb-init").value, final: $("nb-final").value,
-    output: $("nb-name").value || null }).then(built);
+    output: $("nb-name").value || null,
+    machine: ($("b-machine") && $("b-machine").value) || "local" }).then(built);
 }
 function combineBody() {
   const body = { mode: $("cb-mode").value, gap: $("cb-gap").value || 2.0,
@@ -2338,6 +2365,15 @@ async function loadRemotes() {
   refreshWorkflowRemoteSelect();
   refreshResultMachineSelect();
   refreshImportMachineSelect();
+  refreshBuildMachineSelect();
+}
+/* Populate the Build tab's "build on machine" dropdown (local + saved remotes). */
+function refreshBuildMachineSelect() {
+  const sel = $("b-machine"); if (!sel) return;
+  const keep = sel.value;
+  sel.innerHTML = "<option value='local'>💻 Local — this computer</option>";
+  for (const r of REMOTES) sel.add(new Option(`🖥 ${r.name} — ${r.host}`, r.name));
+  sel.value = REMOTES.some(r => r.name === keep) ? keep : "local";
 }
 /* Populate the Workflow tab's "run on machine" dropdown. */
 function refreshWorkflowRemoteSelect() {

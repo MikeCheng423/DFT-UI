@@ -10,10 +10,13 @@ Binds to 127.0.0.1 — this is a single-user local tool, not a public server.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -136,16 +139,27 @@ def api_cases(query, _body):
     if not root.exists():
         return {"path": str(root), "cases": []}
 
+    def entry(case_dir: Path) -> dict | None:
+        marker = _remote_case_marker(case_dir)
+        if marker:
+            return {"name": case_dir.name, "path": str(case_dir),
+                    "type": marker.get("type", "single"),
+                    "machine": marker.get("machine"), "remote": True}
+        case_type = get_case_type(case_dir)
+        if case_type:
+            return {"name": case_dir.name, "path": str(case_dir), "type": case_type}
+        return None
+
     cases = []
-    own_type = get_case_type(root)
-    if own_type:
-        cases.append({"name": root.name, "path": str(root), "type": own_type})
+    own = entry(root)
+    if own:
+        cases.append(own)
     else:
         for child in sorted(root.iterdir()):
             if child.is_dir():
-                case_type = get_case_type(child)
-                if case_type:
-                    cases.append({"name": child.name, "path": str(child), "type": case_type})
+                info = entry(child)
+                if info:
+                    cases.append(info)
     return {"path": str(root), "cases": cases}
 
 
@@ -192,8 +206,132 @@ def _find_poscar(case_dir: Path) -> Path:
     return poscar
 
 
+# ---------------------------------------------------------- remote-built cases
+#
+# A "remote case" is built straight onto a machine: its real inputs (POSCAR plus
+# any INCAR/KPOINTS) live under <remote_root>/inputs/<name> — the same place an
+# offload run ships to, so it runs in place without a second copy — and the only
+# thing kept on this computer is a tiny .remote_case.json pointer so the case
+# still shows up in the Build/Calculate case list.
+
+REMOTE_CASE_MARKER = ".remote_case.json"
+
+
+def _remote_case_marker(case_dir: Path) -> dict | None:
+    """The remote-case pointer for a case dir, or None for an ordinary local case."""
+    f = Path(case_dir) / REMOTE_CASE_MARKER
+    if not f.exists():
+        return None
+    try:
+        return json.loads(f.read_text(encoding="utf-8"))
+    except ValueError:
+        return None
+
+
+def _remote_inputs_dir(remote: dict, case_name: str) -> str:
+    """Where a case's inputs live on the remote — matches the offload run target
+    (<remote_root>/inputs/<name>) so a build-on-remote case runs in place."""
+    root = (remote.get("remote_root") or "").rstrip("/")
+    if not root:
+        raise ValueError("remote machine config needs a 'remote_root'")
+    return f"{root}/inputs/{case_name}"
+
+
+def _ship_case_to_remote(local_dir: Path, machine: str, case_name: str) -> dict:
+    """Push a freshly built case folder to its machine; return a pointer dict."""
+    import shlex
+    from vasp_auto.runner import _run_checked, _ssh_options, _ssh_target, _transfer_dir
+    remote = _resolve_remote(machine)
+    remote_dir = _remote_inputs_dir(remote, case_name)
+    target = _ssh_target(remote)
+    ssh_opts = _ssh_options(remote)
+    _run_checked(["ssh", "-x", *ssh_opts, target, f"mkdir -p {shlex.quote(remote_dir)}"],
+                 "remote mkdir case")
+    _transfer_dir(local_dir, target, remote_dir, remote)
+    return {"machine": machine, "host": remote.get("host"),
+            "remote_dir": remote_dir, "case_name": case_name, "type": "single"}
+
+
+def _write_remote_case_pointer(case_dir: Path, pointer: dict) -> None:
+    case_dir.mkdir(parents=True, exist_ok=True)
+    # A previous local save of the same name would otherwise shadow the pointer.
+    for stale in ("POSCAR", "INCAR", "KPOINTS"):
+        (case_dir / stale).unlink(missing_ok=True)
+    (case_dir / REMOTE_CASE_MARKER).write_text(json.dumps(pointer, indent=2), encoding="utf-8")
+
+
+def _finalize_built_case(result: dict, body: dict, ctype: str = "single") -> dict:
+    """Common tail for the direct-write builders (NEB/TSS, prototype, Materials
+    Project, …): if a remote machine was chosen, ship the freshly built case
+    folder onto it and leave only a pointer locally; otherwise return unchanged."""
+    machine = (body.get("machine") or "").strip()
+    if not machine or machine == "local":
+        return result
+    case_dir = Path(result["case"])
+    pointer = _ship_case_to_remote(case_dir, machine, case_dir.name)
+    pointer["type"] = ctype
+    rel_poscar = Path(result["poscar"]).relative_to(case_dir).as_posix()
+    shutil.rmtree(case_dir, ignore_errors=True)  # nothing left on this computer
+    _write_remote_case_pointer(case_dir, pointer)
+    return {**result, "case": str(case_dir), "machine": machine, "remote": True,
+            "remote_dir": pointer["remote_dir"],
+            "poscar": f"{pointer['remote_dir']}/{rel_poscar}"}
+
+
+def _fetch_remote_case(marker: dict, dest: Path, names=None) -> Path:
+    """Pull a remote case's input files into dest; return dest. A single case
+    needs POSCAR; a NEB/TSS case needs initial/POSCAR and final/POSCAR."""
+    remote = _resolve_remote(marker["machine"])
+    remote_dir = str(marker["remote_dir"]).rstrip("/")
+    dest.mkdir(parents=True, exist_ok=True)
+    if marker.get("type") == "tss":
+        wanted = ["initial/POSCAR", "final/POSCAR", "INCAR", "KPOINTS"]
+        required = {"initial/POSCAR", "final/POSCAR"}
+    else:
+        wanted = list(names or ["POSCAR", "INCAR", "KPOINTS", "workflow.yaml"])
+        required = {"POSCAR"}
+    got = set()
+    for rel in wanted:
+        local = dest / rel
+        local.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fetch_remote_file(remote, f"{remote_dir}/{rel}", local)
+            got.add(rel)
+        except Exception:
+            if rel in required:
+                raise
+    missing = required - got
+    if missing:
+        raise FileNotFoundError(f"Remote case {remote_dir} is missing {sorted(missing)}")
+    return dest
+
+
+@contextmanager
+def _local_case(target: Path):
+    """Yield a local case dir for `target`. For a remote-built case this fetches
+    its inputs into a temp dir (cleaned up on exit); a normal local case is
+    yielded unchanged. Returns (case_dir, marker-or-None)."""
+    marker = _remote_case_marker(target)
+    if not marker:
+        yield target, None
+        return
+    tmp = tempfile.mkdtemp(prefix="vasp_auto_rc_")
+    try:
+        staging = Path(tmp) / marker["case_name"]
+        staging.mkdir(parents=True)
+        _fetch_remote_case(marker, staging)
+        yield staging, marker
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def api_structure(query, _body):
     case_dir = Path(query["path"][0]).expanduser().resolve()
+    marker = _remote_case_marker(case_dir)
+    if marker:
+        with tempfile.TemporaryDirectory(prefix="vasp_auto_rc_") as tmp:
+            dest = _fetch_remote_case(marker, Path(tmp))
+            return _struct_payload(read_poscar(_find_poscar(dest)), case_dir / "POSCAR")
     poscar = _find_poscar(case_dir)
     return _struct_payload(read_poscar(poscar), poscar)
 
@@ -207,6 +345,16 @@ def api_structure_save(_query, body):
         raise ValueError("Give a case name or directory to save into")
     path = Path(str(target)).expanduser()
     case_dir = path if path.is_absolute() else REPO_ROOT / "inputs" / path
+    machine = (body.get("machine") or "").strip()
+    if machine and machine != "local":
+        # Build on the remote: write the POSCAR straight onto the machine and keep
+        # only a pointer locally (nothing else is left on this computer).
+        with tempfile.TemporaryDirectory(prefix="vasp_auto_rc_") as tmp:
+            write_poscar(struct, Path(tmp) / "POSCAR")
+            pointer = _ship_case_to_remote(Path(tmp), machine, case_dir.name)
+        _write_remote_case_pointer(case_dir, pointer)
+        return {"case": str(case_dir), "poscar": f"{pointer['remote_dir']}/POSCAR",
+                "machine": machine, "remote_dir": pointer["remote_dir"], "remote": True}
     write_poscar(struct, case_dir / "POSCAR")
     return {"case": str(case_dir), "poscar": str(case_dir / "POSCAR")}
 
@@ -303,10 +451,11 @@ def api_build(_query, body):
 
     if body.get("to_editor") and action not in ("tss", "prototype", "mp"):
         # Build into a throw-away directory and hand the structure to the
-        # editor instead of creating a case (cases are made by Save only).
+        # editor instead of creating a case (cases are made by Save only). Force
+        # a local build here — the eventual Save is what ships it to a remote.
         import tempfile
         with tempfile.TemporaryDirectory(prefix="vasp_auto_build_") as tmp:
-            result = api_build(_query, {**body, "to_editor": False,
+            result = api_build(_query, {**body, "to_editor": False, "machine": "local",
                                         "output": str(Path(tmp) / "editor_build")})
             return {"structure": _struct_payload(read_poscar(Path(result["poscar"])))}
 
@@ -328,7 +477,8 @@ def api_build(_query, body):
             safe += "_" + "".join(f"{k}{v}" for k, v in subs.items())
         case_dir = _output_dir(body, inputs / safe)
         write_poscar(struct, case_dir / "POSCAR")
-        return {"case": str(case_dir), "poscar": str(case_dir / "POSCAR")}
+        return _finalize_built_case(
+            {"case": str(case_dir), "poscar": str(case_dir / "POSCAR")}, body)
 
     if action == "prototype":
         # Pure-Python prototype crystals (graphene, graphite, rutile/anatase
@@ -344,7 +494,8 @@ def api_build(_query, body):
             return {"structure": _struct_payload(struct)}
         case_dir = _output_dir(body, inputs / name)
         write_poscar(struct, case_dir / "POSCAR")
-        return {"case": str(case_dir), "poscar": str(case_dir / "POSCAR")}
+        return _finalize_built_case(
+            {"case": str(case_dir), "poscar": str(case_dir / "POSCAR")}, body)
 
     if action == "bulk":
         from vasp_auto.ase_tools import build_bulk_case
@@ -450,7 +601,9 @@ def api_build(_query, body):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(poscar_src.read_bytes())
         case_dir = case_dir.resolve()
-        return {"case": str(case_dir), "poscar": str(case_dir / "initial" / "POSCAR")}
+        return _finalize_built_case(
+            {"case": str(case_dir), "poscar": str(case_dir / "initial" / "POSCAR")},
+            body, ctype="tss")
     elif action == "edit":
         source = Path(body["source"]).expanduser().resolve()
         struct = read_poscar(source / "POSCAR")
@@ -496,7 +649,7 @@ def api_build(_query, body):
     else:
         raise ValueError(f"Unknown build action: {action}")
 
-    return {"case": str(poscar.parent), "poscar": str(poscar)}
+    return _finalize_built_case({"case": str(poscar.parent), "poscar": str(poscar)}, body)
 
 
 def _case_info_for(target: Path, config: dict):
@@ -627,7 +780,12 @@ def _overlay_ase_config(config: dict, body: dict) -> dict:
 
 
 def api_preview(_query, body):
-    target = Path(body["target"]).expanduser().resolve()
+    requested = Path(body["target"]).expanduser().resolve()
+    with _local_case(requested) as (target, _marker):
+        return _preview_for_target(target, body)
+
+
+def _preview_for_target(target: Path, body):
     config = merge_local_config(_config(), target)
     _info, case_infos = _case_info_for(target, config)
 
@@ -1239,6 +1397,16 @@ def api_file_get(query, _body):
     name = query["name"][0]
     if name not in EDITABLE_FILES:
         raise ValueError(f"Not an editable file: {name}")
+    marker = _remote_case_marker(directory)
+    if marker:
+        remote = _resolve_remote(marker["machine"])
+        remote_path = f"{str(marker['remote_dir']).rstrip('/')}/{name}"
+        try:
+            with tempfile.TemporaryDirectory(prefix="vasp_auto_rc_") as tmp:
+                local = fetch_remote_file(remote, remote_path, Path(tmp) / name)
+                return {"exists": True, "text": local.read_text(encoding="utf-8")}
+        except Exception:
+            return {"exists": False, "text": ""}
     path = directory / name
     return {"exists": path.exists(), "text": path.read_text(encoding="utf-8") if path.exists() else ""}
 
@@ -1248,6 +1416,16 @@ def api_file_save(_query, body):
     name = body["name"]
     if name not in EDITABLE_FILES:
         raise ValueError(f"Not an editable file: {name}")
+    marker = _remote_case_marker(directory)
+    if marker:
+        from vasp_auto.runner import _ship_file, _ssh_options, _ssh_target
+        remote = _resolve_remote(marker["machine"])
+        remote_dir = str(marker["remote_dir"]).rstrip("/")
+        with tempfile.TemporaryDirectory(prefix="vasp_auto_rc_") as tmp:
+            src = Path(tmp) / name
+            src.write_text(body["text"], encoding="utf-8")
+            _ship_file(src, _ssh_target(remote), f"{remote_dir}/{name}", remote, _ssh_options(remote))
+        return {"saved": f"{marker['machine']}:{remote_dir}/{name}"}
     if not directory.is_dir():
         raise FileNotFoundError(f"Directory not found: {directory}")
     (directory / name).write_text(body["text"], encoding="utf-8")
@@ -1332,6 +1510,19 @@ def build_cli_args(body: dict) -> list[str]:
 
 
 def api_run(_query, body):
+    # A case built on a remote machine has no local POSCAR — only a pointer. Fetch
+    # its inputs into a staging dir to run from, and force its machine as the run
+    # target so the offload ships them back to where they already live and runs in
+    # place. (The staging dir is read by the async CLI subprocess, so it is left
+    # for the OS temp cleaner rather than removed here.)
+    target_path = Path(body["target"]).expanduser().resolve()
+    marker = _remote_case_marker(target_path)
+    if marker:
+        staging = Path(tempfile.mkdtemp(prefix="vasp_auto_rc_")) / marker["case_name"]
+        staging.mkdir(parents=True)
+        _fetch_remote_case(marker, staging)
+        body = {**body, "target": str(staging), "remote": marker["machine"]}
+
     # A structured workflow (e.g. one with a convergence step that carries its
     # own scan settings) is written to the case's workflow.yaml, which the CLI
     # then loads automatically — so no --workflow string is added.

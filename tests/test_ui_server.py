@@ -153,6 +153,51 @@ def test_api_run_writes_workflow_yaml(tmp_path, monkeypatch):
     assert "--workflow" not in captured["command"]
 
 
+def test_build_on_remote_pointer_roundtrip(tmp_path, monkeypatch, scf_case):
+    """Saving a case 'on a remote machine' keeps only a pointer locally, ships the
+    inputs to the machine, lists it tagged remote, and fetches it back on demand.
+    The SSH layer is faked with a local directory standing in for the remote."""
+    import shutil as _sh
+    from pathlib import Path as _P
+
+    from vasp_auto import runner as _runner
+
+    fake_root = tmp_path / "remote"
+    remote = {"name": "fake", "machine": "fake", "host": "h", "remote_root": str(fake_root)}
+    monkeypatch.setattr(ui_server, "_resolve_remote", lambda name: remote)
+    monkeypatch.setattr(_runner, "_run_checked", lambda *a, **k: "")
+
+    def fake_transfer(local_dir, target, remote_dir, rmt):
+        _sh.rmtree(remote_dir, ignore_errors=True)
+        _sh.copytree(local_dir, remote_dir)
+
+    def fake_fetch(rmt, remote_path, local_path):
+        _P(local_path).parent.mkdir(parents=True, exist_ok=True)
+        _sh.copy(remote_path, local_path)
+        return _P(local_path)
+
+    monkeypatch.setattr(_runner, "_transfer_dir", fake_transfer)
+    monkeypatch.setattr(ui_server, "fetch_remote_file", fake_fetch)
+
+    payload = ui_server.api_structure({"path": [str(scf_case)]}, None)
+    case_dir = tmp_path / "inputs" / "remcase"
+    res = ui_server.api_structure_save(
+        {}, {"structure": payload, "dir": str(case_dir), "machine": "fake"})
+
+    assert res["remote"] is True and res["machine"] == "fake"
+    # nothing left on this computer but the pointer
+    assert [p.name for p in case_dir.iterdir()] == [".remote_case.json"]
+    # the real inputs landed on the (fake) remote
+    assert (fake_root / "inputs" / "remcase" / "POSCAR").is_file()
+    # listed and tagged as remote
+    cases = ui_server.api_cases({"path": [str(case_dir.parent)]}, None)["cases"]
+    assert any(c["name"] == "remcase" and c.get("remote") and c["machine"] == "fake"
+               for c in cases)
+    # the editor can fetch the structure back from the remote
+    fetched = ui_server.api_structure({"path": [str(case_dir)]}, None)
+    assert fetched["natoms"] == payload["natoms"]
+
+
 # ------------------------------------------------ interactive builder API
 
 def test_structure_payload_has_editor_model(ui_base, scf_case):

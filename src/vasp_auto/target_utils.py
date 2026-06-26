@@ -8,14 +8,17 @@ def get_case_type(case_dir):
     if not case_dir.is_dir():
         return None
 
-    if (case_dir / "initial" / "POSCAR").exists() and (case_dir / "final" / "POSCAR").exists():
+    # A case is defined by a POSCAR *file*; a subdirectory that happens to be
+    # named POSCAR (e.g. a case folder literally called "POSCAR" sitting inside a
+    # project root) must not make the parent look like a case.
+    if (case_dir / "initial" / "POSCAR").is_file() and (case_dir / "final" / "POSCAR").is_file():
         return "tss"
 
     image_dirs = [p for p in case_dir.iterdir() if p.is_dir() and p.name.isdigit()] if case_dir.exists() else []
-    if (case_dir / "INCAR").exists() and len(image_dirs) >= 2 and (case_dir / "00" / "POSCAR").exists():
+    if (case_dir / "INCAR").is_file() and len(image_dirs) >= 2 and (case_dir / "00" / "POSCAR").is_file():
         return "tss"
 
-    if (case_dir / "POSCAR").exists():
+    if (case_dir / "POSCAR").is_file():
         return "scf"
 
     return None
