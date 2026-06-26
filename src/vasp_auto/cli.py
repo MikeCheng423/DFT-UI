@@ -1994,13 +1994,47 @@ def _forward_calc_flags(args) -> list[str]:
     return flags
 
 
+def _bundle_tss_inputs(case_dir: Path, bundle: Path, case_name: str) -> Path:
+    """Copy a TSS/NEB case's inputs into the offload bundle and return the POSCAR
+    to build the (shared) POTCAR from.
+
+    Handles both the endpoint layout (initial/POSCAR + final/POSCAR, which the
+    remote engine interpolates) and an already-expanded image layout (00/, 01/,
+    … POSCARs). INCAR/KPOINTS are forwarded if present; the NEB INCAR is otherwise
+    built on the remote."""
+    initial = case_dir / "initial" / "POSCAR"
+    final = case_dir / "final" / "POSCAR"
+    image_dirs = [p for p in sorted(case_dir.iterdir()) if p.is_dir() and p.name.isdigit()]
+    if initial.exists() and final.exists():
+        (bundle / "initial").mkdir()
+        (bundle / "final").mkdir()
+        shutil.copy2(initial, bundle / "initial" / "POSCAR")
+        shutil.copy2(final, bundle / "final" / "POSCAR")
+        potcar_src = bundle / "initial" / "POSCAR"
+    elif image_dirs:
+        for image_dir in image_dirs:
+            (bundle / image_dir.name).mkdir()
+            shutil.copy2(image_dir / "POSCAR", bundle / image_dir.name / "POSCAR")
+        potcar_src = bundle / image_dirs[0].name / "POSCAR"
+    else:
+        raise SystemExit(
+            f"{case_name}: TSS/NEB case needs initial/POSCAR and final/POSCAR "
+            "(or expanded 00/, 01/, … image folders)."
+        )
+    for optional in ("INCAR", "KPOINTS"):
+        if (case_dir / optional).exists():
+            shutil.copy2(case_dir / optional, bundle / optional)
+    return potcar_src
+
+
 def _run_detached_offload(case_dir, case_info, args, config, remote, calc_type, kpoints_spec,
                           mode, project_name):
     """Offload a full calculation to the remote engine (run_mode: ssh_detached).
 
-    Prepares an inputs bundle (POSCAR + a pre-built POTCAR, plus any user INCAR/
-    KPOINTS) locally, ships it, and launches the remote vasp_auto detached so the
-    local host can be powered off. Returns (case_info, [row])."""
+    Prepares an inputs bundle (a single-case POSCAR, or a TSS/NEB case's
+    initial/final endpoints, plus a pre-built POTCAR and any user INCAR/KPOINTS)
+    locally, ships it, and launches the remote vasp_auto detached so the local
+    host can be powered off. Returns (case_info, [row])."""
     import tempfile
     from vasp_auto.potcar_finder import build_potcar
     from vasp_auto.runner import submit_job_detached
@@ -2009,26 +2043,30 @@ def _run_detached_offload(case_dir, case_info, args, config, remote, calc_type, 
     case_name = case_info["case_name"]
     machine = remote.get("name") or remote.get("host")
 
+    is_tss = case_info["calculation_type"] == "tss"
     with tempfile.TemporaryDirectory() as tmp:
         bundle = Path(tmp) / case_name
         bundle.mkdir(parents=True)
-        # POSCAR is required; INCAR/KPOINTS are forwarded if the user supplied them.
-        poscar = case_dir / "POSCAR"
-        if not poscar.exists():
-            # NEB/TSS uses initial/final POSCARs — offload supports single cases for now.
-            raise SystemExit(
-                f"{case_name}: offload (ssh_detached) needs a POSCAR; NEB/TSS offload "
-                "is not supported yet — use a synchronous remote (run_mode: ssh)."
-            )
-        shutil.copy2(poscar, bundle / "POSCAR")
-        # workflow.yaml is forwarded so a chained/converge workflow offloads too
-        # (the remote engine re-reads it via load_workflow_spec).
-        for optional in ("INCAR", "KPOINTS", "workflow.yaml"):
-            if (case_dir / optional).exists():
-                shutil.copy2(case_dir / optional, bundle / optional)
+        if is_tss:
+            # NEB/TSS: ship the endpoints (initial/final POSCAR) or, for an
+            # already-expanded case, every image POSCAR. The remote engine
+            # interpolates the images, builds the NEB INCAR, and runs them all.
+            potcar_src = _bundle_tss_inputs(case_dir, bundle, case_name)
+        else:
+            # POSCAR is required; INCAR/KPOINTS are forwarded if the user supplied them.
+            poscar = case_dir / "POSCAR"
+            if not poscar.exists():
+                raise SystemExit(f"{case_name}: offload (ssh_detached) needs a POSCAR.")
+            shutil.copy2(poscar, bundle / "POSCAR")
+            # workflow.yaml is forwarded so a chained/converge workflow offloads too
+            # (the remote engine re-reads it via load_workflow_spec).
+            for optional in ("INCAR", "KPOINTS", "workflow.yaml"):
+                if (case_dir / optional).exists():
+                    shutil.copy2(case_dir / optional, bundle / optional)
+            potcar_src = bundle / "POSCAR"
         # Pre-build POTCAR so the remote never needs the (proprietary) library.
         build_potcar(
-            poscar_path=str(bundle / "POSCAR"),
+            poscar_path=str(potcar_src),
             potcar_root=config.get("potcar_root"),
             output_path=str(bundle / "POTCAR"),
             potcar_map=config.get("potcar_map"),

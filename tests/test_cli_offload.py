@@ -93,3 +93,46 @@ def test_offload_bundles_workflow_yaml(tmp_path, monkeypatch):
     assert "workflow.yaml" in captured["files"]
     assert "INCAR" in captured["files"]
     assert "--workflow" in captured["flags"] and "relax,scf" in captured["flags"]
+
+
+def test_offload_bundles_neb_endpoints(tmp_path, monkeypatch):
+    """A TSS/NEB case offloads its initial/final endpoints + a pre-built POTCAR so
+    the remote engine interpolates the images and runs NEB detached."""
+    import vasp_auto.potcar_finder as potcar_finder
+    import vasp_auto.runner as runner
+    from vasp_auto.cli import _run_detached_offload
+    from vasp_auto.job_manager import make_case_info
+
+    poscar = "Au\n1.0\n10 0 0\n0 10 0\n0 0 10\nAu\n1\nCartesian\n0 0 0\n"
+    case = tmp_path / "neb_case"
+    (case / "initial").mkdir(parents=True)
+    (case / "final").mkdir(parents=True)
+    (case / "initial" / "POSCAR").write_text(poscar)
+    (case / "final" / "POSCAR").write_text(poscar)
+
+    captured = {}
+
+    def fake_submit(case_dir, remote, case_name, cpus, calc_flags, local_job_dir=None, on_progress=None):
+        root = Path(case_dir)
+        captured["tree"] = sorted(str(p.relative_to(root)) for p in root.rglob("*"))
+        captured["flags"] = list(calc_flags)
+        return {"machine": remote.get("name"), "remote_dir": "/r/" + case_name,
+                "inputs_dir": "/r/in", "control_dir": "/r/ctl", "pid": "9", "log": "/r/log"}
+
+    monkeypatch.setattr(runner, "submit_job_detached", fake_submit)
+    monkeypatch.setattr(potcar_finder, "build_potcar",
+                        lambda **kw: Path(kw["output_path"]).write_text("POTCAR\n"))
+
+    args = _args(["inputs/neb_case", "--calc-type", "neb", "--neb-images", "3"])
+    args.cpus = 6
+    config = {"potcar_root": str(tmp_path / "pot"), "vasp_executable": "vasp_std"}
+    case_info = make_case_info(case, tmp_path / "jobs", single_mode=True)
+    assert case_info["calculation_type"] == "tss"
+    remote = {"name": "apl2", "host": "h", "remote_root": "/r", "vasp_executable": "/v"}
+
+    _run_detached_offload(case, case_info, args, config, remote, None, None, "single", "neb_case")
+
+    assert "initial/POSCAR" in captured["tree"]
+    assert "final/POSCAR" in captured["tree"]
+    assert "POTCAR" in captured["tree"]
+    assert "--neb-images" in captured["flags"] and "3" in captured["flags"]
