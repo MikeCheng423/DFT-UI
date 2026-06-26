@@ -1113,7 +1113,7 @@ def fetch_remote_results(
         return {"local_dir": str(local), "remote_dir": remote_dir, "transferred": True}
 
     # scp fallback: pull a known set of result files, ignoring any that are absent.
-    wanted = ["OUTCAR", "CONTCAR", "OSZICAR", "vasprun.xml", "run.log",
+    wanted = ["OUTCAR", "CONTCAR", "OSZICAR", "vasprun.xml", "run.log", "job.log",
               "DOSCAR", "EIGENVAL", "XDATCAR", "INCAR", "KPOINTS", "POSCAR", "LOCPOT"]
     if include_heavy:
         wanted += HEAVY_OUTPUTS

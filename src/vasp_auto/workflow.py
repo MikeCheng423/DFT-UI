@@ -708,6 +708,9 @@ def run_one_case(
             row["return_code"] = return_code
             if error_summary:
                 row["errors"] = error_summary
+            from vasp_auto.job_log import write_job_log
+            write_job_log(job_dir, case_info.get("case_name"),
+                          case_info.get("calculation_type"), return_code)
             machine = remote.get("name") or remote.get("host")
             print(f"Finished  : {case_info['case_name']} on {machine} "
                   f"({remote['remote_root'].rstrip('/')}/{job_dir.name})")
@@ -794,4 +797,8 @@ def run_one_case(
     if retries:
         row["auto_retries"] = retries
         row["auto_fixes"] = "; ".join(all_fixes)
+    # Drop a human-readable job.log summary next to the raw VASP output.
+    from vasp_auto.job_log import write_job_log
+    write_job_log(job_dir, case_info.get("case_name"),
+                  case_info.get("calculation_type"), return_code)
     return row

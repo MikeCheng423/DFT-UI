@@ -1766,6 +1766,11 @@ def api_remote_fetch(_query, body):
         _remote_for_marker(marker), remote_dir, job_dir,
         include_heavy=bool(body.get("heavy")),
     )
+    # Build a fresh job.log from the pulled files so a readable summary exists even
+    # when the remote engine predates job.log (or only wrote partial output).
+    if (job_dir / "OUTCAR").exists():
+        from vasp_auto.job_log import write_job_log
+        write_job_log(job_dir, job_dir.name)
     result["machine"] = marker.get("machine") or marker.get("host")
     result["has_outcar"] = (job_dir / "OUTCAR").exists()
     result["has_vasprun"] = (job_dir / "vasprun.xml").exists()
