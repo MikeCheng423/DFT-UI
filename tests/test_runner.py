@@ -16,6 +16,7 @@ from vasp_auto.runner import (
     list_remote_jobs,
     poll_detached_job,
     read_remote_text,
+    resolve_detached_job_dir,
     poll_job_status,
     poll_remote_job,
     remote_run_mode,
@@ -444,6 +445,8 @@ def test_submit_job_detached_ships_launches_and_marks(tmp_path):
     assert "/work/.vasp_auto/example" in joined
     assert "export VASP_AUTO_ROOT=/work/.vasp_auto" in shipped["run_sh"]
     assert "--converge-encut" in shipped["run_sh"]
+    # the engine records its real (numbered) job root here for later resolution
+    assert "export VASP_AUTO_JOBDIR_FILE=/work/.vasp_auto/runs/H2O/job_dir" in shipped["run_sh"]
     # marker tags the machine, control dir and pid for later polling
     marker = json.loads((local_job / ".remote.json").read_text())
     assert marker["machine"] == "wkstn"
@@ -461,6 +464,32 @@ def test_submit_job_detached_requires_engine(tmp_path):
         with pytest.raises(RuntimeError, match="offload engine is not installed"):
             submit_job_detached(case_dir=str(bundle), remote=remote, case_name="H2O",
                                 cpus=4, calc_flags=[])
+
+
+def test_resolve_detached_job_dir_reads_control_file():
+    """The real numbered job root is read back from <control_dir>/job_dir over SSH."""
+    remote = {"host": "wkstn", "user": "u", "remote_root": "/work"}
+
+    def fake_run(cmd, **kwargs):
+        assert "cat" in " ".join(cmd) and "/work/.vasp_auto/runs/H2O/job_dir" in " ".join(cmd)
+        return subprocess.CompletedProcess(args=cmd, returncode=0,
+                                           stdout="/work/results/0003_H2O\n", stderr="")
+
+    with patch("subprocess.run", side_effect=fake_run):
+        got = resolve_detached_job_dir(remote, "/work/.vasp_auto/runs/H2O")
+    assert got == "/work/results/0003_H2O"
+
+
+def test_resolve_detached_job_dir_returns_none_when_absent():
+    """No control dir, or the file not yet written, resolves to None (caller falls back)."""
+    remote = {"host": "wkstn", "remote_root": "/work"}
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="")
+
+    with patch("subprocess.run", side_effect=fake_run):
+        assert resolve_detached_job_dir(remote, "/work/.vasp_auto/runs/H2O") is None
+    assert resolve_detached_job_dir(remote, "") is None
 
 
 def test_poll_detached_job_states():

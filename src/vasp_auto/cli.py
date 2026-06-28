@@ -2110,6 +2110,15 @@ def _process_case(case_dir, args, base_config, mode, project_name, output_root, 
     case_info = make_case_info(case_dir, output_root, single_mode=(mode == "single"),
                                job_mode=job_mode)
     case_info["project"] = project_name
+    # When the detached-offload engine runs us, it points VASP_AUTO_JOBDIR_FILE at a
+    # file in its control dir; record the real (numbered) job root there so the
+    # submitting host can resolve where the job actually lives on this machine.
+    jobdir_file = os.environ.get("VASP_AUTO_JOBDIR_FILE")
+    if jobdir_file:
+        try:
+            Path(jobdir_file).write_text(f"{case_info['job_dir']}\n", encoding="utf-8")
+        except OSError:
+            pass
     print(f"Case      : {case_dir.name}")
     print(f"Type      : {case_info['calculation_type']}")
 

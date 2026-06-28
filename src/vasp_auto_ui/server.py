@@ -60,6 +60,7 @@ from vasp_auto.runner import (
     poll_detached_job,
     poll_remote_job,
     read_remote_text,
+    resolve_detached_job_dir,
     remote_engine_installed,
     remote_run_mode,
     setup_remote_engine,
@@ -1766,6 +1767,28 @@ def api_remote_setup(_query, body):
     return result
 
 
+def _resolve_remote_job_dir(local_job_dir: Path, marker: dict, remote: dict) -> str | None:
+    """The real job root on the remote, resolved from a detached offload's control dir.
+
+    The remote engine numbers each run (``<remote_root>/results/<NNNN>_<case>``), so the
+    placeholder recorded at submit time is not where the job actually lives. Read the
+    engine-written path back, persist it into the local ``.remote.json`` so later calls
+    are cheap, and return it. Falls back to the recorded ``remote_dir`` for non-offload
+    jobs, or while the engine has not yet allocated its directory."""
+    recorded = marker.get("remote_dir")
+    if marker.get("mode") != "ssh_detached" or not marker.get("control_dir"):
+        return recorded
+    resolved = resolve_detached_job_dir(remote, marker["control_dir"])
+    if resolved and resolved != recorded:
+        marker["remote_dir"] = resolved
+        try:
+            (local_job_dir / ".remote.json").write_text(
+                json.dumps(marker, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+    return resolved or recorded
+
+
 def api_remote_status(_query, body):
     """Poll the remote for a submitted job's state (scheduler or detached offload)."""
     job_dir = Path(body["job_dir"]).expanduser().resolve()
@@ -1783,7 +1806,7 @@ def api_remote_status(_query, body):
             raise ValueError("No remote job id recorded for this case.")
         result = poll_remote_job(remote, marker["job_id"])
     result["machine"] = marker.get("machine") or marker.get("host")
-    result["remote_dir"] = marker.get("remote_dir")
+    result["remote_dir"] = _resolve_remote_job_dir(job_dir, marker, remote)
     return result
 
 
@@ -1793,11 +1816,12 @@ def api_remote_fetch(_query, body):
     marker = read_remote_marker(job_dir)
     if not marker:
         raise ValueError("This case was not submitted to a remote machine.")
-    remote_dir = marker.get("remote_dir")
+    remote = _remote_for_marker(marker)
+    remote_dir = _resolve_remote_job_dir(job_dir, marker, remote)
     if not remote_dir:
         raise ValueError("No remote directory recorded for this case.")
     result = fetch_remote_results(
-        _remote_for_marker(marker), remote_dir, job_dir,
+        remote, remote_dir, job_dir,
         include_heavy=bool(body.get("heavy")),
     )
     # Build a fresh job.log from the pulled files so a readable summary exists even
