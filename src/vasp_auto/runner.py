@@ -851,11 +851,15 @@ def submit_job_detached(
     pid_f = f"{control_dir}/pid"
     rc_f = f"{control_dir}/rc"
     log_f = f"{control_dir}/run.log"
+    jobdir_f = f"{control_dir}/job_dir"
     script = "\n".join([
         "#!/bin/bash",
         f"echo $$ > {shlex.quote(pid_f)}",
         f"cd {shlex.quote(paths['root'])}",
         *([f"export VASP_AUTO_ROOT={shlex.quote(templates_root)}"] if templates_root else []),
+        # The engine writes the real (numbered) job root here, so the submitting host
+        # can later resolve exactly where the job lives on this machine.
+        f"export VASP_AUTO_JOBDIR_FILE={shlex.quote(jobdir_f)}",
         f"{{ {env_line} ; }} >/dev/null 2>&1 || true",
         "ulimit -s unlimited 2>/dev/null || true",
         f"{shlex.quote(paths['vasp_auto'])} {shlex.quote('inputs/' + case_name)} "
@@ -919,6 +923,29 @@ def poll_detached_job(remote: dict, control_dir: str, pid: str | None = None) ->
     if lines and lines[0] == "RUNNING":
         return {"state": "running", "return_code": None, "raw": res.stdout.strip()}
     return {"state": "unknown", "return_code": None, "raw": res.stdout.strip() or res.stderr.strip()}
+
+
+def resolve_detached_job_dir(remote: dict, control_dir: str) -> str | None:
+    """The real (numbered) job root a detached offload chose, or None if not yet known.
+
+    The remote engine writes its allocated job dir to ``<control_dir>/job_dir`` at the
+    start of a run (see the run.sh built by :func:`submit_job_detached`). Reading it back
+    gives the submitting host the exact ``<remote_root>/results/<NNNN>_<case>`` path the
+    job lives in, instead of the bare placeholder recorded at submit time.
+    """
+    if not control_dir:
+        return None
+    target = _ssh_target(remote)
+    ssh_opts = _ssh_options(remote)
+    jobdir_f = f"{control_dir.rstrip('/')}/job_dir"
+    cmd = f"cat {shlex.quote(jobdir_f)} 2>/dev/null"
+    try:
+        res = subprocess.run(["ssh", "-x", *ssh_opts, target, cmd],
+                             capture_output=True, encoding="utf-8", errors="replace", timeout=30)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    path = res.stdout.strip()
+    return path or None
 
 
 def poll_job_status(job_id: str, scheduler: str = "slurm") -> dict:

@@ -403,14 +403,21 @@ needs remote internet). CLI `--remote-setup` / UI `/api/remote/setup` +
 (POSCAR + a locally pre-built POTCAR via `build_potcar`, so no POTCAR library on
 the remote) + a generated `config.yaml` (`jobs_root: <remote_root>/results`),
 writes a `run.sh`, launches it under `setsid` (records PID in
-`<remote_root>/.vasp_auto/runs/<case>/{pid,rc,run.log}`), and returns at once with
-a `.remote.json` marker (mode=ssh_detached, pid, control_dir). `cli._process_case`
+`<remote_root>/.vasp_auto/runs/<case>/{pid,rc,run.log,job_dir}`), and returns at once
+with a `.remote.json` marker (mode=ssh_detached, pid, control_dir). The remote engine
+numbers each run, so the job root is `<remote_root>/results/<NNNN>_<case>` (not the
+bare `…/results/<case>` placeholder recorded at submit time): `run.sh` exports
+`VASP_AUTO_JOBDIR_FILE=<control_dir>/job_dir` and `cli._process_case` writes the real
+job dir there right after `make_case_info`, so the job root stays on the machine that
+ran it and the submitting host can resolve exactly where. `cli._process_case`
 routes detached runs to `_run_detached_offload` (early, before the workflow/
 converge/run branches) and forwards the calc flags via `_forward_calc_flags(args)`
 — the remote CLI re-branches, so convergence/workflow "just work" remotely.
 `poll_detached_job()` checks the PID/rc files; `api_remote_status` routes
-ssh_detached markers to it (else the scheduler poller); fetch reuses
-`fetch_remote_results`. UI Remote form run-mode dropdown gained the
+ssh_detached markers to it (else the scheduler poller). Both poll and fetch call
+`resolve_detached_job_dir(remote, control_dir)` (cats `<control_dir>/job_dir` over SSH)
+to get the real numbered job root, persist it back into `.remote.json`, and `fetch`
+then reuses `fetch_remote_results` against it. UI Remote form run-mode dropdown gained the
 "offload (detached)" option. NEB/TSS offload not supported yet (needs a single
 POSCAR). Verified live end-to-end on apl2 (oneAPI) and engine installed on tlclab
 (system OpenMPI, no env_setup): `--remote-setup`, detached ENCUT convergence via
@@ -569,6 +576,7 @@ Entry points a GUI should call: `make_case_info`, `create_job_from_case`,
 6. **Update this CLAUDE.md every time you change the code** — the repository
    layout, the known-problem list, and the work loop below must always reflect
    the current state of the engine. This is mandatory, not optional.
+7. Push the code to the Github: https://github.com/MikeCheng423/DFT-UI   
 
 ---
 
