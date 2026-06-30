@@ -425,6 +425,29 @@ CLI and via the UI `/api/run`→status→fetch, laptop-off-safe (SSH returns whi
 job runs under setsid). Tests: `tests/test_runner.py` (engine paths/submit/poll) +
 `tests/test_cli_offload.py` (flag forwarding); 376 total, selfcheck 55/0.
 
+**Resume an unfinished job in place (2026-06-30):** restart a job from its newest
+CONTCAR *without allocating a new `NNNN_` job number* — the job dir's own
+INCAR/KPOINTS/POTCAR are reused verbatim (never rebuilt from the case dir, unlike
+`--retry-failed`); only POSCAR advances (CONTCAR→POSCAR, old kept as POSCAR.bak),
+WAVECAR/CHGCAR are left for a warm start, and NEB/TSS jobs reseed each image
+subdir. A finished job is skipped unless forced. Engine: `workflow.resume_job`
+(local), `runner.resume_job_remote` (synchronous over SSH, in place — nothing
+re-shipped), and `runner.resume_job_detached` (offload machines: seeds + reruns
+`mpirun` under `setsid` with a `<remote_root>/.vasp_auto/runs/<job>` control dir
+holding pid/rc/job_dir, so `poll_detached_job`/`resolve_detached_job_dir` and the
+status/fetch buttons track it — power-off-safe). CLI: `--resume` (case-based:
+resumes the latest numbered local job dir via `_process_case`) and
+`--resume-job-dir DIR` (explicit dir, local **or** remote; `_run_resume` short-circuit
+picks detached vs synchronous by `remote_run_mode`; `--resume-local-mirror` records a
+local marker dir for UI tracking). UI: **⏯ Resume** button on the Calculate tab →
+`/api/resume`, which resolves the job dir (`_latest_remote_job_dir` for a remote
+working machine, newest `<NNNN>_<case>` under `<remote_root>/results`/`<remote_root>`)
+and launches `vasp-auto --resume-job-dir …` through the shared `_spawn_cli_job`
+helper (live log + ✕ stop). Also this pass: the **Save-structure card gained a
+location 📁 picker** (`sv-loc`/`saveBrowse`, folder mode, local or remote over SSH);
+`api_structure_save` now honours a chosen local `root`. Every calculate path stays
+available on both local and remote machines (see the convention below).
+
 > **Results now read the jobs/results folder (2026-06-15):** the Results tab
 > had been driven by the *inputs* folder and guessed where each case's output
 > went, so jobs run under a different name were hidden and buttons could land on
@@ -560,6 +583,8 @@ Entry points a GUI should call: `make_case_info`, `create_job_from_case`,
 - Do not import `numpy` in the engine — calculations stay pure Python.
 - Keep `runner.py` a thin subprocess wrapper; all logic lives in `workflow.py`
   or `convergence.py`.
+- Make sure every calculate function is available on the remote and local
+  machine while modify a function or adding new function.
 - The `jobs/` directory is generated output. Never commit it.
 - POTCAR files are proprietary. Never commit them; never print their content.
 
