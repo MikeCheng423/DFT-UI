@@ -179,6 +179,27 @@ def parse_args():
         help="Only rerun failed cases.",
     )
     parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume the latest unfinished job in place from its newest CONTCAR, "
+             "reusing that job directory's own INCAR/KPOINTS/POTCAR (no new job number).",
+    )
+    parser.add_argument(
+        "--resume-job-dir",
+        default=None,
+        metavar="DIR",
+        help="Resume one explicit job directory in place from its newest CONTCAR "
+             "(reusing its INCAR/KPOINTS/POTCAR). With --remote/--remote-config the "
+             "directory is a path on that machine and the restart runs there.",
+    )
+    parser.add_argument(
+        "--resume-local-mirror",
+        default=None,
+        metavar="DIR",
+        help="With --resume-job-dir on a remote machine, also copy the results back "
+             "into this local directory so local viewers work.",
+    )
+    parser.add_argument(
         "--cases",
         nargs="+",
         default=None,
@@ -1560,6 +1581,55 @@ def _poll_job(args, config) -> bool:
     return True
 
 
+def _run_resume(args, config) -> bool:
+    """--resume-job-dir DIR: resume one job in place, locally or on a remote.
+
+    Local: reuse the directory's own INCAR/KPOINTS/POTCAR and restart from its
+    newest CONTCAR (workflow.resume_job). Remote (--remote/--remote-config): do
+    the same in place on the machine the job lives on — synchronously over SSH
+    (runner.resume_job_remote) or, for offload machines (run_mode ssh_detached),
+    detached under setsid so the local host can power off
+    (runner.resume_job_detached). --resume-local-mirror records a local job dir so
+    the UI's status/fetch buttons can track the run.
+    """
+    if not args.resume_job_dir:
+        return False
+    remote = resolve_remote(args, config)
+    job_dir = args.resume_job_dir
+    if remote:
+        machine = remote.get("name") or remote.get("host")
+        mirror = args.resume_local_mirror or None
+        # Offload machines resume detached (setsid): the restart keeps running
+        # after SSH disconnects, so the local host can power off. Other remotes
+        # run mpirun synchronously over SSH and pull the results back.
+        if remote_run_mode(remote) == "ssh_detached":
+            from vasp_auto.runner import resume_job_detached
+            print(f"Resume    : {job_dir} on {machine} (detached; local host can power off)")
+            result = resume_job_detached(
+                remote, job_dir, cpus=args.cpus,
+                local_job_dir=mirror, on_progress=lambda m: print(m),
+            )
+            print(f"Launched  : {machine} pid {result['pid'] or '?'} -> {result['remote_dir']}")
+            print("Fetch later from the Results tab (⬇) or with --parse-only after copying back.")
+        else:
+            from vasp_auto.runner import resume_job_remote
+            print(f"Resume    : {job_dir} on {machine} (in place, from newest CONTCAR)")
+            return_code = resume_job_remote(
+                remote, job_dir, cpus=args.cpus,
+                on_progress=lambda m: print(m), local_job_dir=mirror,
+            )
+            print(f"Finished  : remote resume of {job_dir} (rc={return_code})")
+    else:
+        from vasp_auto.workflow import resume_job
+        resume_job(
+            job_dir,
+            vasp_executable=config.get("vasp_executable"),
+            cpus=args.cpus,
+        )
+        print(f"Finished  : {job_dir}")
+    return True
+
+
 def _apply_remote_setup(args, config) -> bool:
     """--remote-setup: install the engine venv on the chosen remote, then exit."""
     if not args.remote_setup:
@@ -2101,7 +2171,7 @@ def _process_case(case_dir, args, base_config, mode, project_name, output_root, 
     # Numbered job folders (0001_Fe, 0002_Si …) so a re-run never overwrites an
     # earlier one. --retry-failed continues the latest existing job; --dry-run
     # only predicts the name; a normal run/prepare claims the next number.
-    if args.retry_failed:
+    if args.retry_failed or args.resume:
         job_mode = "latest"
     elif args.dry_run:
         job_mode = "preview"
@@ -2124,6 +2194,25 @@ def _process_case(case_dir, args, base_config, mode, project_name, output_root, 
 
     is_tss = case_info["calculation_type"] == "tss"
     converge_requested = args.converge_scf or args.converge_encut or args.converge_sigma
+
+    # Resume runs the latest existing job directory in place from its newest
+    # CONTCAR, reusing that directory's own INCAR/KPOINTS/POTCAR — it never
+    # rebuilds inputs from the case dir or allocates a new job number.
+    if args.resume:
+        if remote:
+            raise SystemExit(
+                "--resume runs in place on a local job directory; remote resume is not supported."
+            )
+        from vasp_auto.workflow import resume_job
+        row = resume_job(
+            case_info["job_dir"],
+            vasp_executable=config.get("vasp_executable"),
+            cpus=args.cpus,
+            project_name=project_name,
+            case_name=case_info["case_name"],
+            calculation_type=case_info["calculation_type"],
+        )
+        return case_info, [row]
 
     if engine in ("qe", "ase"):
         # Non-VASP engines have a narrower scope (scf/relax). The VASP-only
@@ -2308,6 +2397,9 @@ def main():
     config = load_config()
 
     if _poll_job(args, config):
+        return
+
+    if _run_resume(args, config):
         return
 
     if _apply_remote_setup(args, config):

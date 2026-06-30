@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -801,4 +802,127 @@ def run_one_case(
     from vasp_auto.job_log import write_job_log
     write_job_log(job_dir, case_info.get("case_name"),
                   case_info.get("calculation_type"), return_code)
+    return row
+
+
+# Sequence prefix on a numbered job folder, e.g. "0004_Fe" -> case name "Fe".
+_JOB_NUMBER_PREFIX = re.compile(r"^\d+_")
+
+
+def _seed_poscar_from_contcar(work_dir: Path) -> bool:
+    """Advance POSCAR to the latest geometry VASP wrote (CONTCAR), in place.
+
+    Copies a non-empty ``CONTCAR`` onto ``POSCAR`` (keeping the previous POSCAR as
+    ``POSCAR.bak``) and returns True. Returns False when no usable CONTCAR exists —
+    the run never started, so the existing POSCAR is already the newest geometry
+    and is left untouched.
+    """
+    contcar = work_dir / "CONTCAR"
+    poscar = work_dir / "POSCAR"
+    if contcar.exists() and contcar.stat().st_size > 0:
+        if poscar.exists():
+            shutil.copy2(poscar, work_dir / "POSCAR.bak")
+        shutil.copy2(contcar, poscar)
+        return True
+    return False
+
+
+def resume_job(
+    job_dir,
+    vasp_executable,
+    cpus=None,
+    on_progress=None,
+    project_name="",
+    case_name=None,
+    calculation_type=None,
+    force=False,
+):
+    """Resume an unfinished VASP job *in place*, restarting from its newest CONTCAR.
+
+    This never allocates a new ``NNNN_`` job number: it runs in ``job_dir`` itself
+    (e.g. ``jobs/Fe/0004_Fe``) and reuses the INCAR, KPOINTS and POTCAR already
+    sitting there — they are taken verbatim, never rebuilt from the original case
+    directory. Only the geometry advances: the latest non-empty CONTCAR becomes the
+    new POSCAR (the previous POSCAR is kept as ``POSCAR.bak``). Any WAVECAR/CHGCAR
+    present are left untouched so VASP can warm-start from them. Results are written
+    back into the same directory.
+
+    NEB/TSS jobs (numeric image subdirs) are resumed per image: each image's
+    CONTCAR seeds its POSCAR, and the shared INCAR/KPOINTS/POTCAR at the top level
+    are reused.
+
+    Unless ``force`` is set, a job that already converged is left alone (a row is
+    returned without re-running). ``calculation_type`` is auto-detected from the
+    directory layout when not given. Returns a summary row, mirroring
+    :func:`run_one_case`.
+    """
+    job_dir = Path(job_dir).resolve()
+    if not job_dir.is_dir():
+        raise FileNotFoundError(f"job directory not found: {job_dir}")
+
+    engine_name = job_engine(job_dir)
+    if engine_name != "vasp":
+        raise ValueError(
+            f"resume_job supports VASP jobs only; {job_dir.name} looks like a "
+            f"'{engine_name}' job. Re-run it from the case instead."
+        )
+
+    if case_name is None:
+        case_name = _JOB_NUMBER_PREFIX.sub("", job_dir.name) or job_dir.name
+
+    # NEB/TSS jobs keep one CONTCAR per numeric image subdir; a flat job keeps a
+    # single CONTCAR at the top level. Detect the layout when not told.
+    image_dirs = _neb_image_dirs(job_dir)
+    is_neb = (calculation_type == "tss") or (
+        calculation_type is None
+        and len(image_dirs) >= 2
+        and all((d / "POSCAR").exists() or (d / "CONTCAR").exists() for d in image_dirs)
+    )
+    calculation_type = "tss" if is_neb else (calculation_type or "scf")
+
+    case_info = {
+        "case_name": case_name,
+        "job_dir": job_dir,
+        "calculation_type": calculation_type,
+        "project": project_name,
+    }
+
+    # Only resume jobs that actually need it, unless explicitly forced.
+    if not force and not should_retry_failed(case_info):
+        print(f"Skip      : {case_name} already finished ({job_dir.name})")
+        return build_row(project_name, "single", case_info)
+
+    # The inputs must already live in the job dir — we reuse them as-is and never
+    # fall back to the original case directory.
+    missing = [name for name in ("INCAR", "KPOINTS", "POTCAR") if not (job_dir / name).exists()]
+    if missing:
+        raise FileNotFoundError(
+            f"cannot resume {job_dir.name}: missing {', '.join(missing)} in the job directory"
+        )
+
+    if is_neb:
+        seeded = sum(_seed_poscar_from_contcar(d) for d in image_dirs)
+        print(
+            f"Resume    : {case_name} ({job_dir.name}) — kept INCAR/KPOINTS/POTCAR; "
+            f"advanced {seeded}/{len(image_dirs)} image POSCAR(s) from CONTCAR"
+        )
+    else:
+        if not (job_dir / "POSCAR").exists() and not (job_dir / "CONTCAR").exists():
+            raise FileNotFoundError(
+                f"cannot resume {job_dir.name}: no POSCAR or CONTCAR in the job directory"
+            )
+        seeded = _seed_poscar_from_contcar(job_dir)
+        source = "CONTCAR" if seeded else "existing POSCAR (no CONTCAR yet)"
+        print(f"Resume    : {case_name} ({job_dir.name}) — kept INCAR/KPOINTS/POTCAR; restart from {source}")
+
+    return_code = run_vasp(str(job_dir), str(vasp_executable), cpus=cpus, on_progress=on_progress)
+    error_summary = report_vasp_errors(job_dir)
+    row = build_row(project_name, "single", case_info)
+    row["return_code"] = return_code
+    row["resumed"] = True
+    if error_summary:
+        row["errors"] = error_summary
+
+    from vasp_auto.job_log import write_job_log
+    write_job_log(job_dir, case_name, calculation_type, return_code)
     return row

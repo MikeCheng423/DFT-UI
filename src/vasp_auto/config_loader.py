@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import yaml
@@ -69,6 +70,26 @@ def _normalize_path(value, base_dir: Path):
     return str((base_dir / path).resolve())
 
 
+def load_ui_remotes(config_dir: Path) -> dict:
+    """Remote machines saved by the web UI's Remote tab (``remotes.json``).
+
+    The UI writes its machines to ``remotes.json`` next to ``config.yaml``; the CLI
+    historically read only ``config.yaml``'s ``remotes:``, so a machine added in the
+    UI was invisible to ``--remote NAME``. Reading the same file here gives one
+    shared machine list across the UI and CLI (single source of truth, no drift).
+    Returns the {name: config} mapping, or {} when there is no/invalid store.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    for path in (config_dir / "remotes.json", repo_root / "remotes.json"):
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                return {}
+            return data if isinstance(data, dict) else {}
+    return {}
+
+
 def load_config(explicit_path: str | None = None) -> dict:
     config_path = find_config_file(explicit_path)
     base_dir = config_path.parent if config_path else Path.cwd()
@@ -81,6 +102,13 @@ def load_config(explicit_path: str | None = None) -> dict:
     else:
         config["_config_path"] = ""
         config["_config_dir"] = str(base_dir)
+
+    # Fold in machines saved by the web UI (remotes.json) so `--remote NAME` sees
+    # anything added/edited there. The UI store wins on name clashes, matching the
+    # UI's own view, so the two never disagree about a machine.
+    ui_remotes = load_ui_remotes(Path(config["_config_dir"]))
+    if ui_remotes:
+        config["remotes"] = {**(config.get("remotes") or {}), **ui_remotes}
 
     if "job_root" in config and "jobs_root" not in config:
         config["jobs_root"] = config["job_root"]

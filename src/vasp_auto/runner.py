@@ -545,6 +545,182 @@ def run_vasp_remote(
     return return_code
 
 
+def resume_job_remote(
+    remote: dict,
+    remote_job_dir: str,
+    cpus: int | None = None,
+    on_progress=None,
+    local_job_dir: str | None = None,
+    fetch_heavy: bool = True,
+) -> int:
+    """Resume an unfinished VASP job *in place* on a remote machine.
+
+    The remote counterpart of :func:`vasp_auto.workflow.resume_job`. Unlike
+    :func:`run_vasp_remote`, nothing is shipped to the remote: the job already
+    lives there, so its own INCAR/KPOINTS/POTCAR are reused verbatim. In one SSH
+    session it advances POSCAR to the latest geometry (CONTCAR -> POSCAR, keeping
+    POSCAR.bak) for the job and for every NEB image subdir, then runs ``mpirun``
+    in that directory (sourcing the machine's ``env_setup`` first). When
+    ``local_job_dir`` is given the results are copied back so the local parsers
+    and viewers work. Returns the VASP exit code, mirroring :func:`run_vasp_remote`.
+
+    Required remote keys: ``host``, ``vasp_executable``. Optional: ``user``,
+    ``port``, ``ssh_key``, ``ssh_options``, ``env_setup``.
+    """
+    if not remote_job_dir:
+        raise ValueError("resume_job_remote needs the remote job directory to resume")
+    target = _ssh_target(remote)
+    ssh_opts = _ssh_options(remote)
+    exe = _remote_vasp_exe(remote)
+    ranks = cpus if cpus is not None else 1
+    env_setup = (remote.get("env_setup") or "").strip()
+    machine = remote.get("name") or remote.get("host")
+    remote_job_dir = remote_job_dir.rstrip("/")
+    quoted_dir = shlex.quote(remote_job_dir)
+
+    # One non-interactive shell: set up the toolchain, advance POSCAR to the
+    # newest CONTCAR (the job itself, plus each NEB image subdir, keeping the
+    # previous POSCAR as POSCAR.bak), then launch mpirun in place.
+    parts = ["unset DISPLAY"]
+    if env_setup:
+        parts.append(f"{{ {env_setup} ; }} >/dev/null 2>&1 || true")
+    parts.append("ulimit -s unlimited 2>/dev/null || true")
+    parts.append(f"cd {quoted_dir}")
+    parts.append(
+        'seed() { if [ -s "$1/CONTCAR" ]; then '
+        '[ -f "$1/POSCAR" ] && cp -f "$1/POSCAR" "$1/POSCAR.bak"; '
+        'cp -f "$1/CONTCAR" "$1/POSCAR"; fi; }'
+    )
+    parts.append("seed .")
+    parts.append('for d in [0-9][0-9]; do [ -d "$d" ] && seed "$d"; done')
+    parts.append(f"mpirun -np {ranks} {shlex.quote(exe)} > run.log 2>&1")
+    remote_script = "\n".join(parts)
+
+    if on_progress is not None:
+        on_progress(f"[remote] resuming on {machine}: {remote_job_dir}")
+    result = subprocess.run(
+        ["ssh", "-x", *ssh_opts, target, f"bash -lc {shlex.quote(remote_script)}"],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    return_code = result.returncode
+
+    if local_job_dir:
+        try:
+            fetch_remote_results(remote, remote_job_dir, str(local_job_dir), include_heavy=fetch_heavy)
+        except (RuntimeError, OSError):
+            pass
+        marker = {
+            "machine": machine,
+            "host": remote.get("host"),
+            "remote_dir": remote_job_dir,
+            "scheduler": "ssh",
+            "mode": "ssh",
+            "resumed_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        Path(local_job_dir).mkdir(parents=True, exist_ok=True)
+        (Path(local_job_dir) / ".remote.json").write_text(json.dumps(marker, indent=2), encoding="utf-8")
+    return return_code
+
+
+def resume_job_detached(
+    remote: dict,
+    remote_job_dir: str,
+    cpus: int | None = None,
+    local_job_dir: str | None = None,
+    on_progress=None,
+) -> dict:
+    """Resume an unfinished VASP job *in place* on a remote machine, detached.
+
+    The power-off-safe counterpart of :func:`resume_job_remote`: it advances
+    POSCAR to the newest CONTCAR (the job itself plus every NEB image subdir,
+    keeping POSCAR.bak) and re-runs ``mpirun`` in the remote job directory under
+    ``setsid``, recording the PID and return code in a control dir so the run can
+    be polled (and the local host powered off) after SSH disconnects. Nothing is
+    shipped — the remote job's own INCAR/KPOINTS/POTCAR are reused.
+
+    Like :func:`submit_job_detached`, the control dir lives under
+    ``<remote_root>/.vasp_auto/runs/<job name>`` and holds ``pid``/``rc``/``job_dir``/
+    ``run.sh``; :func:`poll_detached_job` and :func:`resolve_detached_job_dir` work
+    against it unchanged. When ``local_job_dir`` is given a ``.remote.json`` marker
+    (mode ``ssh_detached``) is written there so the UI's status/fetch buttons behave
+    exactly as for a fresh offload. Returns
+    {"machine","remote_dir","control_dir","pid","mode","scheduler"}.
+    """
+    if not remote_job_dir:
+        raise ValueError("resume_job_detached needs the remote job directory to resume")
+    paths = _remote_engine_paths(remote)
+    target = _ssh_target(remote)
+    ssh_opts = _ssh_options(remote)
+    exe = _remote_vasp_exe(remote)
+    ranks = cpus if cpus is not None else 1
+    env_setup = (remote.get("env_setup") or "").strip()
+    machine = remote.get("name") or remote.get("host")
+    remote_job_dir = remote_job_dir.rstrip("/")
+    job_name = remote_job_dir.rsplit("/", 1)[-1] or "job"
+    control_dir = f"{paths['runs']}/{job_name}"
+
+    quoted_job = shlex.quote(remote_job_dir)
+    pid_f = f"{control_dir}/pid"
+    rc_f = f"{control_dir}/rc"
+    jobdir_f = f"{control_dir}/job_dir"
+    env_line = env_setup if env_setup else "true"
+
+    _run_checked(
+        ["ssh", "-x", *ssh_opts, target, f"mkdir -p {shlex.quote(control_dir)}"],
+        "remote mkdir control",
+    )
+
+    # run.sh: seed POSCAR<-CONTCAR (the job + each NEB image), then mpirun in the
+    # job dir. The PID/rc files make it poll-able after the launcher disconnects.
+    script = "\n".join([
+        "#!/bin/bash",
+        f"echo $$ > {shlex.quote(pid_f)}",
+        f"echo {quoted_job} > {shlex.quote(jobdir_f)}",
+        f"{{ {env_line} ; }} >/dev/null 2>&1 || true",
+        "ulimit -s unlimited 2>/dev/null || true",
+        f"cd {quoted_job}",
+        'seed() { if [ -s "$1/CONTCAR" ]; then '
+        '[ -f "$1/POSCAR" ] && cp -f "$1/POSCAR" "$1/POSCAR.bak"; '
+        'cp -f "$1/CONTCAR" "$1/POSCAR"; fi; }',
+        "seed .",
+        'for d in [0-9][0-9]; do [ -d "$d" ] && seed "$d"; done',
+        f"mpirun -np {ranks} {shlex.quote(exe)} > run.log 2>&1",
+        f"echo $? > {shlex.quote(rc_f)}",
+        "",
+    ])
+    with tempfile.TemporaryDirectory() as tmp:
+        sh = Path(tmp) / "run.sh"
+        sh.write_text(script, encoding="utf-8")
+        _ship_file(sh, target, f"{control_dir}/run.sh", remote, ssh_opts)
+
+    if on_progress is not None:
+        on_progress(f"[remote] resuming detached on {machine}: {remote_job_dir}")
+    launch = (
+        f"rm -f {shlex.quote(rc_f)} {shlex.quote(pid_f)}; "
+        f"setsid bash {shlex.quote(control_dir + '/run.sh')} </dev/null >/dev/null 2>&1 & "
+        f"sleep 1; cat {shlex.quote(pid_f)} 2>/dev/null"
+    )
+    out = _run_checked(["ssh", "-x", *ssh_opts, target, launch], "remote resume launch")
+    pid = out.strip().splitlines()[-1].strip() if out.strip() else ""
+
+    result = {
+        "machine": machine,
+        "host": remote.get("host"),
+        "remote_dir": remote_job_dir,
+        "control_dir": control_dir,
+        "pid": pid,
+        "scheduler": "ssh_detached",
+        "mode": "ssh_detached",
+    }
+    if local_job_dir:
+        marker = {**result, "resumed_at": datetime.now().isoformat(timespec="seconds")}
+        Path(local_job_dir).mkdir(parents=True, exist_ok=True)
+        (Path(local_job_dir) / ".remote.json").write_text(json.dumps(marker, indent=2), encoding="utf-8")
+    return result
+
+
 def submit_job_remote(
     job_dir: str,
     remote: dict,

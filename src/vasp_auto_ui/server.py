@@ -10,6 +10,7 @@ Binds to 127.0.0.1 — this is a single-user local tool, not a public server.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -289,7 +290,8 @@ def _finalize_built_case(result: dict, body: dict, ctype: str = "single") -> dic
     computer; otherwise return the local result unchanged."""
     machine = (body.get("machine") or "").strip()
     if not _is_remote_machine(machine):
-        return result
+        # Local case: still report its type so the UI tracks NEB/TSS vs single.
+        return {**result, "type": ctype, "machine": "local"}
     remote = _resolve_remote(machine)
     case_dir = Path(result["case"])
     base = (body.get("root") or _default_remote_cases_dir(remote)).rstrip("/")
@@ -387,11 +389,19 @@ def api_structure_save(_query, body):
         return {"case": remote_case, "poscar": f"{remote_case}/POSCAR",
                 "machine": machine, "remote_dir": remote_case, "remote": True}
 
-    target = body.get("dir") or body.get("name")
-    if not target:
-        raise ValueError("Give a case name or directory to save into")
-    path = Path(str(target)).expanduser()
-    case_dir = path if path.is_absolute() else REPO_ROOT / "inputs" / path
+    # An absolute dir is used as-is; otherwise a name lands under the chosen
+    # location (`root`, picked with the 📁 browser) or the repo's inputs/ folder.
+    if body.get("dir") and Path(str(body["dir"])).expanduser().is_absolute():
+        case_dir = Path(str(body["dir"])).expanduser()
+    else:
+        name = body.get("name") or body.get("dir")
+        if not name:
+            raise ValueError("Give a case name or directory to save into")
+        name = Path(str(name)).name  # a bare folder name, even if a path was typed
+        if body.get("root"):
+            case_dir = Path(str(body["root"])).expanduser() / name
+        else:
+            case_dir = REPO_ROOT / "inputs" / name
     write_poscar(struct, case_dir / "POSCAR")
     return {"case": str(case_dir), "poscar": str(case_dir / "POSCAR")}
 
@@ -486,10 +496,12 @@ def api_build(_query, body):
     action = body["action"]
     inputs = REPO_ROOT / "inputs"
 
-    if body.get("to_editor") and action not in ("tss", "prototype", "mp"):
+    if body.get("to_editor") and action not in ("tss", "prototype", "mp", "import"):
         # Build into a throw-away directory and hand the structure to the
         # editor instead of creating a case (cases are made by Save only). Force
         # a local build here — the eventual Save is what ships it to a remote.
+        # "import" handles to_editor itself: its `machine` names where the source
+        # file lives (possibly a remote to fetch from), not a build destination.
         import tempfile
         with tempfile.TemporaryDirectory(prefix="vasp_auto_build_") as tmp:
             result = api_build(_query, {**body, "to_editor": False, "machine": "local",
@@ -599,34 +611,40 @@ def api_build(_query, body):
         )
     elif action == "import":
         from vasp_auto.ase_tools import import_structure_to_case
+        import shutil
+        import tempfile
         machine = (body.get("machine") or "").strip()
-        if machine and machine != "local":
-            # Pull the structure file off a remote machine over SSH into a local
-            # temp file. Editing always happens in the local engine; the edited
-            # structure re-ships to the remote when you run it from Calculate.
-            import shutil
-            import tempfile
-            from vasp_auto.runner import fetch_remote_file
-            remote = _resolve_remote(machine)
-            remote_path = str(body["source"])
-            rtmp = tempfile.mkdtemp(prefix="vasp_auto_import_")
-            try:
+        fmt = body.get("format") or None
+        rtmp = None
+        try:
+            if machine and machine != "local":
+                # Pull the structure file off a remote machine over SSH into a
+                # local temp file. Editing always happens in the local engine;
+                # the edited structure re-ships to the working machine on Save.
+                from vasp_auto.runner import fetch_remote_file
+                remote = _resolve_remote(machine)
+                remote_path = str(body["source"])
+                rtmp = tempfile.mkdtemp(prefix="vasp_auto_import_")
                 source = Path(fetch_remote_file(
                     remote, remote_path, Path(rtmp) / Path(remote_path).name))
-                poscar = import_structure_to_case(
-                    structure_path=source,
-                    case_dir=_output_dir(body, inputs / source.stem),
-                    input_format=body.get("format") or None,
-                )
-            finally:
-                shutil.rmtree(rtmp, ignore_errors=True)
-        else:
-            source = Path(body["source"]).expanduser()
+            else:
+                source = Path(body["source"]).expanduser()
+            if body.get("to_editor"):
+                # Convert into a throw-away POSCAR and hand it to the editor; no
+                # case is created (Save does that, shipping to the working machine).
+                with tempfile.TemporaryDirectory(prefix="vasp_auto_build_") as tmp:
+                    poscar = import_structure_to_case(
+                        structure_path=source, case_dir=Path(tmp) / "editor_build",
+                        input_format=fmt)
+                    return {"structure": _struct_payload(read_poscar(poscar))}
             poscar = import_structure_to_case(
                 structure_path=source,
                 case_dir=_output_dir(body, inputs / source.stem),
-                input_format=body.get("format") or None,
+                input_format=fmt,
             )
+        finally:
+            if rtmp:
+                shutil.rmtree(rtmp, ignore_errors=True)
     elif action == "tss":
         case_dir = _output_dir(body, inputs / (body.get("output") or "neb_case"))
         for endpoint, source_text in (("initial", body["initial"]), ("final", body["final"])):
@@ -1540,6 +1558,8 @@ def build_cli_args(body: dict) -> list[str]:
         args += ["--auto-retry", str(body["auto_retry"])]
     if body.get("retry_failed"):
         args.append("--retry-failed")
+    if body.get("resume"):
+        args.append("--resume")
     if body.get("neb_images"):
         args += ["--neb-images", str(body["neb_images"])]
     return args
@@ -1568,22 +1588,34 @@ def api_run(_query, body):
         body = {k: v for k, v in body.items() if k != "workflow"}
 
     args = build_cli_args(body)
-    UI_LOG_DIR.mkdir(parents=True, exist_ok=True)
-    token = uuid.uuid4().hex[:12]
-    log_path = UI_LOG_DIR / f"{token}.log"
 
     # Run on a remote machine: write the chosen machine's config to a temp file
     # and hand it to the CLI, which ships the inputs over SSH and submits there.
     remote_name = body.get("remote")
     if remote_name and remote_name != "local":
-        remotes = _all_remotes()
-        if remote_name not in remotes:
-            raise ValueError(f"Unknown remote machine: {remote_name}")
-        remote_cfg = {k: v for k, v in remotes[remote_name].items() if k != "source"}
-        remote_file = UI_LOG_DIR / f"remote_{token}.json"
-        remote_file.write_text(json.dumps(remote_cfg), encoding="utf-8")
-        args += ["--remote-config", str(remote_file)]
+        args += ["--remote-config", _write_remote_config(remote_name)]
 
+    return _spawn_cli_job(args, body["target"])
+
+
+def _write_remote_config(remote_name: str) -> str:
+    """Write a chosen machine's config to a temp JSON file for --remote-config."""
+    remotes = _all_remotes()
+    if remote_name not in remotes:
+        raise ValueError(f"Unknown remote machine: {remote_name}")
+    remote_cfg = {k: v for k, v in remotes[remote_name].items() if k != "source"}
+    UI_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    remote_file = UI_LOG_DIR / f"remote_{uuid.uuid4().hex[:12]}.json"
+    remote_file.write_text(json.dumps(remote_cfg), encoding="utf-8")
+    return str(remote_file)
+
+
+def _spawn_cli_job(args: list[str], target_label: str) -> dict:
+    """Launch ``python -m vasp_auto.cli <args>`` as a logged background job and
+    register it in JOBS so the live log and ✕ stop button work. Returns {"token"}."""
+    UI_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    token = uuid.uuid4().hex[:12]
+    log_path = UI_LOG_DIR / f"{token}.log"
     command = [sys.executable, "-u", "-m", "vasp_auto.cli", *args]
     log_handle = log_path.open("w", encoding="utf-8")
     log_handle.write("$ vasp-auto " + " ".join(args) + "\n\n")
@@ -1591,12 +1623,11 @@ def api_run(_query, body):
     process = subprocess.Popen(
         command, cwd=REPO_ROOT, stdout=log_handle, stderr=subprocess.STDOUT, text=True
     )
-
     with JOBS_LOCK:
         JOBS[token] = {
             "token": token,
             "args": args,
-            "target": body["target"],
+            "target": target_label,
             "started": datetime.now().strftime("%H:%M:%S"),
             "started_at": datetime.now(),
             "finished_at": None,
@@ -1605,6 +1636,76 @@ def api_run(_query, body):
             "log_path": log_path,
         }
     return {"token": token}
+
+
+def _latest_remote_job_dir(remote: dict, case_name: str) -> str | None:
+    """The newest job directory on a remote machine whose name matches case_name
+    (with or without a NNNN_ prefix), searched under <remote_root>/results and
+    <remote_root>. Returns the full remote path, or None when none is found."""
+    rr = (remote.get("remote_root") or "").rstrip("/")
+    roots = [r for r in ((f"{rr}/results" if rr else ""), rr) if r]
+    best = None
+    for root in roots:
+        try:
+            jobs = list_remote_jobs(remote, root)
+        except Exception:
+            continue
+        for j in jobs:
+            base = re.sub(r"^\d+_", "", j["name"])
+            if base == case_name or j["name"] == case_name:
+                if best is None or j.get("modified_ts", 0) > best.get("modified_ts", 0):
+                    best = j
+    return best["path"] if best else None
+
+
+def api_resume(_query, body):
+    """Resume the latest unfinished job for the working case, in place.
+
+    Local working machine: resume the latest numbered local job directory from its
+    newest CONTCAR, reusing its INCAR/KPOINTS/POTCAR (no new job number). A remote
+    working machine: resume the latest job directory on that machine in place
+    (nothing is re-shipped). Either way the restart streams to the live log like a
+    normal run, via ``vasp-auto --resume-job-dir`` under the hood.
+    """
+    machine = (body.get("machine") or "local").strip()
+    cpus = body.get("cpus")
+
+    if _is_remote_machine(machine):
+        remote = _resolve_remote(machine)
+        case_name = str(body.get("target") or "").rstrip("/").rsplit("/", 1)[-1] or "case"
+        job_dir = _latest_remote_job_dir(remote, case_name)
+        if not job_dir:
+            raise ValueError(
+                f"No job directory for '{case_name}' found on {machine} to resume "
+                "(run it there first)."
+            )
+        args = ["--resume-job-dir", job_dir]
+        if cpus:
+            args += ["-n", str(cpus)]
+        # Offload machines resume detached (power-off-safe); record a local
+        # tracking dir (a .remote.json marker) so the Results tab's 🛰 status / ⬇
+        # fetch buttons can follow the run, exactly as for a fresh offload.
+        if remote_run_mode(remote) == "ssh_detached":
+            jobs_root = Path(load_config()["jobs_root"]).resolve()
+            mirror = jobs_root / Path(job_dir).name
+            mirror.mkdir(parents=True, exist_ok=True)
+            args += ["--resume-local-mirror", str(mirror)]
+        args += ["--remote-config", _write_remote_config(machine)]
+        return _spawn_cli_job(args, f"{machine}:{job_dir}")
+
+    # Local: resolve the latest numbered job dir for the working case.
+    target = Path(body["target"]).expanduser().resolve()
+    config = merge_local_config(load_config(), target)
+    jobs_root = Path(config["jobs_root"]).resolve()
+    info = inspect_target(target)
+    case_info = make_case_info(
+        target, jobs_root, single_mode=(info["mode"] == "single"), job_mode="latest"
+    )
+    job_dir = str(case_info["job_dir"])
+    args = ["--resume-job-dir", job_dir]
+    if cpus:
+        args += ["-n", str(cpus)]
+    return _spawn_cli_job(args, job_dir)
 
 
 def _job_state(job: dict) -> dict:
@@ -1994,6 +2095,7 @@ POST_ROUTES = {
     "/api/bader": api_bader,
     "/api/preview": api_preview,
     "/api/run": api_run,
+    "/api/resume": api_resume,
     "/api/stop": api_stop,
     "/api/report": api_report,
     "/api/mlrelax": api_mlrelax,
