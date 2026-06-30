@@ -55,7 +55,7 @@ from vasp_auto.structure import (
     write_poscar,
 )
 from vasp_auto.target_utils import filter_case_dirs, inspect_target
-from vasp_auto.runner import remote_run_mode
+from vasp_auto.runner import resolve_remote_run_mode
 from vasp_auto.workflow import (
     build_row,
     parse_existing_job,
@@ -246,10 +246,10 @@ def parse_args():
     parser.add_argument(
         "--remote-setup",
         action="store_true",
-        help="Install the vasp_auto engine into a venv on the remote machine "
-        "(selected with --remote/--remote-config), then exit. Required once per "
-        "machine before offload runs (run_mode: ssh_detached), which run the whole "
-        "calculation on the remote so the local host can be powered off.",
+        help="Pre-install the vasp_auto engine into a venv on the remote machine "
+        "(selected with --remote/--remote-config), then exit. Optional: an offload "
+        "run (run_mode: ssh_detached) auto-installs the engine on first use; use this "
+        "only to provision a machine ahead of time.",
     )
     parser.add_argument(
         "--workflow",
@@ -1608,7 +1608,7 @@ def _run_resume(args, config) -> bool:
         # Offload machines resume detached (setsid): the restart keeps running
         # after SSH disconnects, so the local host can power off. Other remotes
         # run mpirun synchronously over SSH and pull the results back.
-        if remote_run_mode(remote) == "ssh_detached":
+        if resolve_remote_run_mode(remote) == "ssh_detached":
             from vasp_auto.runner import resume_job_detached
             print(f"Resume    : {job_dir} on {machine} (detached; local host can power off)")
             result = resume_job_detached(
@@ -2245,7 +2245,7 @@ def _process_case(case_dir, args, base_config, mode, project_name, output_root, 
 
     # Detached offload: the whole calculation (incl. convergence/workflow) runs on
     # the remote engine and we return immediately, so the local host can power off.
-    if remote and remote_run_mode(remote) == "ssh_detached" and not args.dry_run and not args.prepare:
+    if remote and not args.dry_run and not args.prepare and resolve_remote_run_mode(remote) == "ssh_detached":
         if engine in ("qe", "ase"):
             raise ValueError(f"Offload (ssh_detached) supports VASP only, not --engine {engine}.")
         return _run_detached_offload(

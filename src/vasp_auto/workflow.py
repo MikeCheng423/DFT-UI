@@ -8,7 +8,7 @@ from pathlib import Path
 from vasp_auto.incar import set_incar_value
 from vasp_auto.parser import parse_pw_output, parse_vasprun
 from vasp_auto.runner import (
-    remote_run_mode,
+    resolve_remote_run_mode,
     run_ase,
     run_qe,
     run_vasp,
@@ -381,8 +381,6 @@ def _build_neb_row(project_name, mode, case_info, status_override=None):
     barrier = max(energy_values) - min(energy_values) if energy_values else None
 
     # Forward/backward barriers: need endpoint energies to be meaningful.
-    # All image names in order for boundary detection.
-    ordered_names = [name for name, _ in sorted(energies, key=lambda x: x[0])]
     energy_map = dict(energies)
 
     if image_dirs and len(numeric) >= 2:
@@ -700,7 +698,7 @@ def run_one_case(
 
         # Direct SSH: run mpirun on the remote synchronously and pull results back
         # (for single-workstation machines with no working scheduler).
-        if remote_run_mode(remote) == "ssh":
+        if resolve_remote_run_mode(remote) == "ssh":
             return_code = run_vasp_remote(
                 str(job_dir), remote, cpus=cpus, on_progress=on_progress
             )

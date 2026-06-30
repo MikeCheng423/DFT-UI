@@ -444,6 +444,45 @@ def remote_run_mode(remote: dict) -> str:
     return scheduler
 
 
+def detect_remote_run_mode(remote: dict) -> str:
+    """Probe a remote once for a batch scheduler and pick a run mode.
+
+    ``sbatch`` present -> ``"slurm"``, ``qsub`` -> ``"pbs"``, neither (or the probe
+    fails / times out) -> ``"ssh_detached"`` (offload): the safe default that works
+    on any plain workstation and self-installs its engine on first run.
+    """
+    target = _ssh_target(remote)
+    ssh_opts = _ssh_options(remote)
+    cmd = ("command -v sbatch >/dev/null 2>&1 && echo slurm || "
+           "{ command -v qsub >/dev/null 2>&1 && echo pbs || echo none; }")
+    try:
+        res = subprocess.run(["ssh", "-x", *ssh_opts, target, cmd],
+                             capture_output=True, encoding="utf-8", errors="replace", timeout=20)
+    except (subprocess.TimeoutExpired, OSError):
+        return "ssh_detached"
+    tag = (res.stdout.strip().splitlines() or [""])[-1].strip()
+    return tag if tag in SCHEDULER_COMMANDS else "ssh_detached"
+
+
+def resolve_remote_run_mode(remote: dict) -> str:
+    """Run mode for dispatch, auto-detecting when the machine pins nothing.
+
+    An explicit ``run_mode`` or ``scheduler`` always wins (see
+    :func:`remote_run_mode`), so a cluster user can pin ``slurm`` and a workstation
+    user ``ssh``. With neither set, probe the machine (:func:`detect_remote_run_mode`)
+    and cache the answer on ``remote`` so every dispatch site in one run agrees
+    without re-SSHing. ponytail: per-run cache on the dict; fine because a machine's
+    scheduler does not change mid-run.
+    """
+    if (remote.get("run_mode") or "").strip() or (remote.get("scheduler") or "").strip():
+        return remote_run_mode(remote)
+    cached = remote.get("_run_mode_detected")
+    if not cached:
+        cached = detect_remote_run_mode(remote)
+        remote["_run_mode_detected"] = cached
+    return cached
+
+
 def _remote_vasp_exe(remote: dict) -> str:
     """The VASP binary path on the remote machine.
 
@@ -463,6 +502,22 @@ def _remote_vasp_exe(remote: dict) -> str:
     return exe
 
 
+def remote_results_base(remote: dict) -> str:
+    """Canonical results directory on a remote machine: ``<remote_root>/results``.
+
+    Every run directory — synchronous mpirun, scheduler submit, and detached
+    offload — lives here, so remote output is never mixed in with the
+    ``<remote_root>/inputs`` cases and never doubles up when ``remote_root``
+    itself already ends in e.g. ``jobs``.
+    """
+    root = (remote.get("remote_root") or "").rstrip("/")
+    if not root:
+        raise ValueError(
+            "remote config needs a 'remote_root' (base directory on the remote machine)"
+        )
+    return f"{root}/results"
+
+
 def run_vasp_remote(
     job_dir: str,
     remote: dict,
@@ -474,7 +529,7 @@ def run_vasp_remote(
     """Run VASP on a remote machine via direct ``mpirun`` over SSH (no scheduler).
 
     Unlike :func:`submit_job_remote` (fire-and-forget queue submission), this runs
-    synchronously: it ships the prepared inputs to ``<remote_root>/<job name>``,
+    synchronously: it ships the prepared inputs to ``<remote_root>/results/<job name>``,
     runs ``mpirun`` there (sourcing the machine's ``env_setup`` first so MKL/MPI
     libraries are on the path), waits for it to finish, then copies the results
     back so the local parsers and viewers work unchanged. A ``.remote.json`` marker
@@ -497,7 +552,7 @@ def run_vasp_remote(
     # remote_subdir keeps multi-case / multi-trial jobs from colliding on the
     # remote (e.g. two cases both with an "encut_400" convergence trial).
     subpath = (remote_subdir or job_dir.name).strip("/")
-    remote_dir = remote["remote_root"].rstrip("/") + "/" + subpath
+    remote_dir = remote_results_base(remote) + "/" + subpath
     exe = _remote_vasp_exe(remote)
     ranks = cpus if cpus is not None else 1
     env_setup = (remote.get("env_setup") or "").strip()
@@ -758,7 +813,7 @@ def submit_job_remote(
         )
 
     target = _ssh_target(remote)
-    remote_dir = remote_root.rstrip("/") + "/" + job_dir.name
+    remote_dir = remote_results_base(remote) + "/" + job_dir.name
     template = job_template or remote.get("job_template")
 
     # Write the submit script with the remote run directory baked in.
@@ -980,16 +1035,21 @@ def submit_job_detached(
 
     # A dedicated results/ dir (absolute jobs_root) so output never lands in a
     # doubled path when remote_root itself already ends in e.g. "jobs".
-    results_base = f"{paths['root']}/results"
+    results_base = remote_results_base(remote)
     inputs_remote = f"{paths['root']}/inputs/{case_name}"
     jobs_remote = f"{results_base}/{case_name}"
     control_dir = f"{paths['runs']}/{case_name}"
 
+    # First offload to a machine self-installs the engine (one-time, idempotent),
+    # so no separate --remote-setup step is needed before a normal run.
     if not remote_engine_installed(remote):
-        raise RuntimeError(
-            f"the offload engine is not installed on {machine}. Run remote setup first "
-            "(CLI: --remote-setup NAME, or the UI Remote tab's 'Set up offload engine' button)."
-        )
+        if on_progress is not None:
+            on_progress(f"[remote] installing the offload engine on {machine} (one-time)…")
+        setup = setup_remote_engine(remote, on_progress=on_progress)
+        if not setup.get("ok"):
+            raise RuntimeError(
+                f"could not install the offload engine on {machine}. Detail:\n{setup.get('detail', '')}"
+            )
 
     _run_checked(
         ["ssh", "-x", *ssh_opts, target,

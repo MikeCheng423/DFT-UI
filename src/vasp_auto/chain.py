@@ -16,7 +16,7 @@ from vasp_auto.incar import apply_spin_to_incar, set_incar_value
 from vasp_auto.job_manager import DEFAULT_KPOINTS, load_incar_template
 from vasp_auto.kpoints import kpoints_text_from_spec, mesh_kpoints_text, parse_mesh
 from vasp_auto.potcar_finder import build_potcar
-from vasp_auto.runner import remote_run_mode, run_vasp, run_vasp_remote
+from vasp_auto.runner import resolve_remote_run_mode, run_vasp, run_vasp_remote
 from vasp_auto.workflow import parse_outcar_summary, report_vasp_errors
 
 # A workflow step name that runs an automatic SCF convergence scan instead of a
@@ -189,7 +189,7 @@ def run_workflow_case(
     # remotes aren't supported for chained workflows (they queue and return).
     machine = None
     if remote and not prepare_only:
-        if remote_run_mode(remote) != "ssh":
+        if resolve_remote_run_mode(remote) != "ssh":
             raise ValueError(
                 "Chained workflows on a remote machine require its run mode to be "
                 "'ssh' (direct mpirun); queue submission of a multi-step chain is "

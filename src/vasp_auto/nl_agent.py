@@ -25,7 +25,6 @@ from . import ai_providers
 from .nl_builder import (
     _atoms_to_struct,
     _build_base,
-    _miller,
     _supercell,
     _topmost_index,
 )

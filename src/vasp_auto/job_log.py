@@ -18,7 +18,6 @@ from vasp_auto.report import _kpoints_summary
 from vasp_auto.structure import cell_parameters, read_poscar, scaled_lattice
 from vasp_auto.workflow import (
     parse_energy_from_outcar,
-    parse_magmoms,
     parse_outcar_summary,
     scan_vasp_errors,
 )
