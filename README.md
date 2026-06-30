@@ -59,8 +59,16 @@ ships it over SSH, and creates a venv on the remote for you**, so offloaded
 ## Configure
 
 ```bash
-cp config.yaml.example config.yaml          # then edit paths for your machine
-cp remotes.json.example remotes.json         # optional: or add machines in the UI
+vasp-auto --init                            # create config.yaml from the example
+#                                           # (or by hand: cp config.yaml.example config.yaml)
+```
+
+Then edit `config.yaml` and set the three paths for your machine:
+`vasp_executable` (your VASP binary), `potcar_root` (your licensed POTCAR
+library), and `jobs_root` (where job folders are written).
+
+```bash
+cp remotes.json.example remotes.json        # optional: or add machines in the UI
 ```
 
 Both `config.yaml` and `remotes.json` are git-ignored so your local paths and
@@ -70,10 +78,14 @@ private cluster details never get committed.
 
 ## Quickstart (CLI)
 
+The repo ships a ready-made case, `example/Si` (a silicon POSCAR), so these run
+against a real structure straight after install — put your own cases under
+`inputs/`:
+
 ```bash
-vasp-auto inputs/Fe --prepare               # build INCAR/KPOINTS/POTCAR + job dir
-vasp-auto inputs/Fe -n 8 --background       # run on 8 cores, return immediately
-vasp-auto inputs/Fe --remote mycluster      # prepare + submit to a remote queue
+vasp-auto example/Si --prepare              # build INCAR/KPOINTS/POTCAR + job dir
+vasp-auto example/Si -n 8 --background      # run on 8 cores, return immediately
+vasp-auto example/Si --remote mycluster     # prepare + submit to a remote queue
 ```
 
 A simple SCF case only needs a `POSCAR`; missing `INCAR`, `KPOINTS`, and `POTCAR`
