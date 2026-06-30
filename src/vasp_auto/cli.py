@@ -154,6 +154,12 @@ def parse_args():
         help="Max optimizer steps for the ase engine's relax (overrides ase_steps).",
     )
     parser.add_argument(
+        "--init",
+        action="store_true",
+        help="Create config.yaml from config.yaml.example (if missing) and exit. "
+             "Run this once after installing, then edit the paths inside it.",
+    )
+    parser.add_argument(
         "--prepare",
         action="store_true",
         help="Prepare jobs only, do not run VASP.",
@@ -2388,10 +2394,61 @@ def _process_case(case_dir, args, base_config, mode, project_name, output_root, 
     return case_info, [row]
 
 
+def _run_init(args) -> bool:
+    """--init: create config.yaml from config.yaml.example, then exit.
+
+    Gives a first-time user a working starting point instead of relying on the
+    bare defaults (which point at ``vasp_std`` on PATH and ``./POTCAR`` and usually
+    fail with a cryptic error). Writes ``config.yaml`` next to the example at the
+    repository root — where :func:`config_loader.find_config_file` already looks —
+    and never overwrites an existing one.
+    """
+    if not getattr(args, "init", False):
+        return False
+    repo_root = Path(__file__).resolve().parents[2]
+    example = repo_root / "config.yaml.example"
+    target = repo_root / "config.yaml"
+    if target.exists():
+        print(f"config.yaml already exists: {target}")
+        print("Edit it directly, or delete it first to regenerate from the example.")
+        return True
+    if not example.exists():
+        raise SystemExit(f"config.yaml.example not found next to the package ({example}).")
+    shutil.copy2(example, target)
+    print(f"Created   : {target}")
+    print("Next steps:")
+    print("  1. Edit config.yaml — set vasp_executable, potcar_root and jobs_root.")
+    print("  2. (optional) cp remotes.json.example remotes.json, or add machines in the UI.")
+    print("  3. Try it:  vasp-auto example/Si --prepare")
+    return True
+
+
+def _warn_if_unconfigured(config, engine):
+    """Nudge a first-time user who has no config.yaml toward ``vasp-auto --init``.
+
+    With no config file the VASP engine falls back to bare defaults (``vasp_std``
+    on PATH, ``./POTCAR``), which usually fail with a confusing error. Print a
+    one-line note to stderr that points at the fix without blocking the run.
+    """
+    if config.get("_config_path") or config.get("_local_config") or engine != "vasp":
+        return
+    print(
+        "Note      : no config.yaml found — using defaults "
+        f"(vasp_executable={config.get('vasp_executable')!r}, "
+        f"potcar_root={config.get('potcar_root')!r}).\n"
+        "            Run `vasp-auto --init` to create one, then set your VASP "
+        "binary and POTCAR library.",
+        file=sys.stderr,
+    )
+
+
 def main():
     args = parse_args()
     if args.background:
         launch_background()
+        return
+
+    if _run_init(args):
         return
 
     config = load_config()
@@ -2449,6 +2506,8 @@ def main():
         print(f"Engine    : Quantum ESPRESSO ({config.get('qe_executable', 'pw.x')})")
     elif engine == "ase":
         print(f"Engine    : ASE calculator ({config.get('ase_calculator', 'emt')})")
+    if not args.parse_only:
+        _warn_if_unconfigured(config, engine)
     print(f"CPU       : {args.cpus if args.cpus else 'default'}")
     print(f"NEB images: {neb_images}")
     if calc_type:
