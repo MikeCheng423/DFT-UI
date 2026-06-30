@@ -19,7 +19,9 @@ from vasp_auto.runner import (
     resolve_detached_job_dir,
     poll_job_status,
     poll_remote_job,
+    detect_remote_run_mode,
     remote_run_mode,
+    resolve_remote_run_mode,
     run_vasp_remote,
     submit_job_detached,
     submit_job_remote,
@@ -301,16 +303,16 @@ def test_submit_job_remote_slurm(tmp_path):
     assert result["job_id"] == "98765"
     assert result["scheduler"] == "slurm"
     assert result["host"] == "cluster.edu"
-    assert result["remote_dir"] == "/scratch/me/jobs/Au13"
+    assert result["remote_dir"] == "/scratch/me/jobs/results/Au13"
 
     joined = [" ".join(c) for c in calls]
     assert any(c.startswith("ssh") and "mkdir -p" in c for c in joined)
     assert any(c.startswith("scp") and "-P 2222" in c for c in joined)
-    assert any("cd /scratch/me/jobs/Au13 && sbatch submit.sh" in c for c in joined)
+    assert any("cd /scratch/me/jobs/results/Au13 && sbatch submit.sh" in c for c in joined)
 
     # The written submit.sh must cd into the remote dir, with the remote exe.
     script = (job / "submit.sh").read_text()
-    assert 'cd "/scratch/me/jobs/Au13"' in script
+    assert 'cd "/scratch/me/jobs/results/Au13"' in script
     assert "/opt/vasp/vasp_std" in script
 
 
@@ -335,7 +337,7 @@ def test_submit_job_remote_uses_rsync_when_available(tmp_path):
     joined = [" ".join(c) for c in calls]
     assert any(c.startswith("rsync") for c in joined)
     # bare host (no user) → no '@' in the destination
-    assert any("cluster.edu:/work/Au13" in c for c in joined)
+    assert any("cluster.edu:/work/results/Au13" in c for c in joined)
 
 
 def test_submit_job_remote_raises_on_failure(tmp_path):
@@ -369,7 +371,7 @@ def test_submit_job_remote_writes_marker(tmp_path):
     marker = _json.loads((job / ".remote.json").read_text())
     assert marker["machine"] == "cluster1"
     assert marker["job_id"] == "42"
-    assert marker["remote_dir"] == "/scratch/Au13"
+    assert marker["remote_dir"] == "/scratch/results/Au13"
 
 
 # ---------------------------------------------------------------- direct-SSH run mode
@@ -386,6 +388,43 @@ def test_remote_run_mode_resolution():
     assert remote_run_mode({"scheduler": "ssh"}) == "ssh"
     assert remote_run_mode({"scheduler": "none"}) == "ssh"
     assert remote_run_mode({}) == "slurm"  # safe default preserves prior behaviour
+
+
+def test_resolve_remote_run_mode_honours_explicit():
+    """An explicit run_mode/scheduler wins and never triggers an SSH probe."""
+    with patch("vasp_auto.runner.detect_remote_run_mode",
+               side_effect=AssertionError("must not probe when pinned")):
+        assert resolve_remote_run_mode({"run_mode": "ssh"}) == "ssh"
+        assert resolve_remote_run_mode({"run_mode": "ssh_detached"}) == "ssh_detached"
+        assert resolve_remote_run_mode({"scheduler": "slurm"}) == "slurm"
+
+
+def test_resolve_remote_run_mode_detects_and_caches():
+    """With nothing pinned, probe once and reuse the cached answer."""
+    remote = {"host": "wkstn"}
+    with patch("vasp_auto.runner.detect_remote_run_mode", return_value="slurm") as det:
+        assert resolve_remote_run_mode(remote) == "slurm"
+        assert resolve_remote_run_mode(remote) == "slurm"  # cached, no second probe
+    det.assert_called_once()
+    assert remote["_run_mode_detected"] == "slurm"
+
+
+def test_detect_remote_run_mode_reads_probe():
+    remote = {"host": "wkstn"}
+
+    def fake_run(cmd, **kwargs):
+        out = "slurm\n" if "sbatch" in " ".join(cmd) else ""
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=out, stderr="")
+
+    with patch("subprocess.run", side_effect=fake_run):
+        assert detect_remote_run_mode(remote) == "slurm"
+
+    # No scheduler on the box -> offload; an unreachable host -> offload too.
+    with patch("subprocess.run",
+               return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="none\n", stderr="")):
+        assert detect_remote_run_mode(remote) == "ssh_detached"
+    with patch("subprocess.run", side_effect=OSError("no route to host")):
+        assert detect_remote_run_mode(remote) == "ssh_detached"
 
 
 def test_remote_engine_paths():
@@ -454,16 +493,40 @@ def test_submit_job_detached_ships_launches_and_marks(tmp_path):
     assert marker["pid"] == "44213"
 
 
-def test_submit_job_detached_requires_engine(tmp_path):
+def test_submit_job_detached_raises_when_autosetup_fails(tmp_path):
+    """A missing engine that cannot be auto-installed surfaces the failure detail."""
     bundle = tmp_path / "H2O"
     bundle.mkdir()
     (bundle / "POSCAR").write_text("H2O\n")
     remote = {"host": "wkstn", "remote_root": "/work",
               "vasp_executable": "/opt/vasp/bin/vasp_std", "run_mode": "ssh_detached"}
-    with patch("vasp_auto.runner.remote_engine_installed", return_value=False):
-        with pytest.raises(RuntimeError, match="offload engine is not installed"):
+    with patch("vasp_auto.runner.remote_engine_installed", return_value=False), \
+         patch("vasp_auto.runner.setup_remote_engine",
+               return_value={"ok": False, "detail": "pip blew up"}):
+        with pytest.raises(RuntimeError, match="pip blew up"):
             submit_job_detached(case_dir=str(bundle), remote=remote, case_name="H2O",
                                 cpus=4, calc_flags=[])
+
+
+def test_submit_job_detached_autoinstalls_engine(tmp_path):
+    """First offload to a fresh machine self-installs the engine, no --remote-setup."""
+    bundle = tmp_path / "H2O"
+    bundle.mkdir()
+    (bundle / "POSCAR").write_text("H2O\n")
+    remote = {"host": "wkstn", "remote_root": "/work",
+              "vasp_executable": "/opt/vasp/bin/vasp_std", "run_mode": "ssh_detached"}
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="44213", stderr="")
+
+    with patch("vasp_auto.runner.remote_engine_installed", return_value=False), \
+         patch("vasp_auto.runner.setup_remote_engine",
+               return_value={"ok": True, "detail": ""}) as setup, \
+         patch("shutil.which", return_value="/usr/bin/rsync"), \
+         patch("subprocess.run", side_effect=fake_run):
+        submit_job_detached(case_dir=str(bundle), remote=remote, case_name="H2O",
+                            cpus=4, calc_flags=[])
+    setup.assert_called_once()
 
 
 def test_resolve_detached_job_dir_reads_control_file():
@@ -542,8 +605,8 @@ def test_run_vasp_remote_ships_runs_and_marks(tmp_path):
 
     assert rc == 0
     joined = [" ".join(c) for c in calls]
-    # inputs shipped to remote_root/<job name>
-    assert any(c.startswith("rsync") and "wkstn:/work/Au13/" in c for c in joined)
+    # inputs shipped to remote_root/results/<job name>
+    assert any(c.startswith("rsync") and "wkstn:/work/results/Au13/" in c for c in joined)
     # mpirun launched over SSH with the resolved binary, env sourced, ranks honoured
     run_cmd = next(c for c in joined if "mpirun" in c)
     assert "mpirun -np 8" in run_cmd
@@ -554,7 +617,7 @@ def test_run_vasp_remote_ships_runs_and_marks(tmp_path):
     # marker tags the machine + remote dir, status comes out non-scheduler
     marker = json.loads((job / ".remote.json").read_text())
     assert marker["machine"] == "wkstn"
-    assert marker["remote_dir"] == "/work/Au13"
+    assert marker["remote_dir"] == "/work/results/Au13"
     assert marker["mode"] == "ssh"
 
 
@@ -574,9 +637,9 @@ def test_run_vasp_remote_honours_remote_subdir(tmp_path):
          patch("vasp_auto.runner.fetch_remote_results", return_value={}):
         run_vasp_remote(str(job), remote, cpus=4, remote_subdir="H2O/scf_convergence/encut_400")
 
-    assert any("/work/H2O/scf_convergence/encut_400" in c for c in calls)
+    assert any("/work/results/H2O/scf_convergence/encut_400" in c for c in calls)
     marker = json.loads((job / ".remote.json").read_text())
-    assert marker["remote_dir"] == "/work/H2O/scf_convergence/encut_400"
+    assert marker["remote_dir"] == "/work/results/H2O/scf_convergence/encut_400"
 
 
 # ---------------------------------------------------------------- remote connection / status / fetch

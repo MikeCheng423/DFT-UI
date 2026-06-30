@@ -62,8 +62,7 @@ from vasp_auto.runner import (
     poll_remote_job,
     read_remote_text,
     resolve_detached_job_dir,
-    remote_engine_installed,
-    remote_run_mode,
+    resolve_remote_run_mode,
     setup_remote_engine,
     check_remote_connection,
 )
@@ -1685,7 +1684,7 @@ def api_resume(_query, body):
         # Offload machines resume detached (power-off-safe); record a local
         # tracking dir (a .remote.json marker) so the Results tab's 🛰 status / ⬇
         # fetch buttons can follow the run, exactly as for a fresh offload.
-        if remote_run_mode(remote) == "ssh_detached":
+        if resolve_remote_run_mode(remote) == "ssh_detached":
             jobs_root = Path(load_config()["jobs_root"]).resolve()
             mirror = jobs_root / Path(job_dir).name
             mirror.mkdir(parents=True, exist_ok=True)

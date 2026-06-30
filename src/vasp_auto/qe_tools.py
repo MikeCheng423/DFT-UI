@@ -14,7 +14,6 @@ import shutil
 from pathlib import Path
 
 from vasp_auto.kpoints import (
-    KPATH_PRESETS,
     mesh_from_spacing,
     parse_kpath,
     parse_mesh,

@@ -21,7 +21,6 @@ import tempfile
 from pathlib import Path
 
 from . import ai_providers
-from .ai_providers import GROQ_URL  # re-exported for nl_agent and back-compat
 from .structure import (
     add_adsorbate,
     cart_coords,
