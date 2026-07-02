@@ -68,6 +68,22 @@ def set_incar_value(incar_path: Path, key: str, value: str | int | float):
     incar_path.write_text(_set_in_text(text, key, value), encoding="utf-8")
 
 
+def apply_incar_choices(incar_text: str, choices: dict[str, str | int | float]) -> str:
+    """Apply {TAG: value} picks from the human-language picker onto INCAR text.
+
+    Each tag is replaced in place or appended (via the same logic as
+    :func:`set_incar_value`). Blank/None values are skipped — an unset number
+    field means "leave it to VASP or the POTCAR default", not "write nothing".
+    This is the write path for the `incar_catalog` form in the UI.
+    """
+    text = incar_text
+    for key, value in choices.items():
+        if value is None or str(value).strip() == "":
+            continue
+        text = _set_in_text(text, key, value)
+    return text
+
+
 def get_incar_value(incar_text: str, key: str) -> str | None:
     key_upper = key.upper()
     for line in incar_text.splitlines():

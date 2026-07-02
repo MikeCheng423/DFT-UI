@@ -82,6 +82,26 @@ def _poscar_frame(poscar_path: Path) -> dict:
     }
 
 
+def oszicar_energies(job_dir: Path) -> list[float] | None:
+    """Free energy F (eV) of each ionic step from OSZICAR, or None.
+
+    Ionic-step lines look like ``   1 F= -.27864425E+02 E0= ...``; the
+    electronic-step lines between them have no ``F=`` column.
+    """
+    path = Path(job_dir) / "OSZICAR"
+    if not path.exists():
+        return None
+    energies = []
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        parts = line.split()
+        if len(parts) > 2 and parts[1] == "F=":
+            try:
+                energies.append(float(parts[2]))
+            except ValueError:
+                pass
+    return energies or None
+
+
 def job_trajectory(job_dir: Path) -> dict | None:
     """Animation frames for a job directory, in cartesian Å.
 

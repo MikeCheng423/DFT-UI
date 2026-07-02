@@ -201,7 +201,7 @@
   <h3>Welcome 👋</h3>
   <p class="sub">vasp_auto prepares all VASP input files for you, runs the job, and collects the results. No hand-written INCAR needed.</p>
   <ol>
-    <li>Pick a <b>working machine</b>, then <b>Build</b> or import a structure and 💾 Save it — that becomes the working case.</li>
+    <li>Pick a <b>working machine</b>, then <b>Build</b> or import a structure — running a calculation saves it as the working case automatically (💾 Save only to choose the folder yourself).</li>
     <li>Pick a <b>Calculation</b> type — hover anything for an explanation — and press <b>Run</b>.</li>
     <li>Chain steps in <b>Workflow</b> (e.g. optimise → SCF → DOS) for a full study in one click.</li>
     <li>Watch <b>Results</b> fill in: energies, band gaps, convergence, and a downloadable Excel summary.</li>
@@ -211,10 +211,10 @@
 
 <div class="card">
   <h3>Working case</h3>
-  <p class="sub">Pick the machine you want to work on. Whatever you build, import or save in the <b>Build</b> tab below becomes the working case — Calculate, Workflow and Remote all act on it. Pick a remote and the files and results stay on that machine; you only choose once.</p>
+  <p class="sub">Pick the machine you want to work on. Whatever you build or import in the <b>Build</b> tab below becomes the working case as soon as you run (or 💾 Save) it — Calculate, Workflow and Remote all act on it. Pick a remote and the files and results stay on that machine; you only choose once.</p>
   <span class="inline"><label>working machine</label>
     <select id="wc-machine" onchange="workingMachineChanged()" title="This computer (local) or a saved remote machine. Building, editing and running all happen on the selected machine; pick a remote and nothing is kept on this computer."></select></span>
-  <span id="wc-status" class="badge dim">No working structure yet — build or import one in the Build tab, then 💾 Save.</span>
+  <span id="wc-status" class="badge dim">No working structure yet — build or import one in the Build tab, then just run it.</span>
 </div>
 
 <!-- ============================ BUILD ============================ -->
@@ -418,7 +418,7 @@
     <div style="flex:0 1 360px;min-width:330px">
       <div class="card" id="savecard">
         <h3>💾 Save structure <span class="badge warn" id="dirtybadge" style="display:none">unsaved changes</span></h3>
-        <p class="sub">Building and editing happen in memory — nothing is written until you save. Saving creates the case on the <b>working machine</b> chosen at the top and makes it the working case, so Calculate, Workflow and Remote act on it. <span id="sv-machine-hint"></span></p>
+        <p class="sub">Saving is optional — running a calculation auto-saves the structure to a fresh case folder on the <b>working machine</b>. Use Save to pick the name and folder yourself; a name that already exists gets a _2/_3 suffix instead of overwriting. <span id="sv-machine-hint"></span></p>
         <span class="inline wide"><label>case name (a folder) or absolute path</label><input id="sv-name" placeholder="my_structure"></span>
         <span class="inline wide"><label>location (folder to create it in — blank = default cases folder)</label><input id="sv-loc" placeholder="(default cases folder)"><button class="iconbtn" style="padding:3px 7px" onclick="saveBrowse()" title="Browse for the folder to create the case in, on the working machine">📁</button></span>
         <br><button class="act" onclick="saveStructure()">💾 Save as case…</button>
@@ -572,6 +572,12 @@
         <button class="ghost" onclick="loadIncar(false)">Load case INCAR</button>
         <button class="ghost" onclick="loadIncar(true)">Load template for selected type</button>
         <button class="act" onclick="saveIncar()">Save to case</button>
+        <details id="incar-guided" style="margin:8px 0" ontoggle="if(this.open)renderIncarForm()">
+          <summary style="cursor:pointer">⚙ Guided settings — pick in plain language, no VASP tags</summary>
+          <p class="sub">Each choice writes its VASP tag into the editor below. Load a template first to start from a full INCAR, or build one from scratch.</p>
+          <div id="incar-form"></div>
+          <button class="ghost" onclick="applyAllIncarSettings()">Write all these settings into INCAR</button>
+        </details>
         <textarea id="incar" rows="12" spellcheck="false"></textarea>
       </div>
     </div>
@@ -957,7 +963,10 @@ function pickType(t) {
   calcType = t;
   renderCalcTypes();
   if (t === "bands" && !$("k-mode").value) { $("k-mode").value = "line"; kModeChanged(); }
-  if (changed) syncIncarToType();
+  if (changed) {
+    syncIncarToType();
+    if ($("incar-guided").open) renderIncarForm();       // guided settings follow the type
+  }
 }
 /* The machine the Working-case area is pointed at ("local" or a remote name). */
 function workingMachine() { return ($("wc-machine") && $("wc-machine").value) || "local"; }
@@ -1009,7 +1018,7 @@ function clearWork() { setWork("", "single", workingMachine()); }
 function updateWorkStatus() {
   const el = $("wc-status"); if (!el) return;
   if (!WORK.path) {
-    el.textContent = "No working structure yet — build or import one in the Build tab, then 💾 Save.";
+    el.textContent = "No working structure yet — build or import one in the Build tab, then just run it.";
     return;
   }
   const name = WORK.path.replace(/\/+$/, "").split("/").pop();
@@ -1452,11 +1461,11 @@ document.addEventListener("keydown", e => {
 });
 
 /* ---------- trajectory animation (view-only overlay) ---------- */
-let anim = { frames: null, symbols: null, lattice: null, idx: 0, timer: null };
+let anim = { frames: null, symbols: null, lattice: null, energies: null, idx: 0, timer: null };
 function clearAnim() {
   stopAnim();
   if (!anim.frames) return;
-  anim.frames = null; anim.lattice = null;
+  anim.frames = null; anim.lattice = null; anim.energies = null;
   $("anim").style.display = "none";
   if (ED) { fitView(); syncView(); updateInfo(); }
   render();
@@ -1470,7 +1479,8 @@ function setFrame(i) {
   view.atoms = anim.frames[anim.idx].map((p, k) => ({ p, el: anim.symbols[k], i: -1 }));
   view.bonds = []; view.ghosts = [];
   $("animslider").value = anim.idx;
-  $("animlabel").textContent = `frame ${anim.idx + 1} / ${anim.frames.length}`;
+  $("animlabel").textContent = `frame ${anim.idx + 1} / ${anim.frames.length}`
+    + (anim.energies ? ` · E = ${anim.energies[anim.idx].toFixed(4)} eV` : "");
   render();
 }
 function toggleAnim() {
@@ -1481,6 +1491,7 @@ function toggleAnim() {
 }
 function loadTrajectory(t) {
   anim.frames = t.frames; anim.symbols = t.symbols; anim.lattice = t.lattice;
+  anim.energies = t.energies || null;
   fitViewTo(t.lattice);
   const counts = {};
   for (const el of t.symbols) counts[el] = (counts[el] || 0) + 1;
@@ -1793,8 +1804,7 @@ function updateDirty() {
 async function saveStructure(overwrite) {
   if (!ED) { banner("Nothing to save — build or load a structure first."); return; }
   if (overwrite && ED.savedPath) { writeStructure({ dir: ED.savedPath }); return; }
-  const name = $("sv-name").value.trim();
-  if (!name) { banner("Give the case a name — it becomes the folder created on the working machine."); return; }
+  const name = $("sv-name").value.trim() || autoCaseName();
   // An absolute path in the name field is used as-is. Otherwise the case folder
   // is created inside the chosen location (the 📁 picker, on the working
   // machine), falling back to that machine's default cases folder.
@@ -1822,12 +1832,33 @@ async function writeStructure(loc) {
   // The just-saved case becomes the working case the other tabs act on.
   setWork(res.case, "single", res.remote ? res.machine : "local");
 }
+/* A structure in the editor is enough to run: an unsaved (or edited) structure
+   is auto-saved as a fresh case first — the server picks a non-conflicting
+   folder — so 💾 Save is only needed to choose the name/folder yourself. */
+async function ensureCase() {
+  if (ED && (ED.dirty || !ED.savedPath)) {
+    const typed = $("sv-name").value.trim();
+    if (typed.startsWith("/") || typed.startsWith("~")) {
+      await writeStructure({ dir: typed });
+    } else {
+      const name = typed
+        || (ED.savedPath ? ED.savedPath.replace(/\/+$/, "").split("/").pop() : autoCaseName());
+      await writeStructure({ name, root: $("sv-loc").value.trim() || defaultCasesRoot() || undefined });
+    }
+  }
+  return currentCase();
+}
+/* Chemical-formula case name for auto-saves, e.g. H2O or O2Ti. */
+function autoCaseName() {
+  const [els, counts] = regroup(ED.symbols.slice().sort());
+  return els.map((e, i) => e + (counts[i] > 1 ? counts[i] : "")).join("") || "case";
+}
 
 /* ---------- builders (all load into the editor; Save creates the case) ---------- */
 async function intoEditor(data, nameHint) {
   edFromPayload(data.structure, null);
   if (nameHint) $("sv-name").value = nameHint;
-  banner("Loaded into the editor — press 💾 Save to create a case.", "info");
+  banner("Loaded into the editor — run a calculation directly (it saves automatically) or 💾 Save to choose the folder.", "info");
 }
 async function built(data) {      // for builders that do write folders (NEB, ML relax)
   setWork(data.case, data.type || "single", data.machine || "local");
@@ -2281,7 +2312,7 @@ function runPayload(mode) {
   });
 }
 async function doPreview() {
-  if (!currentCase()) { banner("No working case yet — build or import a structure in the Build tab and 💾 Save it."); return; }
+  if (!(await ensureCase())) { banner("Nothing to preview — build or import a structure in the Build tab first."); return; }
   const p0 = runPayload();
   const data = await api("/api/preview", caseBody({
     target: currentCase(), calc_type: p0.calc_type, kpoints: kSpec(), spin: p0.spin,
@@ -2300,7 +2331,7 @@ async function doPreview() {
     p.INCAR + "\n--- KPOINTS ---\n" + p.KPOINTS;
 }
 async function startRun(mode, consoleId) {
-  if (!currentCase()) { banner("No working case yet — build or import a structure in the Build tab and 💾 Save it."); return; }
+  if (!(await ensureCase())) { banner("Nothing to run — build or import a structure in the Build tab first."); return; }
   if (calcType === "bands" && $("k-mode").value === "line" && !$("k-path").value) {
     banner("Band structures need a k-path — pick a preset (fcc, bcc, …) in the k-path field."); return;
   }
@@ -2310,7 +2341,7 @@ async function startRun(mode, consoleId) {
   $(activeConsole).textContent = "starting…";
 }
 async function startResume(consoleId) {
-  if (!currentCase()) { banner("No working case yet — build or import a structure in the Build tab and 💾 Save it."); return; }
+  if (!currentCase()) { banner("No working case yet — Resume picks up the latest job of a case that has already run."); return; }
   // Resume the latest existing job directory in place from its newest CONTCAR,
   // reusing that job's own INCAR/KPOINTS/POTCAR (no new job number). Works on the
   // working machine — local, or the chosen remote, where it restarts in place.
@@ -2570,6 +2601,55 @@ async function saveIncar() {
   banner("INCAR saved to the case — it now overrides templates.", "info");
 }
 
+/* ---------- guided INCAR settings (from the option catalog) ---------- */
+let incarOptionsCache = {};                              // groups per calc type
+async function renderIncarForm() {
+  const type = calcType || "scf";
+  let groups = incarOptionsCache[type];
+  if (!groups) {
+    try { groups = (await api("/api/incar_options?type=" + encodeURIComponent(type), null, true)).groups; }
+    catch (e) {                                          // older server without the endpoint
+      $("incar-form").innerHTML = '<p class="sub">Restart vasp-auto-ui to enable guided settings.</p>';
+      return;
+    }
+    incarOptionsCache[type] = groups;
+  }
+  $("incar-form").innerHTML = Object.entries(groups).map(([group, fields]) => {
+    const rows = fields.map(f => {
+      const doc = f.doc ? ` <a href="${f.doc}" target="_blank" title="VASP wiki: ${f.tag}" style="color:var(--accent);text-decoration:none">?</a>` : "";
+      const on = `onchange="applyIncarSetting('${f.tag}', this.value)"`;
+      let ctrl;
+      if (f.kind === "choice") {
+        const opts = f.options.map(o =>
+          `<option value="${o.value}"${o.value === f.default ? " selected" : ""} title="${o.hint || ""}">${o.label}</option>`).join("");
+        ctrl = `<select data-tag="${f.tag}" ${on}>${opts}</select>`;
+      } else if (f.kind === "bool") {
+        ctrl = `<select data-tag="${f.tag}" ${on}><option value=".TRUE.">Yes</option><option value=".FALSE." selected>No</option></select>`;
+      } else {
+        const unit = f.unit ? ` <span class="hint">${f.unit}</span>` : "";
+        ctrl = `<input type="text" data-tag="${f.tag}" value="${f.default || ''}" placeholder="default" ${on} style="width:110px">${unit}`;
+      }
+      return `<label style="display:flex;align-items:center;gap:8px;margin:3px 0">
+        <span style="flex:1">${f.label}${doc} <span class="hint">${f.tag}</span></span>${ctrl}</label>`;
+    }).join("");
+    return `<fieldset style="margin:6px 0;border:1px solid var(--line);border-radius:6px;padding:4px 10px">
+      <legend style="padding:0 4px;color:var(--dim)">${group}</legend>${rows}</fieldset>`;
+  }).join("");
+}
+async function applyIncarSetting(tag, value) {
+  const res = await api("/api/incar_apply", { text: $("incar").value, choices: { [tag]: value } });
+  $("incar").value = res.text;
+  incarTemplateText = null;                              // form edits are user content, not a pristine template
+}
+async function applyAllIncarSettings() {
+  const choices = {};
+  document.querySelectorAll("#incar-form [data-tag]").forEach(el => { choices[el.dataset.tag] = el.value; });
+  const res = await api("/api/incar_apply", { text: $("incar").value, choices });
+  $("incar").value = res.text;
+  incarTemplateText = null;
+  banner("Guided settings written into the INCAR editor. Save to case to keep them.", "info");
+}
+
 /* ---------- workflow ---------- */
 function setPreset(steps) { wf = steps.slice(); renderSteps(); }
 function addStep() { wf.push($("w-type").value); renderSteps(); }
@@ -2615,7 +2695,7 @@ function renderSteps() {
   $("w-yaml").value = workflowYaml();
 }
 async function runWorkflow() {
-  if (!currentCase()) { banner("No working case yet — build or import a structure in the Build tab and 💾 Save it."); return; }
+  if (!(await ensureCase())) { banner("Nothing to run — build or import a structure in the Build tab first."); return; }
   if (!wf.length) { banner("Add workflow steps first — try the “Optimise → SCF → DOS” preset."); return; }
   const machine = $("w-remote") ? $("w-remote").value : "local";
   const body = { target: currentCase(), mode: "run",
@@ -2634,7 +2714,7 @@ async function runWorkflow() {
     banner(`Workflow shipped to ${machine}. Track it in the Results tab (machine: ${machine}).`, "info");
 }
 async function saveWorkflowYaml() {
-  if (!currentCase()) { banner("No working case yet — build or import a structure in the Build tab and 💾 Save it."); return; }
+  if (!(await ensureCase())) { banner("No working case yet — build or import a structure in the Build tab first."); return; }
   await api("/api/file", caseBody({ dir: currentCase(), name: "workflow.yaml", text: $("w-yaml").value }));
   banner("workflow.yaml saved — the CLI will use it automatically for this case.", "info");
 }
@@ -2783,9 +2863,22 @@ function resMachineCell(r) {
     return `<span class="badge" title="Submitted to ${esc(r.remote_dir || r.machine)}">🖥 ${esc(r.machine)}</span>`;
   return `<span style="color:var(--dim)">💻 local</span>`;
 }
+/* path (+machine) query suffix for a result row's analysis endpoints. Remote
+   rows send their machine; the server syncs the job's output into a local
+   cache so the same viewers work on them exactly like on local jobs. */
+function jobQS(r) {
+  return encodeURIComponent(r.remote ? r.path : r.job_dir)
+       + (r.remote ? "&machine=" + encodeURIComponent(r.machine) : "");
+}
 function resActions(r, i) {
   if (r.remote)
-    return `<button class="ghost actbtn" onclick="openJob(${i})" title="Browse and download this job's files">📁 files</button>`;
+    return `<button class="ghost actbtn" onclick="openJob(${i})" title="Browse and download this job's files">📁 files</button>` +
+      `<button class="ghost actbtn" title="Short Markdown report of setup + results" onclick="showReport(${i})">📄</button>` +
+      `<button class="ghost actbtn" title="Density of states" onclick="showDos(${i})">📈</button>` +
+      `<button class="ghost actbtn" title="Projected DOS per element and orbital (needs LORBIT)" onclick="showPdos(${i})">🧬</button>` +
+      `<button class="ghost actbtn" title="Band structure along the k-path" onclick="showBands(${i})">🎼</button>` +
+      `<button class="ghost actbtn" title="Charge density / potential: planar average + slice (fetches the file once)" onclick="showVolume(${i})">⚡</button>` +
+      `<button class="ghost actbtn" title="Animate the relaxation / NEB path" onclick="animateJob(${i})">🎞</button>`;
   let h = "";
   if (r.machine)
     h += `<button class="ghost actbtn" title="Check this job's status on ${esc(r.machine)}" onclick="remoteStatus(${i})">🛰</button>` +
@@ -2955,7 +3048,8 @@ async function remoteFetch(i) {
 /* ---------- report / DOS / animation actions ---------- */
 async function showReport(i) {
   const r = RESULTS[i];
-  const data = await api("/api/report", { job_dir: r.job_dir, case: r.case });
+  const data = await api("/api/report",
+    { job_dir: r.remote ? r.path : r.job_dir, machine: r.remote ? r.machine : null, case: r.case });
   $("reportcase").textContent = r.case;
   $("reportview").textContent = data.text;
   $("reportdl").href = "/download?path=" + encodeURIComponent(data.path);
@@ -2964,7 +3058,7 @@ async function showReport(i) {
 }
 async function animateJob(i) {
   const r = RESULTS[i];
-  const t = await api("/api/trajectory?path=" + encodeURIComponent(r.job_dir));
+  const t = await api("/api/trajectory?path=" + jobQS(r));
   document.querySelector('nav button[data-tab="build"]').click();
   loadTrajectory(t);
   banner(`Animating ${r.case}: ${t.frames.length} frames (${t.kind})`, "info");
@@ -2990,7 +3084,7 @@ function exportCanvas(id, name) {
 async function showNeb(i) {
   const r = RESULTS[i];
   let data;
-  try { data = await api("/api/neb?path=" + encodeURIComponent(r.job_dir)); }
+  try { data = await api("/api/neb?path=" + jobQS(r)); }
   catch (e) { $("nebcard").style.display = "none"; return; }
   LAST.neb = { name: r.case, data };
   $("nebcase").textContent = r.case;
@@ -3075,7 +3169,7 @@ function exportNebCsv() {
 }
 async function showDos(i) {
   const r = RESULTS[i];
-  const dos = await api("/api/dos?path=" + encodeURIComponent(r.job_dir));
+  const dos = await api("/api/dos?path=" + jobQS(r));
   LAST.dos = { name: r.case, data: dos };
   $("doscase").textContent = r.case;
   $("doscard").style.display = "block";
@@ -3163,18 +3257,18 @@ function exportVolCsv() {
 /* ---------- projected DOS ---------- */
 const SERIES_COLORS = ["#4ea1ff", "#ff6b6b", "#43c97a", "#ffc857", "#b07cff",
                        "#7cc4ff", "#ff9e57", "#57d0c4", "#e06aa3", "#9acD32"];
-let PDOS_DIR = null;
+let PDOS_QS = null;   // path (+machine) query suffix of the job being viewed
 async function showPdos(i) {
   const r = RESULTS[i];
-  PDOS_DIR = r.job_dir;
+  PDOS_QS = jobQS(r);
   $("pdoscase").textContent = r.case;
   $("pdos-atoms").value = "";
   await reloadPdos();
 }
 async function reloadPdos() {
-  if (!PDOS_DIR) return;
+  if (!PDOS_QS) return;
   const selection = $("pdos-atoms").value.trim();
-  const data = await api("/api/pdos?path=" + encodeURIComponent(PDOS_DIR) +
+  const data = await api("/api/pdos?path=" + PDOS_QS +
                          (selection ? "&atoms=" + encodeURIComponent(selection) : ""));
   LAST.pdos = { name: $("pdoscase").textContent, data };
   $("pdoscard").style.display = "block";
@@ -3230,7 +3324,7 @@ function drawPdos(data) {
 /* ---------- band structure ---------- */
 async function showBands(i) {
   const r = RESULTS[i];
-  const data = await api("/api/bands?path=" + encodeURIComponent(r.job_dir));
+  const data = await api("/api/bands?path=" + jobQS(r));
   LAST.bands = { name: r.case, data };
   $("bandscase").textContent = r.case;
   $("bandsinfo").textContent =
@@ -3286,10 +3380,10 @@ function redrawBands() {
 
 /* ---------- volumetric data (charge density / potential / Δρ) ---------- */
 const VOL_FILES = ["CHGCAR", "CHGCAR_diff", "CHGCAR_sum", "LOCPOT", "AECCAR0", "AECCAR2", "PARCHG"];
-let VOL_DIR = null;
+let VOL_QS = null;   // path (+machine) query suffix of the job being viewed
 function showVolume(i) {
   const r = RESULTS[i];
-  VOL_DIR = r.job_dir;
+  VOL_QS = jobQS(r);
   $("volcase").textContent = r.case;
   if (!$("vol-file").options.length)
     for (const f of VOL_FILES) $("vol-file").add(new Option(f, f));
@@ -3299,9 +3393,9 @@ function showVolume(i) {
   $("volcard").scrollIntoView({ behavior: "smooth" });
 }
 async function reloadVolume() {
-  if (!VOL_DIR) return;
+  if (!VOL_QS) return;
   $("vol-fraclabel").textContent = $("vol-frac").value;
-  const data = await api("/api/volume?path=" + encodeURIComponent(VOL_DIR) +
+  const data = await api("/api/volume?path=" + VOL_QS +
     "&file=" + encodeURIComponent($("vol-file").value) +
     "&axis=" + $("vol-axis").value + "&frac=" + $("vol-frac").value);
   LAST.vol = { name: $("volcase").textContent, data };
@@ -3383,7 +3477,7 @@ async function computeChgDiff() {
   if (!total || !parts.length) { banner("Give the total job and at least one part to subtract."); return; }
   banner("Computing Δρ — large grids can take a few seconds…", "info");
   const data = await api("/api/chgdiff", { total, parts });
-  VOL_DIR = total;
+  VOL_QS = encodeURIComponent(total);
   $("volcase").textContent = "Δρ (" + total.split("/").pop() + ")";
   if (!$("vol-file").options.length)
     for (const f of VOL_FILES) $("vol-file").add(new Option(f, f));

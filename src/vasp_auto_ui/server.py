@@ -9,6 +9,7 @@ Binds to 127.0.0.1 — this is a single-user local tool, not a public server.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -50,6 +51,7 @@ from vasp_auto.structure import (
     substitute,
     write_poscar,
 )
+from vasp_auto import py4vasp_tools
 from vasp_auto.parser import aggregate_pdos, parse_bands, parse_dos, parse_pdos
 from vasp_auto.report import build_job_report, write_job_report
 from vasp_auto.runner import (
@@ -61,13 +63,14 @@ from vasp_auto.runner import (
     poll_detached_job,
     poll_remote_job,
     read_remote_text,
+    remote_command,
     resolve_detached_job_dir,
     resolve_remote_run_mode,
     setup_remote_engine,
     check_remote_connection,
 )
 from vasp_auto.target_utils import get_case_type, inspect_target
-from vasp_auto.trajectory import job_trajectory
+from vasp_auto.trajectory import job_trajectory, oszicar_energies
 from vasp_auto.workflow import (
     build_row,
     neb_energy_profile,
@@ -364,9 +367,36 @@ def api_structure(query, _body):
     return _struct_payload(read_poscar(poscar), poscar)
 
 
+def _unique_case_dir(parent: Path, name: str) -> Path:
+    """First free of parent/name, name_2, name_3 … — a name-based save never
+    clobbers an existing case (overwriting needs an explicit absolute dir)."""
+    case_dir, n = parent / name, 1
+    while case_dir.exists():
+        n += 1
+        case_dir = parent / f"{name}_{n}"
+    return case_dir
+
+
+def _remote_unique_case(remote: dict, base: str, name: str) -> str:
+    """Remote twin of _unique_case_dir: one SSH round trip finds the first
+    free folder name. On SSH trouble fall back to base/name unchanged (the
+    later rsync will surface the real error)."""
+    script = (f'd="{base}/{name}"; i=1; while [ -e "$d" ]; do i=$((i+1)); '
+              f'd="{base}/{name}_$i"; done; echo "$d"')
+    try:
+        res = remote_command(remote, script, timeout=30)
+        lines = [ln.strip() for ln in (res.stdout or "").splitlines() if ln.strip()]
+        if res.returncode == 0 and lines:
+            return lines[-1]
+    except Exception:
+        pass
+    return f"{base}/{name}"
+
+
 def api_structure_save(_query, body):
     """Save the editor's working structure as a case POSCAR (the explicit
-    Save button — building/editing alone never writes case folders)."""
+    Save button, and the auto-save a Run performs on an unsaved structure —
+    building/editing alone never writes case folders)."""
     struct = _struct_from_payload(body["structure"])
     machine = (body.get("machine") or "").strip()
     if _is_remote_machine(machine):
@@ -381,7 +411,7 @@ def api_structure_save(_query, body):
             if not name:
                 raise ValueError("Give a case name to save")
             base = (body.get("root") or _default_remote_cases_dir(remote)).rstrip("/")
-            remote_case = f"{base}/{Path(str(name)).name}"
+            remote_case = _remote_unique_case(remote, base, Path(str(name)).name)
         with tempfile.TemporaryDirectory(prefix="vasp_auto_rc_") as tmp:
             write_poscar(struct, Path(tmp) / "POSCAR")
             _ship_dir_to_remote(Path(tmp), machine, remote_case)
@@ -397,10 +427,8 @@ def api_structure_save(_query, body):
         if not name:
             raise ValueError("Give a case name or directory to save into")
         name = Path(str(name)).name  # a bare folder name, even if a path was typed
-        if body.get("root"):
-            case_dir = Path(str(body["root"])).expanduser() / name
-        else:
-            case_dir = REPO_ROOT / "inputs" / name
+        root = Path(str(body["root"])).expanduser() if body.get("root") else REPO_ROOT / "inputs"
+        case_dir = _unique_case_dir(root, name)
     write_poscar(struct, case_dir / "POSCAR")
     return {"case": str(case_dir), "poscar": str(case_dir / "POSCAR")}
 
@@ -955,20 +983,93 @@ def api_template(query, _body):
     return {"text": load_incar_template(query["type"][0])}
 
 
+def api_incar_options(query, _body):
+    """The human-language INCAR catalog for the guided form.
+
+    Filtered to the requested calculation type (``?type=dos``): a single-point
+    run drops the ionic-movement settings, a DOS run gains its own fields.
+    """
+    from vasp_auto.incar_catalog import fields_by_group
+    # Default to the conservative single-point set, not the whole catalog, so a
+    # caller that forgets ?type= never shows ionic-movement fields in an SCF run.
+    calc_type = (query.get("type") or ["scf"])[0]
+    groups = {
+        group: [
+            {
+                "tag": f.tag, "label": f.label, "kind": f.kind,
+                "default": f.default, "unit": f.unit, "doc": f.doc,
+                "options": [
+                    {"label": o.label, "value": o.value, "hint": o.hint}
+                    for o in f.options
+                ],
+            }
+            for f in fields
+        ]
+        for group, fields in fields_by_group(calc_type).items()
+    }
+    return {"groups": groups}
+
+
+def api_incar_apply(_query, body):
+    """Apply the form's picks onto the current INCAR text and return the result."""
+    from vasp_auto.incar import apply_incar_choices
+    text = body.get("text") or ""
+    choices = body.get("choices") or {}
+    return {"text": apply_incar_choices(text, choices)}
+
+
+# Local cache of remote job output, so the analysis viewers (DOS, PDOS,
+# bands, volume, animation, report) work on remote results exactly like on
+# local ones. One folder per remote job, keyed by machine + remote path.
+REMOTE_RESULT_CACHE = UI_LOG_DIR / "remote_results"
+
+
+def _analysis_dir(path: str, machine: str | None = None) -> Path:
+    """Resolve an analysis request's job dir to a local directory.
+
+    Local machine: the path itself. Remote machine: rsync the job's output
+    (minus HEAVY_OUTPUTS — the volume endpoint pulls those on demand) into
+    the cache copy and analyze that. Every call re-syncs, so a still-running
+    job shows fresh data; rsync makes the refresh incremental.
+    """
+    if not _is_remote_machine(machine):
+        return Path(path).expanduser().resolve()
+    remote = _resolve_remote(machine)
+    key = hashlib.sha1(f"{machine}:{path}".encode()).hexdigest()[:10]
+    cache = REMOTE_RESULT_CACHE / machine / f"{Path(path.rstrip('/')).name}-{key}"
+    fetch_remote_results(remote, path, str(cache))
+    return cache
+
+
+def _analysis_query_dir(query) -> Path:
+    """_analysis_dir for GET endpoints taking ?path=…[&machine=…]."""
+    return _analysis_dir(query["path"][0], query.get("machine", ["local"])[0])
+
+
 def api_trajectory(query, _body):
-    job_dir = Path(query["path"][0]).expanduser().resolve()
+    job_dir = _analysis_query_dir(query)
     traj = job_trajectory(job_dir)
     if traj is None:
         raise FileNotFoundError(
             "No trajectory found — a relaxation needs XDATCAR (or POSCAR+CONTCAR), "
             "an NEB job needs image directories 00…NN."
         )
+    if traj["kind"] == "relax":
+        # Per-frame energies for the animation label: vaspout.h5 via py4vasp
+        # when present, else OSZICAR. One XDATCAR frame per ionic step, except
+        # that IBRION=2's final line-search re-evaluation adds one trailing
+        # energy without a frame — allow that surplus, first-aligned. A larger
+        # mismatch (e.g. a resumed job's partial OSZICAR) attaches nothing.
+        energies = py4vasp_tools.step_energies(job_dir) or oszicar_energies(job_dir)
+        n = len(traj["frames"])
+        if energies and 0 <= len(energies) - n <= 1:
+            traj["energies"] = energies[:n]
     return traj
 
 
 def api_neb(query, _body):
     """Energy profile (reaction-coordinate plot) for an NEB/TSS job."""
-    job_dir = Path(query["path"][0]).expanduser().resolve()
+    job_dir = _analysis_query_dir(query)
     profile = neb_energy_profile(job_dir)
     if profile is None:
         raise FileNotFoundError(
@@ -979,8 +1080,8 @@ def api_neb(query, _body):
 
 
 def api_dos(query, _body):
-    job_dir = Path(query["path"][0]).expanduser().resolve()
-    dos = parse_dos(job_dir / "vasprun.xml")
+    job_dir = _analysis_query_dir(query)
+    dos = py4vasp_tools.dos(job_dir) or parse_dos(job_dir / "vasprun.xml")
     if dos is None:
         raise FileNotFoundError(
             "No DOS in this job — run a 'dos' calculation (vasprun.xml must contain a DOS block)."
@@ -994,7 +1095,7 @@ def api_pdos(query, _body):
     Optional `atoms` query restricts to a selection ("1-4", "z>0.5", ...)
     resolved against the job POSCAR.
     """
-    job_dir = Path(query["path"][0]).expanduser().resolve()
+    job_dir = _analysis_query_dir(query)
     pdos = parse_pdos(job_dir / "vasprun.xml")
     if pdos is None:
         raise FileNotFoundError(
@@ -1014,7 +1115,7 @@ def api_pdos(query, _body):
 
 
 def api_bands(query, _body):
-    job_dir = Path(query["path"][0]).expanduser().resolve()
+    job_dir = _analysis_query_dir(query)
     bands = parse_bands(job_dir / "vasprun.xml", job_dir / "KPOINTS")
     if bands is None:
         raise FileNotFoundError(
@@ -1072,7 +1173,7 @@ def _volume_payload(volume: dict, file_name: str, axis: int, fraction: float) ->
 
 def api_volume(query, _body):
     """Planar average + one slice of a volumetric file (CHGCAR/LOCPOT/...)."""
-    job_dir = Path(query["path"][0]).expanduser().resolve()
+    job_dir = _analysis_query_dir(query)
     file_name = (query.get("file") or ["CHGCAR"])[0]
     if file_name not in VOLUME_FILES:
         raise ValueError(f"Not a known volumetric file: {file_name}")
@@ -1080,6 +1181,15 @@ def api_volume(query, _body):
     fraction = float((query.get("frac") or ["0.5"])[0])
 
     path = job_dir / file_name
+    machine = query.get("machine", ["local"])[0]
+    if not path.exists() and _is_remote_machine(machine):
+        # Volumetric files are HEAVY_OUTPUTS, excluded from the cached sync —
+        # pull just the requested one, once; slider moves reuse the local copy.
+        try:
+            fetch_remote_file(_resolve_remote(machine),
+                              f"{query['path'][0].rstrip('/')}/{file_name}", path)
+        except Exception:
+            pass  # missing on the remote too — fall through to the clear error
     if not path.exists():
         available = [name for name in VOLUME_FILES if (job_dir / name).exists()]
         raise FileNotFoundError(
@@ -1437,7 +1547,7 @@ def api_db_mlrelax(_query, body):
 
 
 def api_report(_query, body):
-    job_dir = Path(body["job_dir"]).expanduser().resolve()
+    job_dir = _analysis_dir(str(body["job_dir"]), body.get("machine"))
     if not job_dir.is_dir():
         raise FileNotFoundError(f"Job directory not found: {job_dir}")
     case_name = body.get("case") or job_dir.name
@@ -2066,6 +2176,7 @@ GET_ROUTES = {
     "/api/structure": api_structure,
     "/api/results": api_results,
     "/api/template": api_template,
+    "/api/incar_options": api_incar_options,
     "/api/file": api_file_get,
     "/api/jobs": api_jobs,
     "/api/job": api_job,
@@ -2093,6 +2204,7 @@ POST_ROUTES = {
     "/api/adsorption": api_adsorption,
     "/api/bader": api_bader,
     "/api/preview": api_preview,
+    "/api/incar_apply": api_incar_apply,
     "/api/run": api_run,
     "/api/resume": api_resume,
     "/api/stop": api_stop,
@@ -2160,6 +2272,10 @@ class Handler(BaseHTTPRequestHandler):
             page = (STATIC_DIR / "index.html").read_bytes()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            # Never cache: a restarted server must serve the fresh UI, or the
+            # browser keeps calling old endpoints (e.g. /api/incar_options with
+            # no ?type=) and shows stale controls.
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(page)))
             self.end_headers()
             self.wfile.write(page)

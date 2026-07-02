@@ -160,6 +160,11 @@ def parse_args():
              "Run this once after installing, then edit the paths inside it.",
     )
     parser.add_argument(
+        "--list-options",
+        action="store_true",
+        help="List the human-language INCAR settings and their choices, then exit.",
+    )
+    parser.add_argument(
         "--prepare",
         action="store_true",
         help="Prepare jobs only, do not run VASP.",
@@ -2140,13 +2145,18 @@ def _run_detached_offload(case_dir, case_info, args, config, remote, calc_type, 
                 if (case_dir / optional).exists():
                     shutil.copy2(case_dir / optional, bundle / optional)
             potcar_src = bundle / "POSCAR"
-        # Pre-build POTCAR so the remote never needs the (proprietary) library.
-        build_potcar(
-            poscar_path=str(potcar_src),
-            potcar_root=config.get("potcar_root"),
-            output_path=str(bundle / "POTCAR"),
-            potcar_map=config.get("potcar_map"),
-        )
+        # POTCAR: if the machine has its own library (remote 'potcar_root'), let the
+        # remote engine build it there so the local host needs no POTCAR library.
+        # Otherwise pre-build it here and ship it (the remote then just copies it).
+        if (remote.get("potcar_root") or "").strip():
+            print(f"POTCAR    : built on {machine} from its library (not shipped)")
+        else:
+            build_potcar(
+                poscar_path=str(potcar_src),
+                potcar_root=config.get("potcar_root"),
+                output_path=str(bundle / "POTCAR"),
+                potcar_map=config.get("potcar_map"),
+            )
 
         flags = _forward_calc_flags(args)
         print(f"Offload   : {case_name} -> {machine} (detached; local host can power off)")
@@ -2423,6 +2433,24 @@ def _run_init(args) -> bool:
     return True
 
 
+def _list_options(args) -> bool:
+    """--list-options: print the INCAR catalog (labels, choices, defaults), then exit."""
+    if not getattr(args, "list_options", False):
+        return False
+    from .incar_catalog import fields_by_group
+    for group, fields in fields_by_group().items():
+        print(f"\n{group}")
+        for f in fields:
+            unit = f" ({f.unit})" if f.unit else ""
+            default = "" if f.default is None else f"  [default: {f.default}]"
+            only = f"  (only: {', '.join(sorted(f.applies_to))})" if f.applies_to else ""
+            print(f"  {f.label}{unit} -> {f.tag}{default}{only}")
+            for o in f.options:
+                hint = f"  # {o.hint}" if o.hint else ""
+                print(f"      {o.label} = {o.value}{hint}")
+    return True
+
+
 def _warn_if_unconfigured(config, engine):
     """Nudge a first-time user who has no config.yaml toward ``vasp-auto --init``.
 
@@ -2449,6 +2477,9 @@ def main():
         return
 
     if _run_init(args):
+        return
+
+    if _list_options(args):
         return
 
     config = load_config()

@@ -1059,10 +1059,16 @@ def submit_job_detached(
 
     with tempfile.TemporaryDirectory() as tmp:
         cfg = Path(tmp) / "config.yaml"
-        cfg.write_text(
-            f"vasp_executable: {exe}\njobs_root: {results_base}\nneb_images: 5\n",
-            encoding="utf-8",
-        )
+        cfg_lines = [f"vasp_executable: {exe}", f"jobs_root: {results_base}", "neb_images: 5"]
+        # When the machine has its own POTCAR library (remote 'potcar_root'), point the
+        # remote engine at it so it builds the POTCAR there and no POTCAR needs shipping.
+        # Without it, a pre-built POTCAR rides along in the inputs bundle (see
+        # _run_detached_offload). ponytail: potcar_map (variant selection) isn't
+        # forwarded — add it here if a config ever sets one.
+        potcar_root = (remote.get("potcar_root") or "").strip()
+        if potcar_root:
+            cfg_lines.append(f"potcar_root: {potcar_root}")
+        cfg.write_text("\n".join(cfg_lines) + "\n", encoding="utf-8")
         _ship_file(cfg, target, f"{paths['root']}/config.yaml", remote, ssh_opts)
 
     # Ship the INCAR templates (example/INCAR_*) so the remote engine can build
