@@ -1998,13 +1998,16 @@ def resolve_engine(args, config) -> tuple[str, dict]:
     return engine, config
 
 
-def _forward_calc_flags(args) -> list[str]:
+def _forward_calc_flags(args, engine="vasp") -> list[str]:
     """Reconstruct the calc-shaping CLI flags to forward to a remote offload run.
 
     The remote engine runs the case as a normal local job to itself, so this
     excludes target/remote/scheduler/parallel/background flags. Defaulted flags
     (energy_tol, sigma_tol, kpath_divisions, solvation_eps) are only forwarded
-    when the feature that uses them is active.
+    when the feature that uses them is active. ``engine`` is the *resolved*
+    engine (flag or config), forwarded explicitly; --qe-executable/--pseudo-dir
+    are host-local paths and never forwarded — the machine's own values go into
+    the remote config.yaml (see submit_job_detached) or the shipped bundle.
     """
     flags: list[str] = []
 
@@ -2015,12 +2018,8 @@ def _forward_calc_flags(args) -> list[str]:
 
     if args.calc_type:
         add("--calc-type", args.calc_type)
-    if getattr(args, "engine", None):
-        add("--engine", args.engine)
-    if getattr(args, "qe_executable", None):
-        add("--qe-executable", args.qe_executable)
-    if getattr(args, "pseudo_dir", None):
-        add("--pseudo-dir", args.pseudo_dir)
+    if engine != "vasp":
+        add("--engine", engine)
     if getattr(args, "ase_calculator", None):
         add("--ase-calculator", args.ase_calculator)
     if getattr(args, "ase_command", None):
@@ -2108,14 +2107,39 @@ def _bundle_tss_inputs(case_dir: Path, bundle: Path, case_name: str) -> Path:
     return potcar_src
 
 
+def _bundle_qe_pseudos(bundle: Path, case_name: str, config: dict, machine) -> list[str]:
+    """Copy the case's UPF pseudopotentials into the offload bundle.
+
+    Returns the --pseudo-dir flag pointing at the shipped copy — a path relative
+    to the remote engine's working directory (remote_root), where run.sh cds."""
+    from vasp_auto.qe_tools import pseudo_files_for_struct
+    from vasp_auto.structure import read_poscar
+
+    struct = read_poscar(bundle / "POSCAR")
+    pseudos = pseudo_files_for_struct(struct, config.get("pseudo_dir"), config.get("pseudo_map"))
+    pseudo_dir = config.get("pseudo_dir")
+    (bundle / "pseudo").mkdir()
+    for fname in dict.fromkeys(pseudos.values()):
+        src = Path(pseudo_dir).expanduser() / fname if pseudo_dir else Path(fname)
+        if not src.exists():
+            raise SystemExit(
+                f"{case_name}: pseudopotential not found locally: {src}. "
+                f"Set pseudo_dir in config.yaml, or give {machine} its own "
+                "'pseudo_dir' in remotes.json."
+            )
+        shutil.copy2(src, bundle / "pseudo" / fname)
+    return ["--pseudo-dir", f"inputs/{case_name}/pseudo"]
+
+
 def _run_detached_offload(case_dir, case_info, args, config, remote, calc_type, kpoints_spec,
-                          mode, project_name):
+                          mode, project_name, engine="vasp"):
     """Offload a full calculation to the remote engine (run_mode: ssh_detached).
 
     Prepares an inputs bundle (a single-case POSCAR, or a TSS/NEB case's
-    initial/final endpoints, plus a pre-built POTCAR and any user INCAR/KPOINTS)
-    locally, ships it, and launches the remote vasp_auto detached so the local
-    host can be powered off. Returns (case_info, [row])."""
+    initial/final endpoints, plus a pre-built POTCAR and any user INCAR/KPOINTS —
+    or, for QE, the UPF pseudopotentials and any user pw.in) locally, ships it,
+    and launches the remote vasp_auto detached so the local host can be powered
+    off. Returns (case_info, [row])."""
     import tempfile
     from vasp_auto.potcar_finder import build_potcar
     from vasp_auto.runner import submit_job_detached
@@ -2134,21 +2158,33 @@ def _run_detached_offload(case_dir, case_info, args, config, remote, calc_type, 
             # interpolates the images, builds the NEB INCAR, and runs them all.
             potcar_src = _bundle_tss_inputs(case_dir, bundle, case_name)
         else:
-            # POSCAR is required; INCAR/KPOINTS are forwarded if the user supplied them.
+            # POSCAR is required; INCAR/KPOINTS/pw.in are forwarded if the user
+            # supplied them.
             poscar = case_dir / "POSCAR"
             if not poscar.exists():
                 raise SystemExit(f"{case_name}: offload (ssh_detached) needs a POSCAR.")
             shutil.copy2(poscar, bundle / "POSCAR")
             # workflow.yaml is forwarded so a chained/converge workflow offloads too
             # (the remote engine re-reads it via load_workflow_spec).
-            for optional in ("INCAR", "KPOINTS", "workflow.yaml"):
+            optionals = ("pw.in",) if engine == "qe" else ("INCAR", "KPOINTS", "workflow.yaml")
+            for optional in optionals:
                 if (case_dir / optional).exists():
                     shutil.copy2(case_dir / optional, bundle / optional)
             potcar_src = bundle / "POSCAR"
+
+        flags = _forward_calc_flags(args, engine=engine)
+        if engine == "qe":
+            # Pseudopotentials: the machine's own UPF library (remote 'pseudo_dir',
+            # written into its config.yaml by submit_job_detached), or ship the
+            # local UPFs inside the bundle.
+            if (remote.get("pseudo_dir") or "").strip():
+                print(f"Pseudos   : from {machine}'s own library (not shipped)")
+            else:
+                flags += _bundle_qe_pseudos(bundle, case_name, config, machine)
         # POTCAR: if the machine has its own library (remote 'potcar_root'), let the
         # remote engine build it there so the local host needs no POTCAR library.
         # Otherwise pre-build it here and ship it (the remote then just copies it).
-        if (remote.get("potcar_root") or "").strip():
+        elif (remote.get("potcar_root") or "").strip():
             print(f"POTCAR    : built on {machine} from its library (not shipped)")
         else:
             build_potcar(
@@ -2158,7 +2194,6 @@ def _run_detached_offload(case_dir, case_info, args, config, remote, calc_type, 
                 potcar_map=config.get("potcar_map"),
             )
 
-        flags = _forward_calc_flags(args)
         print(f"Offload   : {case_name} -> {machine} (detached; local host can power off)")
         submission = submit_job_detached(
             case_dir=str(bundle),
@@ -2167,6 +2202,7 @@ def _run_detached_offload(case_dir, case_info, args, config, remote, calc_type, 
             cpus=args.cpus,
             calc_flags=flags,
             local_job_dir=case_info["job_dir"],
+            engine=engine,
         )
 
     print(f"Launched  : {machine} pid {submission['pid'] or '?'} -> {submission['remote_dir']}")
@@ -2256,10 +2292,11 @@ def _process_case(case_dir, args, base_config, mode, project_name, output_root, 
     # Detached offload: the whole calculation (incl. convergence/workflow) runs on
     # the remote engine and we return immediately, so the local host can power off.
     if remote and not args.dry_run and not args.prepare and resolve_remote_run_mode(remote) == "ssh_detached":
-        if engine in ("qe", "ase"):
-            raise ValueError(f"Offload (ssh_detached) supports VASP only, not --engine {engine}.")
+        if engine == "ase":
+            raise ValueError("Offload (ssh_detached) supports VASP and QE, not --engine ase.")
         return _run_detached_offload(
             case_dir, case_info, args, config, remote, calc_type, kpoints_spec, mode, project_name,
+            engine=engine,
         )
 
     workflow_steps = None

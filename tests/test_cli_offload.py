@@ -71,7 +71,8 @@ def test_offload_bundles_workflow_yaml(tmp_path, monkeypatch):
 
     captured = {}
 
-    def fake_submit(case_dir, remote, case_name, cpus, calc_flags, local_job_dir=None, on_progress=None):
+    def fake_submit(case_dir, remote, case_name, cpus, calc_flags, local_job_dir=None,
+                    on_progress=None, engine="vasp"):
         captured["files"] = sorted(p.name for p in Path(case_dir).iterdir())
         captured["flags"] = list(calc_flags)
         return {"machine": remote.get("name"), "remote_dir": "/r/" + case_name,
@@ -112,7 +113,8 @@ def test_offload_bundles_neb_endpoints(tmp_path, monkeypatch):
 
     captured = {}
 
-    def fake_submit(case_dir, remote, case_name, cpus, calc_flags, local_job_dir=None, on_progress=None):
+    def fake_submit(case_dir, remote, case_name, cpus, calc_flags, local_job_dir=None,
+                    on_progress=None, engine="vasp"):
         root = Path(case_dir)
         captured["tree"] = sorted(str(p.relative_to(root)) for p in root.rglob("*"))
         captured["flags"] = list(calc_flags)

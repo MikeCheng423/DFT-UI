@@ -89,7 +89,8 @@ REMOTES_FILE = REPO_ROOT / "remotes.json"
 # "cpus" is a per-machine default core count the Calculate-tab CPU field
 # pre-fills from; the run still passes it through the usual -n argument.
 REMOTE_FIELDS = ("host", "user", "port", "ssh_key", "remote_root",
-                 "vasp_executable", "scheduler", "run_mode", "env_setup", "cpus")
+                 "vasp_executable", "scheduler", "run_mode", "env_setup", "cpus",
+                 "potcar_root", "qe_executable", "pseudo_dir")
 
 EDITABLE_FILES = {"INCAR", "KPOINTS", "POSCAR", "workflow.yaml", "config.yaml"}
 
@@ -1937,8 +1938,9 @@ def api_remote_save(_query, body):
         raise ValueError("host is required.")
     if not body.get("remote_root"):
         raise ValueError("remote_root is required (a base directory on the remote).")
-    if not body.get("vasp_executable"):
-        raise ValueError("vasp_executable is required (the VASP path on the remote).")
+    if not body.get("vasp_executable") and not body.get("qe_executable"):
+        raise ValueError("vasp_executable is required (the VASP path on the remote), "
+                         "or qe_executable for a QE-only machine.")
     entry = {k: body[k] for k in REMOTE_FIELDS if body.get(k) not in (None, "")}
     if "cpus" in entry:
         try:

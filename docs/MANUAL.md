@@ -195,6 +195,13 @@ Supported calc types: `scf`, `relax`, `vcrelax` (variable-cell relaxation),
 `dos`, `bands`. NEB, phonons, convergence scans, workflow chaining and implicit
 solvation remain VASP-only for now.
 
+QE runs on remote machines through the same three modes as VASP — direct SSH
+(`run_mode: ssh`), scheduler submission (`slurm`/`pbs`) and detached offload
+(`ssh_detached`). Give the machine a `qe_executable` in remotes.json (default:
+`pw.x` on its PATH) and, optionally, a `pseudo_dir` pointing at its own UPF
+library; without one, offload ships the locally-resolved UPF files alongside
+the POSCAR, so the remote needs no pseudopotential setup at all.
+
 Pseudopotentials are **UPF** files (the QE analogue of POTCAR). Point
 `pseudo_dir` at a directory of `.UPF` files; for each element the finder picks
 the first file named `<El>.*.UPF`, or use `pseudo_map` to choose an exact file:

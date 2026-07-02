@@ -502,6 +502,14 @@ def _remote_vasp_exe(remote: dict) -> str:
     return exe
 
 
+def _remote_exe(remote: dict, engine: str = "vasp") -> str:
+    """The DFT binary path on the remote machine for the given engine."""
+    if engine == "qe":
+        # QE is usually a distro package on PATH; a remote 'qe_executable' overrides.
+        return remote.get("qe_executable") or "pw.x"
+    return _remote_vasp_exe(remote)
+
+
 def remote_results_base(remote: dict) -> str:
     """Canonical results directory on a remote machine: ``<remote_root>/results``.
 
@@ -525,8 +533,9 @@ def run_vasp_remote(
     on_progress=None,
     fetch_heavy: bool = True,
     remote_subdir: str | None = None,
+    engine: str = "vasp",
 ) -> int:
-    """Run VASP on a remote machine via direct ``mpirun`` over SSH (no scheduler).
+    """Run VASP (or QE pw.x, ``engine="qe"``) on a remote machine via ``mpirun`` over SSH.
 
     Unlike :func:`submit_job_remote` (fire-and-forget queue submission), this runs
     synchronously: it ships the prepared inputs to ``<remote_root>/results/<job name>``,
@@ -553,7 +562,7 @@ def run_vasp_remote(
     # remote (e.g. two cases both with an "encut_400" convergence trial).
     subpath = (remote_subdir or job_dir.name).strip("/")
     remote_dir = remote_results_base(remote) + "/" + subpath
-    exe = _remote_vasp_exe(remote)
+    exe = _remote_exe(remote, engine)
     ranks = cpus if cpus is not None else 1
     env_setup = (remote.get("env_setup") or "").strip()
     machine = remote.get("name") or remote.get("host")
@@ -569,7 +578,13 @@ def run_vasp_remote(
         parts.append(f"{{ {env_setup} ; }} >/dev/null 2>&1 || true")
     parts.append("ulimit -s unlimited 2>/dev/null || true")
     parts.append(f"cd {quoted_dir}")
-    parts.append(f"mpirun -np {ranks} {shlex.quote(exe)} > run.log 2>&1")
+    if engine == "qe":
+        # pw.x reads pw.in; keep pw.out (the parser's file) and run.log (the UI log
+        # viewer) identical, and preserve mpirun's exit code past the cp.
+        parts.append(f"mpirun -np {ranks} {shlex.quote(exe)} -in pw.in > pw.out 2>&1; "
+                     "rc=$?; cp -f pw.out run.log; exit $rc")
+    else:
+        parts.append(f"mpirun -np {ranks} {shlex.quote(exe)} > run.log 2>&1")
     remote_script = "\n".join(parts)
 
     if on_progress is not None:
@@ -781,6 +796,7 @@ def submit_job_remote(
     remote: dict,
     cpus: int | None = None,
     job_template: str | None = None,
+    engine: str = "vasp",
 ) -> dict:
     """Send a fully prepared job to a remote machine and submit it to its queue.
 
@@ -806,11 +822,7 @@ def submit_job_remote(
     scheduler = remote.get("scheduler", "slurm")
     if scheduler not in SCHEDULER_COMMANDS:
         raise ValueError(f"Unknown remote scheduler: {scheduler} (use slurm or pbs)")
-    exe = remote.get("vasp_executable")
-    if not exe:
-        raise ValueError(
-            "remote config needs a 'vasp_executable' (the VASP path on the remote machine)"
-        )
+    exe = _remote_exe(remote, engine)
 
     target = _ssh_target(remote)
     remote_dir = remote_results_base(remote) + "/" + job_dir.name
@@ -825,6 +837,7 @@ def submit_job_remote(
         template_path=template,
         options=remote.get("scheduler_options"),
         run_dir=remote_dir,
+        engine=engine,
     )
 
     ssh_opts = _ssh_options(remote)
@@ -1013,6 +1026,7 @@ def submit_job_detached(
     calc_flags: list[str],
     local_job_dir: str | None = None,
     on_progress=None,
+    engine: str = "vasp",
 ) -> dict:
     """Offload a full calculation to the remote engine and return immediately.
 
@@ -1028,7 +1042,7 @@ def submit_job_detached(
     paths = _remote_engine_paths(remote)
     target = _ssh_target(remote)
     ssh_opts = _ssh_options(remote)
-    exe = _remote_vasp_exe(remote)
+    exe = _remote_exe(remote, engine)
     ranks = cpus if cpus is not None else 1
     env_setup = (remote.get("env_setup") or "").strip()
     machine = remote.get("name") or remote.get("host")
@@ -1059,15 +1073,24 @@ def submit_job_detached(
 
     with tempfile.TemporaryDirectory() as tmp:
         cfg = Path(tmp) / "config.yaml"
-        cfg_lines = [f"vasp_executable: {exe}", f"jobs_root: {results_base}", "neb_images: 5"]
-        # When the machine has its own POTCAR library (remote 'potcar_root'), point the
-        # remote engine at it so it builds the POTCAR there and no POTCAR needs shipping.
-        # Without it, a pre-built POTCAR rides along in the inputs bundle (see
-        # _run_detached_offload). ponytail: potcar_map (variant selection) isn't
-        # forwarded — add it here if a config ever sets one.
-        potcar_root = (remote.get("potcar_root") or "").strip()
-        if potcar_root:
-            cfg_lines.append(f"potcar_root: {potcar_root}")
+        cfg_lines = [f"jobs_root: {results_base}", "neb_images: 5"]
+        if engine == "qe":
+            cfg_lines.append(f"qe_executable: {exe}")
+            # The machine's own UPF library, if it has one; otherwise the caller
+            # ships the UPFs in the bundle and forwards a --pseudo-dir flag.
+            pseudo_dir = (remote.get("pseudo_dir") or "").strip()
+            if pseudo_dir:
+                cfg_lines.append(f"pseudo_dir: {pseudo_dir}")
+        else:
+            cfg_lines.append(f"vasp_executable: {exe}")
+            # When the machine has its own POTCAR library (remote 'potcar_root'), point the
+            # remote engine at it so it builds the POTCAR there and no POTCAR needs shipping.
+            # Without it, a pre-built POTCAR rides along in the inputs bundle (see
+            # _run_detached_offload). ponytail: potcar_map (variant selection) isn't
+            # forwarded — add it here if a config ever sets one.
+            potcar_root = (remote.get("potcar_root") or "").strip()
+            if potcar_root:
+                cfg_lines.append(f"potcar_root: {potcar_root}")
         cfg.write_text("\n".join(cfg_lines) + "\n", encoding="utf-8")
         _ship_file(cfg, target, f"{paths['root']}/config.yaml", remote, ssh_opts)
 
@@ -1260,7 +1283,8 @@ def _parse_poll_output(scheduler, job_id, returncode, stdout, stderr):
 # ------------------------------------------------- remote connection / status / fetch
 
 # Large binaries that are not worth pulling back across the network by default.
-HEAVY_OUTPUTS = ["WAVECAR", "CHG", "CHGCAR", "vaspout.h5", "AECCAR0", "AECCAR1", "AECCAR2"]
+# "tmp" is QE's outdir (wavefunctions/charge under <prefix>.save).
+HEAVY_OUTPUTS = ["WAVECAR", "CHG", "CHGCAR", "vaspout.h5", "AECCAR0", "AECCAR1", "AECCAR2", "tmp"]
 
 
 def remote_command(remote: dict, command: str, timeout: int = 60) -> subprocess.CompletedProcess:
@@ -1310,6 +1334,17 @@ def check_remote_connection(remote: dict) -> dict:
         ok = "yes" in res.stdout
         checks.append({"name": "vasp_executable", "ok": ok,
                        "detail": f"{exe} found" if ok else f"{exe} not found or not executable"})
+
+    if remote.get("qe_executable"):
+        qe = remote["qe_executable"]
+        res = remote_command(
+            remote,
+            f"{{ test -x {shlex.quote(qe)} || command -v {shlex.quote(qe)} >/dev/null 2>&1; }} "
+            "&& echo yes || echo no",
+        )
+        ok = "yes" in res.stdout
+        checks.append({"name": "qe_executable", "ok": ok,
+                       "detail": f"{qe} found" if ok else f"{qe} not found or not executable"})
 
     # ssh run mode launches mpirun directly; scheduler modes need their submit cmd.
     if remote_run_mode(remote) == "ssh":
@@ -1383,7 +1418,8 @@ def fetch_remote_results(
 
     # scp fallback: pull a known set of result files, ignoring any that are absent.
     wanted = ["OUTCAR", "CONTCAR", "OSZICAR", "vasprun.xml", "run.log", "job.log",
-              "DOSCAR", "EIGENVAL", "XDATCAR", "INCAR", "KPOINTS", "POSCAR", "LOCPOT"]
+              "DOSCAR", "EIGENVAL", "XDATCAR", "INCAR", "KPOINTS", "POSCAR", "LOCPOT",
+              "pw.in", "pw.out", ".engine"]
     if include_heavy:
         wanted += HEAVY_OUTPUTS
     scp_opts: list[str] = []
@@ -1416,13 +1452,15 @@ def list_remote_jobs(remote: dict, root: str) -> list[dict]:
     script = (
         f"r={rq}; "
         'isjob() { [ -e "$1/OUTCAR" ] || [ -e "$1/vasprun.xml" ] || '
-        '[ -e "$1/OSZICAR" ] || [ -e "$1/INCAR" ] || [ -e "$1/POSCAR" ]; }; '
+        '[ -e "$1/OSZICAR" ] || [ -e "$1/INCAR" ] || [ -e "$1/POSCAR" ] || '
+        '[ -e "$1/pw.in" ]; }; '
         'emit() { d=$1; n=0; '
-        'for f in OUTCAR vasprun.xml OSZICAR run.log CONTCAR INCAR POSCAR; do '
+        'for f in OUTCAR vasprun.xml OSZICAR run.log CONTCAR INCAR POSCAR pw.out; do '
         '[ -e "$d/$f" ] && { t=$(stat -c %Y "$d/$f" 2>/dev/null || echo 0); '
         '[ "$t" -gt "$n" ] && n=$t; }; done; '
         '[ "$n" = 0 ] && n=$(stat -c %Y "$d" 2>/dev/null || echo 0); '
-        'o=0; [ -e "$d/OUTCAR" ] && o=1; v=0; [ -e "$d/vasprun.xml" ] && v=1; '
+        'o=0; { [ -e "$d/OUTCAR" ] || [ -e "$d/pw.out" ]; } && o=1; '
+        'v=0; [ -e "$d/vasprun.xml" ] && v=1; '
         'z=0; [ -e "$d/OSZICAR" ] && z=1; '
         'printf "%s\\t%s%s%s\\t%s\\n" "$n" "$o" "$v" "$z" "$d"; }; '
         'for d in "$r"/*/; do d=${d%/}; [ -d "$d" ] || continue; '

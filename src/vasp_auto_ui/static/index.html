@@ -814,6 +814,9 @@ ssh user@host 'echo ok'      # must print ok with no password</pre>
         <span class="inline wide"><label>SSH key (optional)</label><input id="rm-key" placeholder="~/.ssh/id_ed25519"></span>
         <span class="inline wide"><label>remote work dir</label><input id="rm-root" placeholder="/scratch/myname/vasp_jobs" title="Base directory on the remote where job folders are created"></span>
         <span class="inline wide"><label>VASP path (on remote)</label><input id="rm-exe" placeholder="/opt/vasp/bin/vasp_std"></span>
+        <span class="inline wide"><label>POTCAR library (on remote, optional)</label><input id="rm-potcar" placeholder="/opt/vasp/potpaw_PBE.64" title="If the machine has its own POTCAR library (<root>/<Element>/POTCAR), offload runs build the POTCAR there and none is shipped from this computer."></span>
+        <span class="inline wide"><label>QE pw.x path (on remote, optional)</label><input id="rm-qe-exe" placeholder="pw.x" title="For --engine qe runs on this machine. Leave blank to use 'pw.x' from the remote PATH."></span>
+        <span class="inline wide"><label>QE pseudo dir (on remote, optional)</label><input id="rm-pseudo" placeholder="/home/myname/pseudo" title="The machine's own UPF pseudopotential library for QE runs. Leave blank to ship the locally-resolved UPF files with each offload."></span>
         <span class="inline"><label>run mode</label>
           <select id="rm-runmode" title="How jobs run on this machine. 'ssh (direct)' runs VASP over SSH and waits (laptop stays on). 'offload (detached)' runs the whole job — incl. convergence — on the remote so you can close the laptop; needs a one-time engine setup. 'slurm'/'pbs' submit to that queue.">
             <option value="ssh">ssh (direct, laptop stays on)</option>
@@ -2472,7 +2475,7 @@ function renderRemotes() {
       <b>🖥 ${r.name}</b> <span class="badge ${ro ? "dim" : "ok"}">${ro ? "config.yaml" : "editable"}</span>
       <div style="font-size:12px;color:var(--dim);margin:4px 0">
         ${where} · ${runModeLabel(runModeOf(r))}${cores}<br>
-        work dir: ${r.remote_root || "—"}<br>VASP: ${r.vasp_executable || "—"}</div>
+        work dir: ${r.remote_root || "—"}<br>VASP: ${r.vasp_executable || "—"}${r.qe_executable ? `<br>QE: ${r.qe_executable}` : ""}</div>
       <button class="ghost" style="padding:2px 8px" onclick="testRemoteByName('${r.name}')">🔌 Test</button>
       ${runModeOf(r) === "ssh_detached" ? `<button class="ghost" style="padding:2px 8px" title="One-time: install the vasp_auto engine in a venv on this machine so offload jobs can run with the laptop off" onclick="setupRemote('${r.name}')">⚙ Set up offload engine</button>` : ""}
       ${ro ? "" : `<button class="ghost" style="padding:2px 8px" onclick="editRemote('${r.name}')">✎ Edit</button>
@@ -2500,6 +2503,9 @@ function remoteForm() {
     user: $("rm-user").value.trim(), port: $("rm-port").value.trim(),
     ssh_key: $("rm-key").value.trim(), remote_root: $("rm-root").value.trim(),
     vasp_executable: $("rm-exe").value.trim(),
+    potcar_root: $("rm-potcar").value.trim(),
+    qe_executable: $("rm-qe-exe").value.trim(),
+    pseudo_dir: $("rm-pseudo").value.trim(),
     run_mode: runmode,
     scheduler: (runmode === "slurm" || runmode === "pbs") ? runmode : "slurm",
     env_setup: $("rm-env").value.trim(),
@@ -2507,7 +2513,7 @@ function remoteForm() {
   };
 }
 function resetRemoteForm() {
-  for (const id of ["rm-name", "rm-host", "rm-user", "rm-port", "rm-key", "rm-root", "rm-exe", "rm-env", "rm-cpus"]) $(id).value = "";
+  for (const id of ["rm-name", "rm-host", "rm-user", "rm-port", "rm-key", "rm-root", "rm-exe", "rm-potcar", "rm-qe-exe", "rm-pseudo", "rm-env", "rm-cpus"]) $(id).value = "";
   $("rm-runmode").value = "ssh";
   $("rm-formtitle").textContent = "Add a machine";
   $("rm-testout").innerHTML = "";
@@ -2518,6 +2524,9 @@ function editRemote(name) {
   $("rm-user").value = r.user || ""; $("rm-port").value = r.port || "";
   $("rm-key").value = r.ssh_key || ""; $("rm-root").value = r.remote_root || "";
   $("rm-exe").value = r.vasp_executable || ""; $("rm-runmode").value = runModeOf(r);
+  $("rm-potcar").value = r.potcar_root || "";
+  $("rm-qe-exe").value = r.qe_executable || "";
+  $("rm-pseudo").value = r.pseudo_dir || "";
   $("rm-env").value = r.env_setup || "";
   $("rm-cpus").value = r.cpus || "";
   $("rm-formtitle").textContent = "Edit " + r.name;

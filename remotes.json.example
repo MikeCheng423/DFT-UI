@@ -20,6 +20,9 @@
     "vasp_executable": "/usr/local/bin/vasp_std",
     "scheduler": "slurm",
     "run_mode": "ssh",
-    "env_setup": "source /opt/intel/oneapi/setvars.sh"
+    "env_setup": "source /opt/intel/oneapi/setvars.sh",
+    "qe_executable": "/usr/bin/pw.x",
+    "pseudo_dir": "/home/myuser/pseudo",
+    "_qe": "Optional, for --engine qe runs on this machine. qe_executable defaults to 'pw.x' on PATH. pseudo_dir is the machine's own UPF library; omit it to ship the locally-resolved UPFs with each offload instead."
   }
 }

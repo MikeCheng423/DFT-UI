@@ -241,7 +241,7 @@ def test_run_one_case_ssh_remote_runs_remotely_and_tags_machine(finished_job, mo
               "vasp_executable": "/opt/vasp/bin/vasp_std", "run_mode": "ssh"}
     seen = {}
 
-    def fake_remote(job_dir, rem, cpus=None, on_progress=None):
+    def fake_remote(job_dir, rem, cpus=None, on_progress=None, engine="vasp"):
         seen["remote"] = rem
         seen["cpus"] = cpus
         (finished_job / ".remote.json").write_text(

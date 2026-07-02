@@ -563,6 +563,8 @@ def _build_qe_row(project_name, mode, case_info, status_override=None):
     for key in ("max_force_eV_A", "pressure_kB"):
         if summary.get(key) is not None:
             row[key] = summary[key]
+    if status_override is None:
+        _apply_remote_marker(row, job_dir)
     return row
 
 
@@ -691,25 +693,27 @@ def run_one_case(
 
     # Remote execution: ship every input file to another machine and run it there.
     if remote:
-        if engine in ("qe", "ase"):
+        if engine == "ase":
             raise ValueError(
-                f"Remote execution currently supports VASP only, not --engine {engine}."
+                "Remote execution supports VASP and QE, not --engine ase."
             )
 
         # Direct SSH: run mpirun on the remote synchronously and pull results back
         # (for single-workstation machines with no working scheduler).
         if resolve_remote_run_mode(remote) == "ssh":
             return_code = run_vasp_remote(
-                str(job_dir), remote, cpus=cpus, on_progress=on_progress
+                str(job_dir), remote, cpus=cpus, on_progress=on_progress, engine=engine
             )
-            error_summary = report_vasp_errors(job_dir)
             row = build_row(project_name, mode, case_info)
             row["return_code"] = return_code
-            if error_summary:
-                row["errors"] = error_summary
-            from vasp_auto.job_log import write_job_log
-            write_job_log(job_dir, case_info.get("case_name"),
-                          case_info.get("calculation_type"), return_code)
+            if engine == "vasp":
+                # VASP error signatures / job.log don't apply to pw.x output.
+                error_summary = report_vasp_errors(job_dir)
+                if error_summary:
+                    row["errors"] = error_summary
+                from vasp_auto.job_log import write_job_log
+                write_job_log(job_dir, case_info.get("case_name"),
+                              case_info.get("calculation_type"), return_code)
             machine = remote.get("name") or remote.get("host")
             print(f"Finished  : {case_info['case_name']} on {machine} "
                   f"({remote['remote_root'].rstrip('/')}/{job_dir.name})")
@@ -722,6 +726,7 @@ def run_one_case(
             remote,
             cpus=cpus,
             job_template=job_template,
+            engine=engine,
         )
         row = build_row(project_name, mode, case_info, status_override="submitted")
         row["job_id"] = submission["job_id"]
