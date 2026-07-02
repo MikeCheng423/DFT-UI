@@ -891,6 +891,7 @@ ssh user@host 'echo ok'      # must print ok with no password</pre>
         <span class="inline wide"><label>POTCAR library (on remote, optional)</label><input id="rm-potcar" placeholder="/opt/vasp/potpaw_PBE.64" title="If the machine has its own POTCAR library (<root>/<Element>/POTCAR), offload runs build the POTCAR there and none is shipped from this computer."></span>
         <span class="inline wide"><label>QE pw.x path (on remote, optional)</label><input id="rm-qe-exe" placeholder="pw.x" title="For --engine qe runs on this machine. Leave blank to use 'pw.x' from the remote PATH."></span>
         <span class="inline wide"><label>QE pseudo dir (on remote, optional)</label><input id="rm-pseudo" placeholder="/home/myname/pseudo" title="The machine's own UPF pseudopotential library for QE runs. Leave blank to ship the locally-resolved UPF files with each offload."></span>
+        <span class="inline wide"><label>QE env setup (optional)</label><input id="rm-qe-env" placeholder="module load quantum-espresso" title="Shell command sourced before QE runs. The VASP 'env setup' is never used for QE — an Intel MPI environment silently breaks an OpenMPI-built pw.x. Leave blank if the remote's default PATH mpirun matches the pw.x build."></span>
         <span class="inline"><label>run mode</label>
           <select id="rm-runmode" title="How jobs run on this machine. 'ssh (direct)' runs VASP over SSH and waits (laptop stays on). 'offload (detached)' runs the whole job — incl. convergence — on the remote so you can close the laptop; needs a one-time engine setup. 'slurm'/'pbs' submit to that queue.">
             <option value="ssh">ssh (direct, laptop stays on)</option>
@@ -2752,6 +2753,7 @@ function remoteForm() {
     potcar_root: $("rm-potcar").value.trim(),
     qe_executable: $("rm-qe-exe").value.trim(),
     pseudo_dir: $("rm-pseudo").value.trim(),
+    qe_env_setup: $("rm-qe-env").value.trim(),
     run_mode: runmode,
     scheduler: (runmode === "slurm" || runmode === "pbs") ? runmode : "slurm",
     env_setup: $("rm-env").value.trim(),
@@ -2759,7 +2761,7 @@ function remoteForm() {
   };
 }
 function resetRemoteForm() {
-  for (const id of ["rm-name", "rm-host", "rm-user", "rm-port", "rm-key", "rm-root", "rm-exe", "rm-potcar", "rm-qe-exe", "rm-pseudo", "rm-env", "rm-cpus"]) $(id).value = "";
+  for (const id of ["rm-name", "rm-host", "rm-user", "rm-port", "rm-key", "rm-root", "rm-exe", "rm-potcar", "rm-qe-exe", "rm-pseudo", "rm-qe-env", "rm-env", "rm-cpus"]) $(id).value = "";
   $("rm-runmode").value = "ssh";
   $("rm-formtitle").textContent = "Add a machine";
   $("rm-testout").innerHTML = "";
@@ -2773,6 +2775,7 @@ function editRemote(name) {
   $("rm-potcar").value = r.potcar_root || "";
   $("rm-qe-exe").value = r.qe_executable || "";
   $("rm-pseudo").value = r.pseudo_dir || "";
+  $("rm-qe-env").value = r.qe_env_setup || "";
   $("rm-env").value = r.env_setup || "";
   $("rm-cpus").value = r.cpus || "";
   $("rm-formtitle").textContent = "Edit " + r.name;

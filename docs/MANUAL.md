@@ -202,6 +202,11 @@ QE runs on remote machines through the same three modes as VASP — direct SSH
 library; without one, offload ships the locally-resolved UPF files alongside
 the POSCAR, so the remote needs no pseudopotential setup at all.
 
+The machine's `env_setup` (its VASP toolchain, e.g. Intel oneAPI) is **not**
+sourced for QE runs — an Intel `mpirun` first on PATH silently runs an
+OpenMPI-built `pw.x` as N duplicate serial jobs. If the machine's QE build does
+need environment (modules, a custom MPI), set `qe_env_setup` on the machine.
+
 Pseudopotentials are **UPF** files (the QE analogue of POTCAR). Point
 `pseudo_dir` at a directory of `.UPF` files; for each element the finder picks
 the first file named `<El>.*.UPF`, or use `pseudo_map` to choose an exact file:

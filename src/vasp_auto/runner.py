@@ -510,6 +510,18 @@ def _remote_exe(remote: dict, engine: str = "vasp") -> str:
     return _remote_vasp_exe(remote)
 
 
+def _remote_env_setup(remote: dict, engine: str = "vasp") -> str:
+    """The shell snippet sourced before a remote run, per engine.
+
+    ``env_setup`` is the machine's VASP toolchain (MKL/Intel MPI paths) and is
+    never sourced for QE — an Intel ``mpirun`` first on PATH silently runs an
+    OpenMPI-linked pw.x as N duplicate serial jobs. A machine whose QE build
+    does need environment gets its own ``qe_env_setup``.
+    """
+    key = "qe_env_setup" if engine == "qe" else "env_setup"
+    return (remote.get(key) or "").strip()
+
+
 def remote_results_base(remote: dict) -> str:
     """Canonical results directory on a remote machine: ``<remote_root>/results``.
 
@@ -564,7 +576,7 @@ def run_vasp_remote(
     remote_dir = remote_results_base(remote) + "/" + subpath
     exe = _remote_exe(remote, engine)
     ranks = cpus if cpus is not None else 1
-    env_setup = (remote.get("env_setup") or "").strip()
+    env_setup = _remote_env_setup(remote, engine)
     machine = remote.get("name") or remote.get("host")
 
     quoted_dir = shlex.quote(remote_dir)
@@ -1044,7 +1056,7 @@ def submit_job_detached(
     ssh_opts = _ssh_options(remote)
     exe = _remote_exe(remote, engine)
     ranks = cpus if cpus is not None else 1
-    env_setup = (remote.get("env_setup") or "").strip()
+    env_setup = _remote_env_setup(remote, engine)
     machine = remote.get("name") or remote.get("host")
 
     # A dedicated results/ dir (absolute jobs_root) so output never lands in a

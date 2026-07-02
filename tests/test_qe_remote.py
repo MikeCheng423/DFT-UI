@@ -60,6 +60,37 @@ def test_run_vasp_remote_qe_command(tmp_path):
     assert (job / ".remote.json").exists()
 
 
+def test_qe_remote_run_skips_vasp_env_setup(tmp_path):
+    """QE never sources the machine's VASP env_setup (an Intel MPI environment
+    silently runs an OpenMPI pw.x as N duplicate serial jobs); it sources its
+    own qe_env_setup when the machine sets one."""
+    job = tmp_path / "0001_Si"
+    job.mkdir()
+    remote = {"host": "wkstn", "remote_root": "/work",
+              "env_setup": "source /opt/intel/oneapi/setvars.sh"}
+    scripts = []
+
+    def fake_run(cmd, **kwargs):
+        scripts.append(" ".join(cmd))
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    with patch("shutil.which", return_value="/usr/bin/rsync"), \
+         patch("subprocess.run", side_effect=fake_run):
+        run_vasp_remote(str(job), remote, cpus=2, engine="qe")
+        assert "setvars.sh" not in "\n".join(scripts)
+
+        scripts.clear()
+        run_vasp_remote(str(job), {**remote, "qe_env_setup": "module load qe"},
+                        cpus=2, engine="qe")
+        joined = "\n".join(scripts)
+        assert "module load qe" in joined and "setvars.sh" not in joined
+
+        scripts.clear()
+        run_vasp_remote(str(job), {**remote, "vasp_executable": "/opt/vasp/vasp_std"},
+                        cpus=2)
+        assert "setvars.sh" in "\n".join(scripts)
+
+
 def test_submit_job_remote_qe_script(tmp_path):
     """Scheduler submission writes the QE submit template; vasp_executable not needed."""
     job = tmp_path / "0001_Si"

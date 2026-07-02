@@ -23,6 +23,6 @@
     "env_setup": "source /opt/intel/oneapi/setvars.sh",
     "qe_executable": "/usr/bin/pw.x",
     "pseudo_dir": "/home/myuser/pseudo",
-    "_qe": "Optional, for --engine qe runs on this machine. qe_executable defaults to 'pw.x' on PATH. pseudo_dir is the machine's own UPF library; omit it to ship the locally-resolved UPFs with each offload instead."
+    "_qe": "Optional, for --engine qe runs on this machine. qe_executable defaults to 'pw.x' on PATH. pseudo_dir is the machine's own UPF library; omit it to ship the locally-resolved UPFs with each offload instead. QE runs never source env_setup (a VASP/Intel environment breaks an OpenMPI pw.x); set qe_env_setup if the QE build needs its own."
   }
 }

@@ -103,7 +103,7 @@ REMOTES_FILE = REPO_ROOT / "remotes.json"
 # pre-fills from; the run still passes it through the usual -n argument.
 REMOTE_FIELDS = ("host", "user", "port", "ssh_key", "remote_root",
                  "vasp_executable", "scheduler", "run_mode", "env_setup", "cpus",
-                 "potcar_root", "qe_executable", "pseudo_dir")
+                 "potcar_root", "qe_executable", "pseudo_dir", "qe_env_setup")
 
 EDITABLE_FILES = {"INCAR", "KPOINTS", "POSCAR", "workflow.yaml", "config.yaml"}
 
