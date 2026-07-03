@@ -361,7 +361,7 @@
       <div class="card buildfn" id="fn-adsorb" style="display:none">
         <h3>🧲 Adsorption quick build</h3>
         <p class="sub">From a slab to an adsorption structure: adsorbate above a surface atom, bottom layers frozen. Loads into the editor — review, save, then run <b>relax</b>.</p>
-        <span class="inline"><label>adsorbate</label><input id="a-el" placeholder="O" style="width:50px"></span>
+        <span class="inline"><label>adsorbate</label><input id="a-el" placeholder="O" style="width:70px" title="An atom (O, H) or a molecule ASE knows (CO2, H2O, NH3, CH4 …)"></span>
         <span class="inline"><label>above atom #</label><input id="a-anchor" placeholder="12" style="width:55px" title="Click an atom in the viewer to find its number"></span>
         <span class="inline"><label>height (Å)</label><input id="a-height" placeholder="2.0" style="width:55px"></span>
         <span class="inline"><label>freeze below (frac z)</label><input id="a-freeze" placeholder="0.3" style="width:55px" title="Atoms below this fractional height are fixed (F F F)"></span>
@@ -748,7 +748,7 @@
       d-band centre (<code>dos</code> with LORBIT), work function (<code>workfunction</code>),
       optical absorption (<code>optics</code>), or Bader atomic charges (<code>charge</code>).
       Same maths as the CLI's <code>--thermo</code>/<code>--d-band</code>/<code>--work-function</code>/<code>--optics-parse</code>/<code>--bader</code>.</p>
-    <span class="inline wide"><label>job folder</label><input id="ana-dir" list="jobdirs"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('ana-dir')">📁</button></span>
+    <span class="inline wide"><label>job folder</label><input id="ana-dir" list="jobdirs" oninput="ANA_MACHINE=null"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('ana-dir')">📁</button></span>
     <br>
     <button class="ghost" onclick="anaThermo()" title="ZPE + thermal corrections from vibrational modes (calc type: freq)">🌡 ZPE / Gibbs</button>
     <span class="inline"><label>T (K)</label><input id="ana-T" value="298.15" style="width:60px"></span>
@@ -2190,28 +2190,35 @@ function showBuildFn(key) {
   if (card) { card.style.display = "block"; card.scrollIntoView({ block: "nearest" }); }
   renderBuildCatalog();
 }
-function adsorptionBuild() {
+async function adsorptionBuild() {
   if (!ED) { banner("Load a slab into the editor first (build or import one)."); return; }
   if (!$("a-el").value.trim() || !$("a-anchor").value.trim()) {
-    banner("Give the adsorbate element and the surface atom number (click atoms to find it)."); return;
+    banner("Give the adsorbate and the surface atom number (click atoms to find it)."); return;
   }
   const anchor = parseInt($("a-anchor").value) - 1;
   if (!(anchor >= 0 && anchor < ED.symbols.length)) {
     banner(`Atom number out of range 1..${ED.symbols.length}.`); return;
   }
+  // ASE builds the geometry: a single atom (O) or a whole molecule (CO2, H2O …).
+  const mol = await api("/api/molecule", { name: $("a-el").value.trim() });
+  if (!mol) return;
   pushUndo();
   const h = parseFloat($("a-height").value) || 2.0;
-  const cart = matvec(ED.lattice, ED.frac[anchor]);
-  cart[2] += h;
-  ED.symbols.push($("a-el").value.trim());
-  ED.frac.push(matvec(inv3(ED.lattice), cart));
-  ED.flags.push(["T", "T", "T"]);
+  const base = matvec(ED.lattice, ED.frac[anchor]);
+  base[2] += h;
+  const inv = inv3(ED.lattice), start = ED.symbols.length;
+  mol.symbols.forEach((sym, i) => {
+    const o = mol.offsets[i];
+    ED.symbols.push(sym);
+    ED.frac.push(matvec(inv, [base[0] + o[0], base[1] + o[1], base[2] + o[2]]));
+    ED.flags.push(["T", "T", "T"]);
+  });
   if ($("a-freeze").value) {
     const zmax = parseFloat($("a-freeze").value);
     ED.frac.forEach((f, i) => { if (f[2] < zmax) ED.flags[i] = ["F", "F", "F"]; });
     ED.selective = ED.flags.some(fl => fl.includes("F"));
   }
-  SEL = new Set([ED.symbols.length - 1]);
+  SEL = new Set(mol.symbols.map((_, i) => start + i));
   afterChange();
   banner("Adsorbate placed — save the structure, then run a 'relax' on it.", "info");
 }
@@ -2880,16 +2887,12 @@ function jobQS(r) {
        + (r.remote ? "&machine=" + encodeURIComponent(r.machine) : "");
 }
 function resActions(r, i) {
-  if (r.remote)
-    return `<button class="ghost actbtn" onclick="openJob(${i})" title="Browse and download this job's files">📁 files</button>` +
-      `<button class="ghost actbtn" title="Short Markdown report of setup + results" onclick="showReport(${i})">📄</button>` +
-      `<button class="ghost actbtn" title="Density of states" onclick="showDos(${i})">📈</button>` +
-      `<button class="ghost actbtn" title="Projected DOS per element and orbital (needs LORBIT)" onclick="showPdos(${i})">🧬</button>` +
-      `<button class="ghost actbtn" title="Band structure along the k-path" onclick="showBands(${i})">🎼</button>` +
-      `<button class="ghost actbtn" title="Charge density / potential: planar average + slice (fetches the file once)" onclick="showVolume(${i})">⚡</button>` +
-      `<button class="ghost actbtn" title="Animate the relaxation / NEB path" onclick="animateJob(${i})">🎞</button>`;
-  let h = "";
-  if (r.machine)
+  /* Remote rows get the same buttons as local ones — the server syncs the
+     job's output into a local cache, so every viewer works either way. */
+  let h = r.remote
+    ? `<button class="ghost actbtn" onclick="openJob(${i})" title="Browse and download this job's files">📁 files</button>`
+    : "";
+  if (!r.remote && r.machine)
     h += `<button class="ghost actbtn" title="Check this job's status on ${esc(r.machine)}" onclick="remoteStatus(${i})">🛰</button>` +
          `<button class="ghost actbtn" title="Fetch result files back from ${esc(r.machine)} so the viewers work" onclick="remoteFetch(${i})">⬇</button>`;
   h += `<button class="ghost actbtn" title="Short Markdown report of setup + results" onclick="showReport(${i})">📄</button>`;
@@ -2938,9 +2941,9 @@ function renderResults() {
       ? `<a href="#" onclick="openJob(${i});return false" title="${esc(r.path)}">📂 ${esc(r.case)}</a>` +
         (r.rel && r.rel !== r.case ? ` <small style="color:var(--dim)">${esc(r.rel)}</small>` : "")
       : `<a href="#" onclick="openJob(${i});return false" title="Open this job's files">${esc(r.case)}</a>`;
-    const typeCell = r.remote ? "<span style='color:var(--dim)'>—</span>" : resTypeCell(r);
-    const convCell = r.remote ? "<span style='color:var(--dim)'>—</span>" : resConvergedCell(r);
-    const energyCell = (!r.remote && r.energy_eV != null) ? fmtNum(r.energy_eV) : "";
+    const typeCell = resTypeCell(r);
+    const convCell = resConvergedCell(r);
+    const energyCell = r.energy_eV != null ? fmtNum(r.energy_eV) : "";
     const errCell = r.errors
       ? `<span class="badge warn" title="${esc(String(r.errors))}">⚠ ${esc(String(r.errors).split(":")[0])}</span>` : "";
     return `<tr><td>${nameCell}</td><td>${resMachineCell(r)}</td><td>${esc(r.modified)}</td>` +
@@ -3501,9 +3504,11 @@ async function computeChgDiff() {
 
 /* ---------- catalysis analysis card ---------- */
 let ANA = null;  // last result, for CSV export
+let ANA_MACHINE = null;  // remote machine of the row 🧪 was opened from; typing/picking a folder clears it
 function showAnalysis(i) {
   const r = RESULTS[i];
-  $("ana-dir").value = r.job_dir;
+  $("ana-dir").value = r.remote ? r.path : r.job_dir;
+  ANA_MACHINE = r.remote ? r.machine : null;
   $("anacase").textContent = r.case;
   $("anacard").style.display = "block";
   $("anacard").scrollIntoView({ behavior: "smooth" });
@@ -3513,6 +3518,10 @@ function anaDir() {
   if (!dir) { banner("Pick a job folder first (📁 or the 🧪 button in the table)."); throw new Error("no dir"); }
   $("anacase").textContent = dir.split("/").pop();
   return dir;
+}
+/* query-string form of anaDir, carrying the remote machine when set */
+function anaQS(dir) {
+  return encodeURIComponent(dir) + (ANA_MACHINE ? "&machine=" + encodeURIComponent(ANA_MACHINE) : "");
 }
 function anaShow(kind, name, data, lines) {
   ANA = { kind, name, data };
@@ -3553,7 +3562,7 @@ function drawAnaChart(xs, ys, xlabel, ylabel, marks) {
 }
 async function anaThermo() {
   const dir = anaDir();
-  const d = await api("/api/thermo?path=" + encodeURIComponent(dir) +
+  const d = await api("/api/thermo?path=" + anaQS(dir) +
                       "&T=" + encodeURIComponent($("ana-T").value || "298.15"));
   const lines = [
     `T            : ${d.temperature_K} K`,
@@ -3573,7 +3582,7 @@ async function anaDband() {
   const atoms = $("ana-atoms").value.trim();
   if (!atoms) { banner("Which atoms? e.g. 1-4, or z>0.5 for the surface layer."); return; }
   const emax = $("ana-emax").value.trim();
-  const d = await api("/api/dband?path=" + encodeURIComponent(dir) +
+  const d = await api("/api/dband?path=" + anaQS(dir) +
                       "&atoms=" + encodeURIComponent(atoms) +
                       (emax ? "&emax=" + encodeURIComponent(emax) : ""));
   anaShow("dband", dir.split("/").pop(), d, [
@@ -3586,7 +3595,7 @@ async function anaDband() {
 async function anaWorkfunction() {
   const dir = anaDir();
   const axis = $("ana-axis").value;
-  const d = await api("/api/workfunction?path=" + encodeURIComponent(dir) + "&axis=" + axis);
+  const d = await api("/api/workfunction?path=" + anaQS(dir) + "&axis=" + axis);
   anaShow("workfunction", dir.split("/").pop(), d, [
     `work function: ${d.work_function_eV.toFixed(4)} eV`,
     `vacuum level : ${d.vacuum_level_eV.toFixed(4)} eV`,
@@ -3598,7 +3607,7 @@ async function anaWorkfunction() {
 }
 async function anaOptics() {
   const dir = anaDir();
-  const d = await api("/api/optics?path=" + encodeURIComponent(dir));
+  const d = await api("/api/optics?path=" + anaQS(dir));
   const peak = Math.max(...d.alpha_cm1);
   anaShow("optics", dir.split("/").pop(), d, [
     `points       : ${d.energies_eV.length} energies up to ${Math.max(...d.energies_eV).toFixed(1)} eV`,
@@ -3609,7 +3618,7 @@ async function anaOptics() {
 async function anaBader() {
   const dir = anaDir();
   banner("Running the bader binary — can take a while on fine grids…", "info");
-  const d = await api("/api/bader", { path: dir });
+  const d = await api("/api/bader", { path: dir, machine: ANA_MACHINE });
   const lines = [
     d.used_aeccar_reference ? "reference    : AECCAR0+AECCAR2 (all-electron)" :
                               "reference    : CHGCAR only (no AECCARs found)",
@@ -3730,6 +3739,7 @@ function pickerChoose() {
   closePicker();
   if (PICKER.onchoose) { PICKER.onchoose(chosen); return; }
   $(PICKER.target).value = chosen;
+  $(PICKER.target).dispatchEvent(new Event("input"));  // run the field's oninput
   if (PICKER.onpick) PICKER.onpick();
 }
 

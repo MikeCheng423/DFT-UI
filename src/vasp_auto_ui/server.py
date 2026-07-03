@@ -512,6 +512,15 @@ def api_combine(_query, body):
     return {"structure": _struct_payload(combined)}
 
 
+def api_molecule(_query, body):
+    """Adsorbate geometry for the Build-tab quick build: an ASE molecule
+    (CO2, H2O, NH3, …) or a single atom, with the lowest atom at z=0. The editor
+    places these atoms above the chosen surface atom."""
+    from vasp_auto.ase_tools import molecule_positions
+    symbols, offsets = molecule_positions(str(body["name"]).strip())
+    return {"symbols": symbols, "offsets": offsets}
+
+
 def _output_dir(body, default: Path) -> Path:
     output = body.get("output")
     if output:
@@ -1025,13 +1034,17 @@ def api_incar_apply(_query, body):
 REMOTE_RESULT_CACHE = UI_LOG_DIR / "remote_results"
 
 
-def _analysis_dir(path: str, machine: str | None = None) -> Path:
+def _analysis_dir(path: str, machine: str | None = None,
+                  heavy: tuple[str, ...] = ()) -> Path:
     """Resolve an analysis request's job dir to a local directory.
 
     Local machine: the path itself. Remote machine: rsync the job's output
-    (minus HEAVY_OUTPUTS — the volume endpoint pulls those on demand) into
-    the cache copy and analyze that. Every call re-syncs, so a still-running
-    job shows fresh data; rsync makes the refresh incremental.
+    (minus HEAVY_OUTPUTS) into the cache copy and analyze that. Every call
+    re-syncs, so a still-running job shows fresh data; rsync makes the
+    refresh incremental. ``heavy`` names files excluded from that sync
+    (CHGCAR, LOCPOT, AECCAR…) which this request needs — each is pulled once
+    and reused; one missing on the remote is skipped so the caller raises
+    its own clear error.
     """
     if not _is_remote_machine(machine):
         return Path(path).expanduser().resolve()
@@ -1039,12 +1052,18 @@ def _analysis_dir(path: str, machine: str | None = None) -> Path:
     key = hashlib.sha1(f"{machine}:{path}".encode()).hexdigest()[:10]
     cache = REMOTE_RESULT_CACHE / machine / f"{Path(path.rstrip('/')).name}-{key}"
     fetch_remote_results(remote, path, str(cache))
+    for name in heavy:
+        if not (cache / name).exists():
+            try:
+                fetch_remote_file(remote, f"{path.rstrip('/')}/{name}", cache / name)
+            except Exception:
+                pass
     return cache
 
 
-def _analysis_query_dir(query) -> Path:
+def _analysis_query_dir(query, heavy: tuple[str, ...] = ()) -> Path:
     """_analysis_dir for GET endpoints taking ?path=…[&machine=…]."""
-    return _analysis_dir(query["path"][0], query.get("machine", ["local"])[0])
+    return _analysis_dir(query["path"][0], query.get("machine", ["local"])[0], heavy)
 
 
 def api_trajectory(query, _body):
@@ -1174,23 +1193,14 @@ def _volume_payload(volume: dict, file_name: str, axis: int, fraction: float) ->
 
 def api_volume(query, _body):
     """Planar average + one slice of a volumetric file (CHGCAR/LOCPOT/...)."""
-    job_dir = _analysis_query_dir(query)
     file_name = (query.get("file") or ["CHGCAR"])[0]
     if file_name not in VOLUME_FILES:
         raise ValueError(f"Not a known volumetric file: {file_name}")
+    job_dir = _analysis_query_dir(query, heavy=(file_name,))
     axis = "abc".index((query.get("axis") or ["c"])[0].lower())
     fraction = float((query.get("frac") or ["0.5"])[0])
 
     path = job_dir / file_name
-    machine = query.get("machine", ["local"])[0]
-    if not path.exists() and _is_remote_machine(machine):
-        # Volumetric files are HEAVY_OUTPUTS, excluded from the cached sync —
-        # pull just the requested one, once; slider moves reuse the local copy.
-        try:
-            fetch_remote_file(_resolve_remote(machine),
-                              f"{query['path'][0].rstrip('/')}/{file_name}", path)
-        except Exception:
-            pass  # missing on the remote too — fall through to the clear error
     if not path.exists():
         available = [name for name in VOLUME_FILES if (job_dir / name).exists()]
         raise FileNotFoundError(
@@ -1241,7 +1251,7 @@ def api_thermo(query, _body):
     """ZPE / U_vib / T·S / ΔG correction from a finished freq job."""
     from vasp_auto.analysis import DEFAULT_TEMPERATURE_K, thermo_from_job
 
-    job_dir = Path(query["path"][0]).expanduser().resolve()
+    job_dir = _analysis_query_dir(query)
     temperature = float((query.get("T") or [DEFAULT_TEMPERATURE_K])[0])
     return thermo_from_job(job_dir, temperature=temperature)
 
@@ -1250,7 +1260,7 @@ def api_dband(query, _body):
     """d-band center/width of selected atoms from a finished dos job."""
     from vasp_auto.analysis import d_band_center
 
-    job_dir = Path(query["path"][0]).expanduser().resolve()
+    job_dir = _analysis_query_dir(query)
     selection = (query.get("atoms") or [""])[0].strip()
     if not selection:
         raise ValueError('Give an atom selection, e.g. "1-4" or "z>0.5"')
@@ -1269,7 +1279,7 @@ def api_workfunction(query, _body):
     """Work function W = V_vacuum − E_Fermi from a LOCPOT slab run."""
     from vasp_auto.analysis import work_function
 
-    job_dir = Path(query["path"][0]).expanduser().resolve()
+    job_dir = _analysis_query_dir(query, heavy=("LOCPOT",))
     axis = "abc".index((query.get("axis") or ["c"])[0].lower())
     return work_function(job_dir, axis=axis)
 
@@ -1278,7 +1288,7 @@ def api_optics(query, _body):
     """Absorption coefficient α(E) from a finished LOPTICS run."""
     from vasp_auto.analysis import absorption_spectrum
 
-    job_dir = Path(query["path"][0]).expanduser().resolve()
+    job_dir = _analysis_query_dir(query)
     return absorption_spectrum(job_dir / "vasprun.xml")
 
 
@@ -1289,7 +1299,8 @@ def api_bader(_query, body):
 
     from vasp_auto.chgcar import run_bader
 
-    job_dir = Path(body["path"]).expanduser().resolve()
+    job_dir = _analysis_dir(str(body["path"]), body.get("machine"),
+                            heavy=("CHGCAR", "AECCAR0", "AECCAR2"))
     config = _config()
     result = run_bader(job_dir, config.get("bader_executable", "bader"))
     csv_path = job_dir / "bader_charges.csv"
@@ -1548,11 +1559,23 @@ def api_db_mlrelax(_query, body):
 
 
 def api_report(_query, body):
-    job_dir = _analysis_dir(str(body["job_dir"]), body.get("machine"))
+    machine = body.get("machine")
+    job_dir = _analysis_dir(str(body["job_dir"]), machine)
     if not job_dir.is_dir():
         raise FileNotFoundError(f"Job directory not found: {job_dir}")
     case_name = body.get("case") or job_dir.name
     path = write_job_report(job_dir, case_name=case_name)
+    if _is_remote_machine(machine):
+        # For a remote job the report lands in the local cache copy — ship it
+        # back so report.md shows up in the job's own output folder too.
+        from vasp_auto.runner import _ship_file, _ssh_options, _ssh_target
+        remote = _resolve_remote(machine)
+        remote_path = f"{str(body['job_dir']).rstrip('/')}/report.md"
+        try:
+            _ship_file(path, _ssh_target(remote), remote_path, remote, _ssh_options(remote))
+            path = remote_path
+        except Exception:
+            pass  # viewing still works; only the remote copy is missing
     return {"path": str(path), "text": build_job_report(job_dir, case_name=case_name)}
 
 
@@ -2199,6 +2222,7 @@ POST_ROUTES = {
     "/api/build": api_build,
     "/api/structure": api_structure_save,
     "/api/combine": api_combine,
+    "/api/molecule": api_molecule,
     "/api/nl_build": api_nl_build,
     "/api/nl_agent": api_nl_agent,
     "/api/match": api_match,

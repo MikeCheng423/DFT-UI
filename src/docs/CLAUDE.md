@@ -26,6 +26,9 @@ src/vasp_auto/          Python package (the engine, the only source of truth)
   calc_types.py         CalcType enum + descriptions + per-type chain inputs
   config_loader.py      config.yaml search, normalisation, per-case merging
   incar.py              INCAR editing helpers: set_incar_value, spin/MAGMOM
+  incar_catalog.py      human-language INCAR option catalog (SCF/Calculation/
+                        Functional/DFT+U/DOS groups) driving the GUI guided form,
+                        /api/incar_options and the NL builder
   job_manager.py        input-file preparation, INCAR templates, dry-run preview
   kpoints.py            KPOINTS generation (gamma/MP mesh, density, line-mode)
   structure.py          pure-Python POSCAR tools (supercell, vacancy,
@@ -226,6 +229,16 @@ _archive/               historical outputs, not source
 > (scf TOTEN −1.997 eV), `/api/remote/status`→completed, fetch pulled the step
 > dirs back. Tests: 397 total (+6: filetext local/remote/POTCAR-block,
 > read_remote_text, offload workflow.yaml + template shipping); selfcheck 55/0.
+> A fourteenth pass (2026-07-03) fixed the **adsorbate builder for molecules**:
+> `--adsorbate "CO2@12+2.0"` and the Build-tab quick-build used to add one atom
+> *named* "CO2" instead of a molecule. `ase_tools.molecule_positions(name)` now
+> returns the ASE `molecule()` geometry (CO2/H2O/NH3/CH4…, lowest atom at z=0;
+> single-atom fallback for a bare element), and `structure.add_adsorbate` places
+> **every** atom of it (a bare element in `COVALENT_RADII` still takes the
+> no-ASE single-atom path) — fixing all callers at once (CLI, `/api/build`,
+> `nl_builder`, `nl_agent`). New server route `/api/molecule` feeds the JS
+> quick-build (`adsorptionBuild` fetches the geometry and pushes all atoms).
+> Test: `test_add_adsorbate_molecule_places_all_atoms`.
 
 ### 1 — Calculation types are severely limited — FIXED 2026-06-11
 
@@ -601,7 +614,7 @@ Entry points a GUI should call: `make_case_info`, `create_job_from_case`,
 6. **Update this CLAUDE.md every time you change the code** — the repository
    layout, the known-problem list, and the work loop below must always reflect
    the current state of the engine. This is mandatory, not optional.
-7. Push the code to the Github: https://github.com/MikeCheng423/DFT-UI   
+   
 
 ---
 
@@ -634,3 +647,6 @@ add any follow-up that surfaced. Keep this list current on every code change.
 ### Done
 - [x] 2026-06-11 — GUI layer (`vasp_auto_ui`) shipped; see Architecture notes.
 - [x] 2026-06-11 — Known problems #1–#14 fixed (see list above).
+
+
+Push the code once a week to the Github: https://github.com/MikeCheng423/DFT-UI

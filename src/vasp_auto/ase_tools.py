@@ -111,6 +111,27 @@ def build_slab_case(
     return poscar_path
 
 
+def molecule_positions(name: str) -> tuple[list[str], list[list[float]]]:
+    """Cartesian geometry (Å) of an adsorbate. ``name`` is an ASE molecule
+    (CO2, H2O, NH3, CH4 …) when known, otherwise a single atom of that element.
+    Positions are shifted so the lowest atom sits at z=0, so placing them above
+    a surface atom keeps the whole molecule above the slab."""
+    require_ase()
+    from ase.build import molecule
+
+    try:
+        atoms = molecule(name)
+    except (KeyError, NotImplementedError, ValueError):
+        from ase import Atoms
+        atoms = Atoms(name, positions=[[0.0, 0.0, 0.0]])
+    pos = atoms.get_positions()
+    zmin = min(p[2] for p in pos)
+    return (
+        list(atoms.get_chemical_symbols()),
+        [[float(p[0]), float(p[1]), float(p[2] - zmin)] for p in pos],
+    )
+
+
 def build_molecule_case(name: str, case_dir: str | Path, box: float = 12.0) -> Path:
     """Build an isolated molecule centred in a cubic box."""
     require_ase()

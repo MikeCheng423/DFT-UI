@@ -89,6 +89,16 @@ def test_add_adsorbate_above_anchor(slab):
     assert out["coords"][-1] == pytest.approx([0.5, 0.5, 0.35])
 
 
+def test_add_adsorbate_molecule_places_all_atoms(slab):
+    pytest.importorskip("ase")
+    out = add_adsorbate(slab, "CO2", 4, 2.0)
+    assert out["elements"] == ["Pt", "C", "O"]
+    assert out["counts"] == [4, 1, 2]  # a whole CO2, not one "CO2" atom
+    # lowest molecule atom sits at the anchor height: frac z = 7/20 = 0.35
+    added = out["coords"][-3:]
+    assert min(c[2] for c in added) == pytest.approx(0.35)
+
+
 def test_parse_adsorbate_spec_defaults_height():
     assert _parse_adsorbate_spec("O@12+2.5") == ("O", 12, 2.5)
     assert _parse_adsorbate_spec("H@3") == ("H", 3, 2.0)

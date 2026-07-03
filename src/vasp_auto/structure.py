@@ -860,16 +860,26 @@ def combine_structures(host: dict, guest: dict, mode: str = "stack",
 
 
 def add_adsorbate(struct: dict, element: str, anchor_index: int, height: float) -> dict:
-    """Place `element` directly above atom `anchor_index` at `height` Å
-    (along Cartesian z — the surface normal of a standard slab)."""
+    """Place an adsorbate directly above atom `anchor_index` at `height` Å
+    (along Cartesian z — the surface normal of a standard slab). `element` is a
+    single atom (e.g. "O") or a molecule name ASE knows (e.g. "CO2", "H2O"): a
+    molecule is built with ASE and its lowest atom sits at `height`."""
     _check_index(struct, anchor_index)
     scale = struct["scale"]
-    scaled_lattice = [[x * scale for x in row] for row in struct["lattice"]]
+    lattice = scaled_lattice(struct)
     anchor_frac = _frac_coords(struct)[anchor_index - 1]
-    cart = _matvec(scaled_lattice, anchor_frac)
-    cart[2] += float(height)
-    if struct["cartesian"]:
-        position = [x / scale for x in cart]
-    else:
-        position = _matvec(_invert3(scaled_lattice), cart)
-    return add_interstitial(struct, element, tuple(position))
+    base = _matvec(lattice, anchor_frac)
+    base[2] += float(height)
+
+    if element in COVALENT_RADII:            # single atom — no ASE needed
+        symbols, offsets = [element], [[0.0, 0.0, 0.0]]
+    else:                                    # molecule (CO2, H2O, …) via ASE
+        from vasp_auto.ase_tools import molecule_positions
+        symbols, offsets = molecule_positions(element)
+
+    inv = None if struct["cartesian"] else _invert3(lattice)
+    for sym, off in zip(symbols, offsets):
+        cart = [base[i] + off[i] for i in range(3)]
+        position = [x / scale for x in cart] if struct["cartesian"] else _matvec(inv, cart)
+        struct = add_interstitial(struct, sym, tuple(position))
+    return struct

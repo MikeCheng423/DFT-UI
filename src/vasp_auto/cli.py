@@ -405,8 +405,9 @@ def parse_args():
         "--adsorbate",
         default=None,
         metavar="El@N+h",
-        help="Place an adsorbate atom El directly above atom N at height h Å, "
-        'e.g. --adsorbate "O@12+2.0" (h defaults to 2.0).',
+        help="Place an adsorbate El (an atom, or a molecule ASE knows: CO2, H2O, "
+        'NH3 …) directly above atom N at height h Å, e.g. --adsorbate "CO2@12+2.0" '
+        "(h defaults to 2.0).",
     )
     parser.add_argument(
         "--move-atom",
