@@ -187,6 +187,8 @@
     <button data-tab="workflow" title="Chain steps: relax → scf → dos">3 · Workflow</button>
     <button data-tab="results" title="Energies, band gaps, convergence">4 · Results</button>
     <button data-tab="remote" title="Manage remote machines to run calculations on">5 · Remote</button>
+    <button data-tab="running" title="What is running right now on every machine">6 · Running</button>
+    <button data-tab="analysis" title="Derive physical properties from finished jobs (local or remote, VASP or QE)">7 · Analysis</button>
   </nav>
   <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
     <span id="exeinfo" style="color:var(--dim);font-size:12px"></span>
@@ -336,7 +338,7 @@
       <div class="card buildfn" id="fn-combine" style="display:none">
         <h3>🧬 Combine two structures</h3>
         <p class="sub">Merge structures with <i>different unit cells</i> — e.g. deposit an Au crystal on a graphite sheet. Host = the structure in the editor; the guest lands <b>gap</b> Å above it, with <b>vacuum</b> Å left on top. Result opens in the editor (save when happy).</p>
-        <span class="inline wide"><label>guest path</label><input id="cb-path" placeholder="/path/to/case or POSCAR"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('cb-path')" title="Browse for the guest case folder">📁</button></span>
+        <span class="inline wide"><label>guest path</label><input id="cb-path" placeholder="/path/to/case or POSCAR"><button class="iconbtn" style="padding:3px 7px" onclick="combineBrowse()" title="Browse for the guest case folder (on the working machine)">📁</button></span>
         <span class="inline"><label>mode</label>
           <select id="cb-mode" title="stack: place guest above the host surface, extend c. insert: drop the guest atoms into the unchanged host cell.">
             <option value="stack">stack on top</option><option value="insert">insert into cell</option>
@@ -387,7 +389,7 @@
         <div id="vtools">
           <button class="tool active" id="tool-rotate" onclick="setTool('rotate')" title="Drag rotates the view. Click an atom to select it (shift-click adds to the selection).">🔄 rotate</button>
           <button class="tool" id="tool-select" onclick="setTool('select')" title="Drag a rectangle to select several atoms (shift adds to the selection). Select 2 atoms to measure a distance, 3 for an angle.">▭ select</button>
-          <button class="tool" id="tool-move" onclick="setTool('move')" title="Drag a selected atom to move it in the screen plane. Arrow keys nudge (Shift = ×10), Delete removes.">✥ move atoms</button>
+          <button class="tool" id="tool-move" onclick="setTool('move')" title="Drag a selected atom to move it in the screen plane. Alt-drag rotates the selection about its centroid. Arrow keys nudge (Shift = ×10), Delete removes.">✥ move atoms</button>
           <span class="vsep"></span>
           <button class="tool tog active" id="tog-bonds" onclick="toggleOpt('bonds')" title="Draw bonds (covalent radii + 0.45 Å)">bonds</button>
           <button class="tool tog" id="tog-labels" onclick="toggleOpt('labels')" title="Show atom numbers (POSCAR order, 1-based)">labels</button>
@@ -455,6 +457,10 @@
         <br>
         <button class="ghost" onclick="applyAtomEdits()">Apply</button>
         <button class="danger" onclick="deleteSelected()" title="Delete the selected atom(s) — or press Delete in the viewer">🗑 delete</button>
+        <br>
+        <span class="inline"><label>rotate axis</label><select id="rt-ax"><option>x</option><option>y</option><option>z</option></select></span>
+        <span class="inline"><label>angle (°)</label><input id="rt-ang" placeholder="90" style="width:55px" onkeydown="if(event.key==='Enter'){event.preventDefault();rotateSelected();}"></span>
+        <button class="ghost" onclick="rotateSelected()" title="Rotate the selected atoms about their centroid (right-handed, degrees)">⟳ rotate</button>
         <div id="seltable"></div>
         <p class="hint">Selective-dynamics status per selected atom — a checked box <b>fixes</b> that
           direction (F), unchecked is free (T). Use “fix/free all” for the whole selection.</p>
@@ -664,12 +670,43 @@
       <label class="chkline"><input type="checkbox" id="r-auto" style="width:auto"> auto-refresh</label>
       <a id="r-excel" style="display:none;color:var(--accent)" href="#">⬇ Excel summary</a>
     </div>
+    <div id="resbulk" style="margin:8px 0"></div>
     <div id="restable"><div class="empty">No results yet — run a calculation first.</div></div>
     <div id="respager" class="pager"></div>
     <div id="restools" style="margin-top:12px;display:none">
       <span style="font-size:12px;color:var(--dim);margin-right:6px">cross-job tools:</span>
       <button class="ghost" onclick="toggleResTool('adscard')" title="Adsorption energy from a slab+adsorbate, a clean slab and a gas-molecule job">🧗 Adsorption energy</button>
       <button class="ghost" onclick="toggleResTool('chgdiffcard')" title="Charge-density difference Δρ between a combined job and its fragments">Δρ Charge-density difference</button>
+    </div>
+  </div>
+  <div class="card" id="reportcard" style="display:none">
+    <h3>Report — <span id="reportcase" style="text-transform:none"></span>
+      <a id="reportdl" style="color:var(--accent);margin-left:8px" href="#">⬇ download report.md</a>
+      <button class="ghost" onclick="$('reportcard').style.display='none'">close</button></h3>
+    <pre class="console" id="reportview" style="height:auto;max-height:420px"></pre>
+  </div>
+</div>
+
+<!-- ============================ ANALYSIS ============================ -->
+<div class="tab" id="tab-analysis">
+  <div class="card">
+    <h3>🧪 Analysis</h3>
+    <p class="sub"><b>Derive physical properties from finished jobs</b> — VASP or Quantum ESPRESSO,
+      local or on a remote machine. Every analysis runs on this computer; remote jobs are
+      fetched into a local cache automatically. Open a viewer from the 🧪/📈/🎼/⚡ buttons on a
+      <b>Results</b> row, or use the multi-job tools below. Each slot takes a job folder and its
+      machine, so you can mix machines in one analysis (slab on a remote, molecule local).</p>
+    <div style="margin-top:6px">
+      <span style="font-size:12px;color:var(--dim);margin-right:6px">multi-job tools:</span>
+      <button class="ghost" onclick="toggleResTool('adscard')" title="Adsorption energy from a slab+adsorbate, a clean slab and a gas-molecule job">🧗 Adsorption energy</button>
+      <button class="ghost" onclick="toggleResTool('surfcard')" title="Surface energy γ from a slab job and a bulk job">▦ Surface energy</button>
+      <button class="ghost" onclick="toggleResTool('chgdiffcard')" title="Charge-density difference Δρ between a combined job and its fragments">Δρ Charge-density difference</button>
+      <button class="ghost" onclick="toggleResTool('gdiagcard')" title="Free-energy diagram and overpotential (computational hydrogen electrode)">📊 Free-energy diagram</button>
+      <button class="ghost" onclick="toggleResTool('magcard')" title="Per-atom magnetic moments from OUTCAR">🧲 Magnetic moments</button>
+    </div>
+    <div style="margin-top:8px;font-size:12px;color:var(--dim)">
+      remote-results cache: <span id="ana-cachesize">—</span>
+      <button class="ghost" style="padding:2px 8px" onclick="clearAnaCache()" title="Delete the fetched remote job copies (volumetric pulls are hundreds of MB each)">clear cache</button>
     </div>
   </div>
   <div class="card" id="nebcard" style="display:none">
@@ -721,6 +758,7 @@
       <button class="ghost" onclick="$('volcard').style.display='none'">close</button></h3>
     <p class="sub">Left: planar average along the chosen axis (for LOCPOT this is the work-function profile). Right: a colour map of one plane through the cell — drag the slider to move it. Red/blue maps mean gain/loss for difference data.</p>
     <span class="inline"><label>file</label><select id="vol-file" onchange="reloadVolume()"></select></span>
+    <span class="inline"><label>component</label><select id="vol-component" onchange="reloadVolume()" title="Spin density ρ↑−ρ↓ reads the CHGCAR's second (magnetisation) block — needs ISPIN=2"><option value="total">total</option><option value="spin">spin ρ↑−ρ↓</option></select></span>
     <span class="inline"><label>axis</label><select id="vol-axis" onchange="reloadVolume()"><option>a</option><option>b</option><option selected>c</option></select></span>
     <span class="inline"><label>slice position (frac)</label><input type="range" id="vol-frac" min="0" max="1" step="0.02" value="0.5" style="width:140px;vertical-align:middle" onchange="reloadVolume()"><span id="vol-fraclabel" style="font-size:12px;color:var(--dim)">0.5</span></span>
     <br>
@@ -728,11 +766,12 @@
     <canvas id="volslice" width="320" height="300"></canvas>
   </div>
   <div class="card" id="chgdiffcard" style="display:none">
-    <h3>Charge-density difference Δρ</h3>
+    <h3>Charge-density difference Δρ
+      <button class="ghost" onclick="$('chgdiffcard').style.display='none'">close</button></h3>
     <p class="sub">Δρ = ρ(total) − ρ(part 1) − ρ(part 2): where electrons go when fragments bond (e.g. slab+molecule − slab − molecule). All three jobs must use the <b>same cell and grid</b> — run the fragments in the combined cell with frozen positions, calc type <b>charge</b>. Writes CHGCAR_diff next to the total.</p>
-    <span class="inline wide"><label>total (job with CHGCAR)</label><input id="cd-total" list="jobdirs"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('cd-total')">📁</button></span>
-    <span class="inline wide"><label>part 1</label><input id="cd-p1" list="jobdirs"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('cd-p1')">📁</button></span>
-    <span class="inline wide"><label>part 2 (optional)</label><input id="cd-p2" list="jobdirs"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('cd-p2')">📁</button></span>
+    <span class="inline wide"><label>total (job with CHGCAR)</label><input id="cd-total" list="jobdirs"><button class="iconbtn" style="padding:3px 7px" onclick="slotPick('cd-total')">📁</button><select id="cd-total-m" class="slot-machine"></select></span>
+    <span class="inline wide"><label>part 1</label><input id="cd-p1" list="jobdirs"><button class="iconbtn" style="padding:3px 7px" onclick="slotPick('cd-p1')">📁</button><select id="cd-p1-m" class="slot-machine"></select></span>
+    <span class="inline wide"><label>part 2 (optional)</label><input id="cd-p2" list="jobdirs"><button class="iconbtn" style="padding:3px 7px" onclick="slotPick('cd-p2')">📁</button><select id="cd-p2-m" class="slot-machine"></select></span>
     <datalist id="jobdirs"></datalist>
     <br><button class="act" onclick="computeChgDiff()">Compute Δρ → plot</button>
   </div>
@@ -764,21 +803,56 @@
     <canvas id="anachart" width="760" height="280" style="display:none"></canvas>
   </div>
   <div class="card" id="adscard" style="display:none">
-    <h3>🧗 Adsorption energy</h3>
-    <p class="sub">E<sub>ads</sub> = E(slab+adsorbate) − E(slab) − scale·E(molecule), from three finished jobs.
-      Use scale 0.5 with an H₂ reference for atomic H. Negative = binds.</p>
-    <span class="inline wide"><label>slab + adsorbate job</label><input id="ads-total" list="jobdirs"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('ads-total')">📁</button></span>
-    <span class="inline wide"><label>clean slab job</label><input id="ads-slab" list="jobdirs"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('ads-slab')">📁</button></span>
-    <span class="inline wide"><label>molecule (gas box) job</label><input id="ads-mol" list="jobdirs"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('ads-mol')">📁</button></span>
+    <h3>🧗 Adsorption energy
+      <button class="ghost" onclick="$('adscard').style.display='none'">close</button></h3>
+    <p class="sub">E<sub>ads</sub> = E(slab+adsorbate) − E(slab) − scale·E(molecule), from three finished jobs
+      (VASP or QE). Use scale 0.5 with an H₂ reference for atomic H. Negative = binds.</p>
+    <span class="inline wide"><label>slab + adsorbate job</label><input id="ads-total" list="jobdirs"><button class="iconbtn" style="padding:3px 7px" onclick="slotPick('ads-total')">📁</button><select id="ads-total-m" class="slot-machine"></select></span>
+    <span class="inline wide"><label>clean slab job</label><input id="ads-slab" list="jobdirs"><button class="iconbtn" style="padding:3px 7px" onclick="slotPick('ads-slab')">📁</button><select id="ads-slab-m" class="slot-machine"></select></span>
+    <span class="inline wide"><label>molecule (gas box) job</label><input id="ads-mol" list="jobdirs"><button class="iconbtn" style="padding:3px 7px" onclick="slotPick('ads-mol')">📁</button><select id="ads-mol-m" class="slot-machine"></select></span>
     <span class="inline"><label>molecule scale</label><input id="ads-scale" value="1.0" style="width:60px"></span>
     <br><button class="act" onclick="computeAdsorption()">Compute E_ads</button>
     <pre class="console" id="ads-out" style="height:auto;max-height:160px;margin-top:8px;display:none"></pre>
   </div>
-  <div class="card" id="reportcard" style="display:none">
-    <h3>Report — <span id="reportcase" style="text-transform:none"></span>
-      <a id="reportdl" style="color:var(--accent);margin-left:8px" href="#">⬇ download report.md</a>
-      <button class="ghost" onclick="$('reportcard').style.display='none'">close</button></h3>
-    <pre class="console" id="reportview" style="height:auto;max-height:420px"></pre>
+  <div class="card" id="surfcard" style="display:none">
+    <h3>▦ Surface energy
+      <button class="ghost" onclick="$('surfcard').style.display='none'">close</button></h3>
+    <p class="sub">γ = (E<sub>slab</sub> − (N<sub>slab</sub>/N<sub>bulk</sub>)·E<sub>bulk</sub>) / (2A),
+      A = the slab cell face ⟂ the chosen axis. Two jobs: a relaxed slab and the bulk reference
+      (same functional/ENCUT). Reported in eV/Å² and J/m².</p>
+    <span class="inline wide"><label>slab job</label><input id="surf-slab" list="jobdirs"><button class="iconbtn" style="padding:3px 7px" onclick="slotPick('surf-slab')">📁</button><select id="surf-slab-m" class="slot-machine"></select></span>
+    <span class="inline wide"><label>bulk job</label><input id="surf-bulk" list="jobdirs"><button class="iconbtn" style="padding:3px 7px" onclick="slotPick('surf-bulk')">📁</button><select id="surf-bulk-m" class="slot-machine"></select></span>
+    <span class="inline"><label>surface normal axis</label><select id="surf-axis" style="width:50px"><option>a</option><option>b</option><option selected>c</option></select></span>
+    <br><button class="act" onclick="computeSurface()">Compute γ</button>
+    <pre class="console" id="surf-out" style="height:auto;max-height:160px;margin-top:8px;display:none"></pre>
+  </div>
+  <div class="card" id="gdiagcard" style="display:none">
+    <h3>📊 Free-energy diagram + overpotential
+      <button class="ghost" onclick="exportCanvas('gdiagchart','free_energy_diagram.png')">⬇ PNG</button>
+      <button class="ghost" onclick="$('gdiagcard').style.display='none'">close</button></h3>
+    <p class="sub">Computational hydrogen electrode: each step's ΔG = ΔE (a typed number, in eV)
+      − n·e·U, plus a vibrational ΔG correction if you give a <code>freq</code> job. Reports the
+      cumulative staircase at U=0 and at U, the potential-determining step, the limiting potential
+      and the overpotential η vs the equilibrium potential.</p>
+    <div id="gdiag-steps"></div>
+    <button class="ghost" onclick="addGdiagStep()">+ add step</button>
+    <br>
+    <span class="inline"><label>T (K)</label><input id="gdiag-T" value="298.15" style="width:60px"></span>
+    <span class="inline"><label>potential U (V)</label><input id="gdiag-U" value="0" style="width:60px"></span>
+    <span class="inline"><label>equilibrium U (V)</label><input id="gdiag-Ueq" value="1.23" style="width:60px" title="1.23 V for OER/ORR"></span>
+    <button class="act" onclick="computeGdiagram()">Plot ΔG diagram</button>
+    <pre class="console" id="gdiag-out" style="height:auto;max-height:180px;margin-top:8px;display:none"></pre>
+    <canvas id="gdiagchart" width="760" height="300" style="display:none"></canvas>
+  </div>
+  <div class="card" id="magcard" style="display:none">
+    <h3>🧲 Magnetic moments — <span id="magcase" style="text-transform:none"></span>
+      <button class="ghost" onclick="exportMagCsv()" id="mag-export" style="display:none">⬇ CSV</button>
+      <button class="ghost" onclick="$('magcard').style.display='none'">close</button></h3>
+    <p class="sub">Per-atom magnetic moments from the last <code>magnetization (x)</code> table in
+      OUTCAR (needs a spin-polarised run, ISPIN=2).</p>
+    <span class="inline wide"><label>job folder</label><input id="mag-dir" list="jobdirs"><button class="iconbtn" style="padding:3px 7px" onclick="slotPick('mag-dir')">📁</button><select id="mag-dir-m" class="slot-machine"></select></span>
+    <br><button class="act" onclick="computeMagmoms()">Read moments</button>
+    <pre class="console" id="mag-out" style="height:auto;max-height:260px;margin-top:8px;display:none"></pre>
   </div>
 </div>
 
@@ -834,6 +908,25 @@ ssh user@host 'echo ok'      # must print ok with no password</pre>
         <div id="rm-testout" style="margin-top:10px"></div>
       </div>
     </div>
+  </div>
+</div>
+
+<div class="tab" id="tab-running">
+  <div class="card">
+    <h3>Running now</h3>
+    <p class="sub">Jobs in progress, newest first. <b>running</b> means the job's process is
+      actually alive right now (its recorded PID exists, or a live process is working inside the
+      job folder) — not merely that output files were created. <b>stalled</b> means output exists
+      but nothing is running anymore (crashed or killed outside the app). An unreachable machine
+      is listed at the bottom rather than blanking the board.</p>
+    <div class="resbar">
+      <span class="inline"><label>machine</label>
+        <select id="run-machine" onchange="loadRunning()" title="All machines, this computer, or one remote machine"></select></span>
+      <button class="ghost" onclick="loadRunning()">⟳ Refresh</button>
+      <label class="chkline"><input type="checkbox" id="run-auto" style="width:auto" checked onchange="runningLoop()"> auto-refresh</label>
+      <label class="chkline"><input type="checkbox" id="run-all" style="width:auto" onchange="loadRunning()"> show finished/prepared too</label>
+    </div>
+    <div id="runtable"><div class="empty">Loading…</div></div>
   </div>
 </div>
 
@@ -925,7 +1018,13 @@ document.querySelectorAll("nav button").forEach(btn => btn.onclick = () => {
   $("tab-" + btn.dataset.tab).classList.add("active");
   if (btn.dataset.tab === "results") loadResults();
   if (btn.dataset.tab === "remote") loadRemotes();
+  if (btn.dataset.tab === "running") runningLoop();
+  if (btn.dataset.tab === "analysis") initAnalysisTab();
 });
+function gotoAnalysis() {
+  if (!$("tab-analysis").classList.contains("active"))
+    document.querySelector('nav button[data-tab="analysis"]').click();
+}
 
 /* ---------- meta + cases ---------- */
 async function init() {
@@ -1230,6 +1329,14 @@ function rot(p) {
   [y, z] = [y*cx1 - z*sx1, y*sx1 + z*cx1];
   return [x, y, z];
 }
+function fwdRot(v) {           // forward rotation only (no centring) — world → screen
+  let [x, y, z] = v;
+  const cy1 = Math.cos(view.ry), sy1 = Math.sin(view.ry);
+  [x, z] = [x*cy1 + z*sy1, -x*sy1 + z*cy1];
+  const cx1 = Math.cos(view.rx), sx1 = Math.sin(view.rx);
+  [y, z] = [y*cx1 - z*sx1, y*sx1 + z*cx1];
+  return [x, y, z];
+}
 function invRot(v) {           // inverse rotation only (no centring) — screen → world
   let [x, y, z] = v;
   const cx1 = Math.cos(-view.rx), sx1 = Math.sin(-view.rx);
@@ -1331,6 +1438,24 @@ function moveSelectedBy(world) {       // world = Å displacement
   ED.dirty = true;
   syncView(); render(); updateAtomPanel(); updateDirty(); updatePoscar();
 }
+function rotateSelectedBy(ay, ax) {    // trackball: radians about the screen y then x axes
+  if (!ED || !SEL.size) return;
+  const inv = inv3(ED.lattice);
+  const sel = [...SEL];
+  const cart = sel.map(i => matvec(ED.lattice, ED.frac[i]));
+  const c = [0, 1, 2].map(t => cart.reduce((s, p) => s + p[t], 0) / cart.length);
+  const cy1 = Math.cos(ay), sy1 = Math.sin(ay);
+  const cx1 = Math.cos(ax), sx1 = Math.sin(ax);
+  sel.forEach((i, n) => {
+    let [x, y, z] = fwdRot([0, 1, 2].map(t => cart[n][t] - c[t]));
+    [x, z] = [x*cy1 + z*sy1, -x*sy1 + z*cy1];   // same ops as the view drag → same feel
+    [y, z] = [y*cx1 - z*sx1, y*sx1 + z*cx1];
+    const w = invRot([x, y, z]);
+    ED.frac[i] = matvec(inv, [0, 1, 2].map(t => c[t] + w[t]));
+  });
+  ED.dirty = true;
+  syncView(); render(); updateAtomPanel(); updateDirty(); updatePoscar();
+}
 function setTool(t) {
   TOOL = t;
   for (const name of ["rotate", "select", "move"])
@@ -1383,7 +1508,7 @@ function updateSelInfo() {
     if (TOOL === "move" && hit !== null) {
       if (!SEL.has(hit)) { SEL = new Set([hit]); updateSelInfo(); updateAtomPanel(); render(); }
       drag.snap = snapshot();   // committed to the undo stack only once the atom actually moves
-      drag.mode = "atoms";
+      drag.mode = e.altKey ? "rot-atoms" : "atoms";
     } else if (TOOL === "select" && ED && !anim.frames) {
       const [x, y] = toCanvas(e);
       bandRect = { x0: x, y0: y, x1: x, y1: y };
@@ -1395,14 +1520,18 @@ function updateSelInfo() {
     if (!drag) return;
     const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
     if (Math.abs(e.clientX - drag.sx) + Math.abs(e.clientY - drag.sy) > 3) drag.moved = true;
-    if (drag.mode === "atoms") {
+    if (drag.mode === "atoms" || drag.mode === "rot-atoms") {
       if (!drag.committed) {                          // first real motion → one undo entry
         UNDO.push(drag.snap); if (UNDO.length > 80) UNDO.shift(); REDO.length = 0;
         drag.committed = true;
       }
-      const rect = cv.getBoundingClientRect();
-      const f = cv.width / rect.width / view.zoom;
-      moveSelectedBy(invRot([dx * f, -dy * f, 0]));
+      if (drag.mode === "rot-atoms") {
+        rotateSelectedBy(dx * 0.012, dy * 0.012);
+      } else {
+        const rect = cv.getBoundingClientRect();
+        const f = cv.width / rect.width / view.zoom;
+        moveSelectedBy(invRot([dx * f, -dy * f, 0]));
+      }
     } else if (drag.mode === "band") {
       [bandRect.x1, bandRect.y1] = toCanvas(e);
       render();
@@ -1757,6 +1886,27 @@ function deselectAtom(i) {
   SEL.delete(i);
   updateSelInfo(); updateAtomPanel(); render();
 }
+function rotateSelected() {
+  if (!ED || !SEL.size) { banner("Select atoms to rotate first (click them in the viewer)."); return; }
+  const ang = +$("rt-ang").value;
+  if (!Number.isFinite(ang) || !ang) { banner("Give a rotation angle in degrees."); return; }
+  pushUndo();
+  // Right-handed rotation about x/y/z through the selection centroid, in Å.
+  const [j, k] = { x: [1, 2], y: [2, 0], z: [0, 1] }[$("rt-ax").value];
+  const th = ang * Math.PI / 180, cos = Math.cos(th), sin = Math.sin(th);
+  const inv = inv3(ED.lattice);
+  const sel = [...SEL];
+  const cart = sel.map(i => matvec(ED.lattice, ED.frac[i]));
+  const c = [0, 1, 2].map(t => cart.reduce((s, p) => s + p[t], 0) / cart.length);
+  sel.forEach((i, n) => {
+    const d = [0, 1, 2].map(t => cart[n][t] - c[t]);
+    const p = [...d];
+    p[j] = d[j] * cos - d[k] * sin;
+    p[k] = d[j] * sin + d[k] * cos;
+    ED.frac[i] = matvec(inv, [0, 1, 2].map(t => c[t] + p[t]));
+  });
+  afterChange();
+}
 function deleteSelected() {
   if (!ED || !SEL.size) { banner("Select atoms to delete first (click them in the viewer)."); return; }
   pushUndo();
@@ -2005,8 +2155,10 @@ function buildTss() {
     machine: workingMachine(), root: isRemoteWorking() ? defaultCasesRoot() : null }).then(built);
 }
 function combineBody() {
+  // Paths are read from the working machine (fetched over SSH for a remote).
   const body = { mode: $("cb-mode").value, gap: $("cb-gap").value || 2.0,
-                 vacuum: $("cb-vac").value || 10.0, strain: $("cb-strain").checked };
+                 vacuum: $("cb-vac").value || 10.0, strain: $("cb-strain").checked,
+                 machine: workingMachine() };
   if ($("cb-shift").value.trim()) {
     const s = $("cb-shift").value.trim().split(/[,\s]+/).map(Number);
     if (s.length !== 2 || s.some(isNaN)) { banner('Shift format is "x,y" — fractions of the host a/b.'); return null; }
@@ -2019,6 +2171,16 @@ function combineBody() {
   if (!guestPath) { banner("Give the guest case path (or POSCAR) to deposit."); return null; }
   body.guest = guestPath;
   return body;
+}
+/* Browse for the guest case on the working machine — local picker, or the
+   remote one over SSH. */
+function combineBrowse() {
+  const m = workingMachine(), r = REMOTES.find(x => x.name === m);
+  if (m && m !== "local") {
+    openPicker("cb-path", { machine: m, root: (r && r.remote_root) || "", what: "the guest case folder" });
+  } else {
+    openPicker("cb-path");
+  }
 }
 function combineStructures(extra) {
   const body = combineBody();
@@ -2373,8 +2535,8 @@ async function pollJobs() {
       const cls = j.running ? "running" : (j.returncode === 0 ? "done" : "failed");
       const label = j.running ? `<span class="spinner"></span> ${fmtElapsed(j.elapsed_s)}`
                   : (j.stopped ? "stopped" : (j.returncode === 0 ? "✓ done" : "✗ failed"));
-      const stop = j.running ? `<span class="stop" title="Stop this job" onclick="event.stopPropagation();stopJob('${j.token}')">✕</span>` : "";
-      return `<span class="chip ${cls}" onclick="showJob('${j.token}')">` +
+      const stop = j.running ? `<span class="stop" title="Stop this job (PID ${j.pid})" onclick="event.stopPropagation();stopJob('${j.token}')">✕</span>` : "";
+      return `<span class="chip ${cls}" title="PID ${j.pid}" onclick="showJob('${j.token}')">` +
              `${j.started} ${j.target.split("/").pop()} · ${label}${stop}</span>`;
     }).join("") || "<span style='color:var(--dim)'>no jobs yet</span>";
     if (activeToken) {
@@ -2396,6 +2558,72 @@ async function pollJobs() {
 function showJob(token) { activeToken = token; }
 async function stopJob(token) { await api("/api/stop", { token }); banner("Stop requested.", "info"); }
 
+/* ---------- running-now board (local + every remote) ---------- */
+let runningTimer = null;
+let RUNROWS = [];   // current Running-board rows, for the per-row 🛑 button
+async function terminateRunning(i) {
+  const j = RUNROWS[i]; if (!j) return;
+  const where = j.machine === "local" ? "this computer" : j.machine;
+  if (j.status === "running" &&
+      !confirm(`Terminate ${j.name} on ${where}?\n\nThis stops the running calculation.`)) return;
+  try {
+    const res = await api("/api/terminate",
+      { job_dir: j.path, ...(j.machine !== "local" ? { machine: j.machine } : {}) });
+    banner(res.killed ? `Terminated ${j.name}${res.pid ? ` (pid ${res.pid})` : ""}.`
+                      : `${j.name}: nothing left to stop — marked terminated.`, "info");
+  } catch (e) { /* banner shown */ }
+  loadRunning();
+}
+async function loadRunning() {
+  if (!$("runtable")) return;
+  const showAll = $("run-all").checked;
+  const machine = ($("run-machine") && $("run-machine").value) || "all";
+  const qs = [showAll ? "all=1" : "", machine !== "all" ? "machine=" + encodeURIComponent(machine) : ""]
+    .filter(Boolean).join("&");
+  let data;
+  try { data = await api("/api/running" + (qs ? "?" + qs : "")); }
+  catch (e) { return; }  // server briefly busy; the loop retries
+  const jobs = data.jobs || [];
+  RUNROWS = jobs;   // 🛑 buttons index into the current board
+  let html;
+  if (!jobs.length) {
+    html = `<div class="empty">${showAll ? "No jobs found." : "Nothing running right now."}</div>`;
+  } else {
+    html = `<table><tr><th>machine</th><th>job</th><th>type</th><th>status</th>` +
+      `<th>last update</th><th style="text-align:right">energy (eV)</th><th></th></tr>` +
+      jobs.map((j, i) => {
+        const machine = j.machine === "local" ? "💻 local" : "🖥 " + esc(j.machine);
+        const energy = ("energy_eV" in j) ? j.energy_eV.toFixed(4) : "—";
+        const pidTag = j.pid ? ` <small style="color:var(--dim)">pid ${j.pid}</small>` : "";
+        // 🛑 on live jobs; on stalled ones it just marks them terminated so they
+        // leave the board.
+        const act = (j.status === "running" || j.status === "stalled")
+          ? `<button class="ghost actbtn" title="${j.status === "running"
+              ? "Terminate this job" : "Nothing is running — mark it terminated and clear it from the board"}"
+              onclick="terminateRunning(${i})">🛑</button>` : "";
+        return `<tr><td>${machine}</td><td>${esc(j.name)}</td>` +
+               `<td>${esc(j.calculation_type || "scf")}</td>` +
+               `<td>${resStatusBadge(j.status)}${pidTag}</td>` +
+               `<td>${esc(j.modified || "—")}</td>` +
+               `<td style="text-align:right">${energy}</td><td>${act}</td></tr>`;
+      }).join("") + `</table>`;
+  }
+  const errs = data.errors || [];
+  if (errs.length) {
+    html += `<div style="margin-top:10px;font-size:12px;color:var(--dim)">` +
+      errs.map(e => `⚠ ${esc(e.machine)}: ${esc(e.error)}`).join("<br>") + `</div>`;
+  }
+  $("runtable").innerHTML = html;
+}
+function runningLoop() {
+  clearTimeout(runningTimer);
+  const active = $("tab-running") && $("tab-running").classList.contains("active");
+  if (!active) return;
+  loadRunning();
+  // Remote listings go over SSH — poll gently, and only while the tab is open.
+  if ($("run-auto") && $("run-auto").checked) runningTimer = setTimeout(runningLoop, 4000);
+}
+
 /* ---------- remote machines ---------- */
 let REMOTES = [];
 let prevMachine = "local";   // last selection in the c-remote dropdown
@@ -2408,7 +2636,18 @@ async function loadRemotes() {
   refreshRemoteSelect();
   refreshWorkflowRemoteSelect();
   refreshResultMachineSelect();
+  refreshRunningMachineSelect();
   refreshWorkingMachineSelect();
+}
+/* Populate the Running tab's machine dropdown: All + Local + each remote. */
+function refreshRunningMachineSelect() {
+  const sel = $("run-machine"); if (!sel) return;
+  const keep = sel.value;
+  sel.innerHTML = "<option value='all'>🌐 All machines</option>" +
+                  "<option value='local'>💻 Local — this computer</option>";
+  for (const r of REMOTES) sel.add(new Option(`🖥 ${r.name} — ${r.host}`, r.name));
+  const valid = keep === "all" || keep === "local" || REMOTES.some(r => r.name === keep);
+  sel.value = valid ? keep : "all";
 }
 /* Populate the Working-case "working machine" dropdown (local + saved remotes). */
 function refreshWorkingMachineSelect() {
@@ -2755,6 +2994,7 @@ let RES_ROWS = null;    // all normalized rows for the selected machine(s)
 let RES_EXCEL = null;   // local Excel summary path, if any
 let RES_MODE = "local"; // "all" | "local" | a remote machine name
 let resPage = 1;        // current results page (1-based); always sorted by date
+let resSel = new Map(); // key -> action payload {job_dir,[machine]}; survives paging
 
 /* Populate the Results machine dropdown: All machines + Local + each remote. */
 function refreshResultMachineSelect() {
@@ -2826,6 +3066,7 @@ async function loadResults() {
     try { rows = await loadRemoteRows(machine, true, false); } catch (e) { return; }
   }
   RES_ROWS = rows;
+  resSel.clear();
   renderResults();
 }
 /* Apply the name / date-range filters; date sorting happens in renderResults. */
@@ -2844,21 +3085,27 @@ function applyResultFilters(rows) {
 function gotoResPage(p) { resPage = p; renderResults(); }
 function toggleResTool(id) {
   const el = $(id); if (!el) return;
+  gotoAnalysis();
   const show = el.style.display === "none" || !el.style.display;
   el.style.display = show ? "block" : "none";
   if (show) el.scrollIntoView({ behavior: "smooth" });
 }
 function closeAnalysisCards() {
-  for (const id of ["anacard", "adscard", "chgdiffcard", "nebcard", "doscard",
-                    "pdoscard", "bandscard", "volcard", "reportcard"]) {
+  for (const id of ["anacard", "adscard", "surfcard", "chgdiffcard", "gdiagcard",
+                    "magcard", "nebcard", "doscard", "pdoscard", "bandscard",
+                    "volcard", "reportcard"]) {
     const el = $(id); if (el) el.style.display = "none";
   }
 }
 function resStatusBadge(v) {
   const cls = v === "done" ? "ok"
+            : (v === "terminated" || v === "stalled") ? "no"
             : (v === "running") ? "warn"
             : (v === "remote" || v === "submitted") ? "warn" : "dim";
-  return `<span class="badge ${cls}">${esc(v || "—")}</span>`;
+  const title = v === "running" ? "process is alive (PID checked) and still calculating"
+              : v === "stalled" ? "the recorded PID is gone — crashed or killed outside the app, never finished"
+              : v === "terminated" ? "stopped with the Terminate/✕ button" : "";
+  return `<span class="badge ${cls}"${title ? ` title="${title}"` : ""}>${esc(v || "—")}</span>`;
 }
 function resTypeCell(r) {
   const conv = r.calculation_type === "convergence" || r.status === "converged-scan";
@@ -2946,14 +3193,22 @@ function renderResults() {
     const energyCell = r.energy_eV != null ? fmtNum(r.energy_eV) : "";
     const errCell = r.errors
       ? `<span class="badge warn" title="${esc(String(r.errors))}">⚠ ${esc(String(r.errors).split(":")[0])}</span>` : "";
-    return `<tr><td>${nameCell}</td><td>${resMachineCell(r)}</td><td>${esc(r.modified)}</td>` +
+    // Local rows and jobs browsed on a remote machine can both be selected for
+    // the delete/terminate/resume bulk actions (the server acts over SSH for the
+    // remote ones).
+    const selBox = resSelectable(r)
+      ? `<input type="checkbox" ${resSel.has(resSelKey(r)) ? "checked" : ""} onclick="toggleRes(${i},this.checked)">`
+      : "";
+    return `<tr><td>${selBox}</td><td>${nameCell}</td><td>${resMachineCell(r)}</td><td>${esc(r.modified)}</td>` +
       `<td>${typeCell}</td><td>${resStatusBadge(r.status)}</td><td>${convCell}</td>` +
       `<td>${energyCell}</td><td>${errCell}</td>` +
       `<td style="white-space:nowrap">${resActions(r, i)}</td></tr>`;
   }).join("");
   $("restable").innerHTML =
-    `<table><tr><th>case</th><th>machine</th><th>date</th><th>type</th><th>status</th>` +
+    `<table><tr><th style="width:24px"><input type="checkbox" onclick="toggleAllRes(this)" title="Select every job on this page"></th>` +
+    `<th>case</th><th>machine</th><th>date</th><th>type</th><th>status</th>` +
     `<th>converged</th><th>energy (eV)</th><th>notes</th><th>actions</th></tr>${body}</table>`;
+  renderBulkBar();
 
   const to1 = Math.min(start + per, total);
   $("respager").innerHTML =
@@ -3044,6 +3299,58 @@ async function remoteStatus(i) {
     banner(`${r.case} on ${s.machine}: job ${s.job_id} is ${s.state}.`, "info");
   } catch (e) { /* banner shown */ }
 }
+/* ---------- results selection + bulk actions (delete / terminate / resume) ----------
+   Works on local jobs AND jobs browsed on a remote machine: a remote row's action
+   payload carries {machine, job_dir=remote path} so the server acts over SSH. */
+function resSelectable(r) { return r.remote ? !!(r.machine && r.path) : !!r.job_dir; }
+function resSelKey(r) { return r.remote ? r.machine + "|" + r.path : r.job_dir; }
+function resSelPayload(r) { return r.remote ? { machine: r.machine, job_dir: r.path } : { job_dir: r.job_dir }; }
+function toggleRes(i, on) {
+  const r = RESULTS[i]; if (!r || !resSelectable(r)) return;
+  on ? resSel.set(resSelKey(r), resSelPayload(r)) : resSel.delete(resSelKey(r));
+  renderBulkBar();
+}
+function toggleAllRes(cb) {
+  for (const r of RESULTS) if (resSelectable(r))
+    cb.checked ? resSel.set(resSelKey(r), resSelPayload(r)) : resSel.delete(resSelKey(r));
+  renderResults();
+}
+function clearResSel() { resSel.clear(); renderResults(); }
+function renderBulkBar() {
+  const el = $("resbulk"); if (!el) return;
+  const n = resSel.size;
+  el.innerHTML = n
+    ? `<span style="margin-right:8px"><b>${n}</b> selected</span>` +
+      `<button class="ghost" onclick="bulkResume()" title="Restart each selected job in place from its newest CONTCAR">▶ Resume</button> ` +
+      `<button class="ghost" onclick="bulkTerminate()" title="Stop each selected running job (local PID or remote offload)">🛑 Terminate</button> ` +
+      `<button class="ghost" onclick="bulkDelete()" title="Permanently delete each selected job folder">🗑 Delete folder</button> ` +
+      `<button class="ghost" onclick="clearResSel()">clear</button>`
+    : "";
+}
+async function bulkAction(endpoint, verb, confirmMsg, extra) {
+  const payloads = [...resSel.values()];
+  if (!payloads.length) return;
+  if (!confirm(confirmMsg.replace("{n}", payloads.length).replace(/{s}/g, payloads.length > 1 ? "s" : ""))) return;
+  let ok = 0, fail = 0;
+  for (const p of payloads) {
+    try { await api(endpoint, { ...p, ...(extra || {}) }); ok++; }
+    catch (e) { fail++; }
+  }
+  banner(`${verb}: ${ok} ok${fail ? `, ${fail} failed` : ""}.`, fail ? "" : "info");
+  resSel.clear();
+  loadResults();
+}
+function bulkDelete() {
+  bulkAction("/api/job_delete", "Deleted",
+    "Delete {n} job folder{s}? This permanently removes the folder{s} and every file in them.");
+}
+function bulkTerminate() {
+  bulkAction("/api/terminate", "Terminated", "Stop {n} running job{s}?");
+}
+function bulkResume() {
+  const cpus = ($("c-cpus") && $("c-cpus").value) || null;
+  bulkAction("/api/resume_job", "Resumed", "Resume {n} job{s} in place from the newest CONTCAR?", { cpus });
+}
 async function remoteFetch(i) {
   const r = RESULTS[i];
   banner(`Fetching results for ${r.case} from ${r.machine}…`, "info");
@@ -3094,6 +3401,7 @@ function exportCanvas(id, name) {
 }
 /* ---------- NEB / TSS energy stage graph ---------- */
 async function showNeb(i) {
+  gotoAnalysis();
   const r = RESULTS[i];
   let data;
   try { data = await api("/api/neb?path=" + jobQS(r)); }
@@ -3180,6 +3488,7 @@ function exportNebCsv() {
   a.download = LAST.neb.name + "_neb_path.csv"; a.click();
 }
 async function showDos(i) {
+  gotoAnalysis();
   const r = RESULTS[i];
   const dos = await api("/api/dos?path=" + jobQS(r));
   LAST.dos = { name: r.case, data: dos };
@@ -3271,6 +3580,7 @@ const SERIES_COLORS = ["#4ea1ff", "#ff6b6b", "#43c97a", "#ffc857", "#b07cff",
                        "#7cc4ff", "#ff9e57", "#57d0c4", "#e06aa3", "#9acD32"];
 let PDOS_QS = null;   // path (+machine) query suffix of the job being viewed
 async function showPdos(i) {
+  gotoAnalysis();
   const r = RESULTS[i];
   PDOS_QS = jobQS(r);
   $("pdoscase").textContent = r.case;
@@ -3335,6 +3645,7 @@ function drawPdos(data) {
 
 /* ---------- band structure ---------- */
 async function showBands(i) {
+  gotoAnalysis();
   const r = RESULTS[i];
   const data = await api("/api/bands?path=" + jobQS(r));
   LAST.bands = { name: r.case, data };
@@ -3394,12 +3705,14 @@ function redrawBands() {
 const VOL_FILES = ["CHGCAR", "CHGCAR_diff", "CHGCAR_sum", "LOCPOT", "AECCAR0", "AECCAR2", "PARCHG"];
 let VOL_QS = null;   // path (+machine) query suffix of the job being viewed
 function showVolume(i) {
+  gotoAnalysis();
   const r = RESULTS[i];
   VOL_QS = jobQS(r);
   $("volcase").textContent = r.case;
   if (!$("vol-file").options.length)
     for (const f of VOL_FILES) $("vol-file").add(new Option(f, f));
   $("vol-file").value = "CHGCAR";
+  $("vol-component").value = "total";
   $("volcard").style.display = "block";
   reloadVolume();
   $("volcard").scrollIntoView({ behavior: "smooth" });
@@ -3409,6 +3722,7 @@ async function reloadVolume() {
   $("vol-fraclabel").textContent = $("vol-frac").value;
   const data = await api("/api/volume?path=" + VOL_QS +
     "&file=" + encodeURIComponent($("vol-file").value) +
+    "&component=" + $("vol-component").value +
     "&axis=" + $("vol-axis").value + "&frac=" + $("vol-frac").value);
   LAST.vol = { name: $("volcase").textContent, data };
   $("volkind").textContent = data.kind;
@@ -3484,16 +3798,19 @@ function drawHeatmap(cv, slice, unit) {
     margin, margin + h + 14);
 }
 async function computeChgDiff() {
-  const total = $("cd-total").value.trim();
-  const parts = [$("cd-p1").value.trim(), $("cd-p2").value.trim()].filter(Boolean);
-  if (!total || !parts.length) { banner("Give the total job and at least one part to subtract."); return; }
+  const total = slotObj("cd-total");
+  const parts = [slotObj("cd-p1"), slotObj("cd-p2")].filter(p => p.path);
+  if (!total.path || !parts.length) { banner("Give the total job and at least one part to subtract."); return; }
   banner("Computing Δρ — large grids can take a few seconds…", "info");
   const data = await api("/api/chgdiff", { total, parts });
-  VOL_QS = encodeURIComponent(total);
-  $("volcase").textContent = "Δρ (" + total.split("/").pop() + ")";
+  // CHGCAR_diff is written locally (job dir or the remote cache dir); re-slice
+  // that local file rather than re-fetching the remote job (which has none).
+  VOL_QS = encodeURIComponent(data.path.replace(/\/CHGCAR_diff$/, ""));
+  $("volcase").textContent = "Δρ (" + (total.path.split("/").pop()) + ")";
   if (!$("vol-file").options.length)
     for (const f of VOL_FILES) $("vol-file").add(new Option(f, f));
   $("vol-file").value = "CHGCAR_diff";
+  $("vol-component").value = "total";
   LAST.vol = { name: $("volcase").textContent, data };
   $("volkind").textContent = data.kind;
   $("volcard").style.display = "block";
@@ -3506,6 +3823,7 @@ async function computeChgDiff() {
 let ANA = null;  // last result, for CSV export
 let ANA_MACHINE = null;  // remote machine of the row 🧪 was opened from; typing/picking a folder clears it
 function showAnalysis(i) {
+  gotoAnalysis();
   const r = RESULTS[i];
   $("ana-dir").value = r.remote ? r.path : r.job_dir;
   ANA_MACHINE = r.remote ? r.machine : null;
@@ -3652,12 +3970,54 @@ function exportAnaPng() {
   if (!ANA) return;
   exportCanvas("anachart", ANA.name + "_" + ANA.kind + ".png");
 }
+/* ---------- machine-aware job slots (multi-job analysis cards) ---------- */
+function slotMachineHTML() {
+  let html = "<option value='local'>💻 local</option>";
+  for (const r of REMOTES) html += `<option value="${esc(r.name)}">🖥 ${esc(r.name)}</option>`;
+  return html;
+}
+function fillSlotMachines() {
+  document.querySelectorAll("select.slot-machine").forEach(sel => {
+    const keep = sel.value;
+    sel.innerHTML = slotMachineHTML();
+    if (keep && (keep === "local" || REMOTES.some(r => r.name === keep))) sel.value = keep;
+  });
+}
+/* {path, machine} for one slot; a local machine is left as "local". */
+function slotObj(inputId) {
+  const path = $(inputId).value.trim();
+  const sel = $(inputId + "-m");
+  return { path, machine: sel ? sel.value : "local" };
+}
+/* Browse for a slot's folder — on the remote it points at, when one is chosen. */
+function slotPick(inputId) {
+  const sel = $(inputId + "-m");
+  const machine = sel ? sel.value : "local";
+  if (machine === "local") { openPicker(inputId); return; }
+  const r = REMOTES.find(x => x.name === machine);
+  openPicker(inputId, { machine, root: (r && r.remote_root) || "" });
+}
+function initAnalysisTab() {
+  fillSlotMachines();
+  if (!$("gdiag-steps").children.length) { addGdiagStep(); addGdiagStep(); }
+  refreshAnaCache();
+}
+async function refreshAnaCache() {
+  try {
+    const d = await api("/api/cache_size", null, true);
+    $("ana-cachesize").textContent = (d.bytes / 1e6).toFixed(1) + " MB";
+  } catch (e) { $("ana-cachesize").textContent = "—"; }
+}
+async function clearAnaCache() {
+  await api("/api/cache_clear", {});
+  banner("Cleared the remote-results cache.", "info");
+  refreshAnaCache();
+}
 async function computeAdsorption() {
-  const total = $("ads-total").value.trim(), slab = $("ads-slab").value.trim(),
-        mol = $("ads-mol").value.trim();
-  if (!total || !slab || !mol) { banner("All three job folders are needed."); return; }
+  const total = slotObj("ads-total"), slab = slotObj("ads-slab"), molecule = slotObj("ads-mol");
+  if (!total.path || !slab.path || !molecule.path) { banner("All three job folders are needed."); return; }
   const d = await api("/api/adsorption", {
-    total, slab, molecule: mol, scale: parseFloat($("ads-scale").value) || 1.0,
+    total, slab, molecule, scale: parseFloat($("ads-scale").value) || 1.0,
   });
   $("ads-out").style.display = "block";
   $("ads-out").textContent = [
@@ -3668,6 +4028,109 @@ async function computeAdsorption() {
       (d.adsorption_energy_eV < 0 ? "(binds)" : "(does not bind)"),
     d.all_converged ? "all three jobs converged ✓" : "⚠ at least one job did NOT converge",
   ].join("\n");
+}
+async function computeSurface() {
+  const slab = slotObj("surf-slab"), bulk = slotObj("surf-bulk");
+  if (!slab.path || !bulk.path) { banner("Give both a slab job and a bulk job."); return; }
+  const d = await api("/api/surface", { slab, bulk, axis: $("surf-axis").value });
+  $("surf-out").style.display = "block";
+  $("surf-out").textContent = [
+    `E(slab)   : ${d.slab_energy_eV.toFixed(4)} eV   (${d.n_slab} atoms)`,
+    `E(bulk)   : ${d.bulk_energy_eV.toFixed(4)} eV   (${d.n_bulk} atoms)`,
+    `area A    : ${d.area_A2.toFixed(3)} Å²   (normal: ${"abc"[d.axis]})`,
+    `γ         : ${d.surface_energy_eV_A2.toFixed(5)} eV/Å²  =  ${d.surface_energy_J_m2.toFixed(4)} J/m²`,
+    d.all_converged ? "both jobs converged ✓" : "⚠ at least one job did NOT converge",
+  ].join("\n");
+}
+async function computeMagmoms() {
+  const slot = slotObj("mag-dir");
+  if (!slot.path) { banner("Pick a job folder."); return; }
+  $("magcase").textContent = slot.path.split("/").pop();
+  const d = await api("/api/magmoms?path=" + encodeURIComponent(slot.path) +
+    (slot.machine !== "local" ? "&machine=" + encodeURIComponent(slot.machine) : ""));
+  MAG = d;
+  $("mag-export").style.display = "inline-block";
+  const lines = ["  #  el    moment (μB)"];
+  for (const m of d.moments)
+    lines.push(`${String(m.index).padStart(3)}  ${m.element.padEnd(2)} ${m.moment.toFixed(3).padStart(10)}`);
+  lines.push(`total       : ${d.total_moment.toFixed(3)} μB`);
+  $("mag-out").style.display = "block";
+  $("mag-out").textContent = lines.join("\n");
+}
+let MAG = null;
+function exportMagCsv() {
+  if (!MAG) return;
+  downloadCSV("magnetic_moments.csv", ["index", "element", "moment_muB"],
+    MAG.moments.map(m => [m.index, m.element, m.moment]));
+}
+/* ---------- free-energy diagram ---------- */
+function addGdiagStep() {
+  const n = $("gdiag-steps").children.length + 1;
+  const row = document.createElement("span");
+  row.className = "inline wide";
+  row.style.display = "block";
+  row.innerHTML =
+    `<label>step ${n}</label>` +
+    `<input class="gdiag-label" placeholder="label (e.g. *OH)" style="width:120px">` +
+    `<input class="gdiag-de" placeholder="ΔE (eV)" style="width:80px" title="Reaction/adsorption energy for this step, in eV">` +
+    `<input class="gdiag-ne" placeholder="n e⁻" value="1" style="width:55px" title="Electrons transferred (couples to the potential)">` +
+    ` <button class="ghost" style="padding:2px 7px" onclick="this.parentNode.remove()">✕</button>`;
+  $("gdiag-steps").appendChild(row);
+}
+async function computeGdiagram() {
+  const steps = [...$("gdiag-steps").children].map((row, i) => ({
+    label: row.querySelector(".gdiag-label").value.trim() || `step ${i + 1}`,
+    delta_e: parseFloat(row.querySelector(".gdiag-de").value),
+    n_electrons: parseFloat(row.querySelector(".gdiag-ne").value) || 0,
+  })).filter(s => !isNaN(s.delta_e));
+  if (!steps.length) { banner("Add at least one step with a ΔE value."); return; }
+  const d = await api("/api/gdiagram", {
+    steps, T: parseFloat($("gdiag-T").value) || 298.15,
+    U: parseFloat($("gdiag-U").value) || 0, U_eq: parseFloat($("gdiag-Ueq").value) || 1.23,
+  });
+  GDIAG = d;
+  $("gdiag-out").style.display = "block";
+  $("gdiag-out").textContent = [
+    `potential-determining step : ${d.potential_determining_step}  (ΔG = ${d.max_delta_g0_eV.toFixed(3)} eV)`,
+    `limiting potential U_L      : ${d.limiting_potential_V.toFixed(3)} V`,
+    `overpotential η vs ${d.u_equilibrium_V} V : ${d.overpotential_V.toFixed(3)} V`,
+    "",
+    ...d.steps.map(s => `${s.label.padEnd(10)} ΔG(U=0)=${s.delta_g0_eV.toFixed(3)}  ΔG(U=${d.potential_V})=${s.delta_g_eV.toFixed(3)} eV`),
+  ].join("\n");
+  drawGdiagram(d);
+}
+let GDIAG = null;
+function drawGdiagram(d) {
+  const cv = $("gdiagchart"); cv.style.display = "block";
+  const ctx = cv.getContext("2d"), W = cv.width, H = cv.height, L = 60, B = 40, T = 14;
+  chartBg(ctx, W, H);
+  const g0 = d.cumulative_g0_eV, gU = d.cumulative_g_eV;
+  const all = g0.concat(gU);
+  const ylo = Math.min(...all), yhi = Math.max(...all);
+  const pad = (yhi - ylo) * 0.1 || 1;
+  const nseg = g0.length;
+  const X = k => L + (W - L - 20) * k / (nseg - 1 || 1);
+  const Y = v => T + (H - T - B) * (1 - (v - ylo + pad) / (yhi - ylo + 2 * pad));
+  const fg = document.body.classList.contains("light") ? "#243140" : "#d7dee8";
+  ctx.strokeStyle = fg; ctx.fillStyle = fg; ctx.strokeRect(L, T, W - L - 20, H - T - B);
+  // staircase: horizontal levels at each state
+  function stair(vals, color) {
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath();
+    vals.forEach((v, k) => {
+      const x0 = X(Math.max(0, k - 0.35)), x1 = X(Math.min(nseg - 1, k + 0.35));
+      ctx.moveTo(x0, Y(v)); ctx.lineTo(x1, Y(v));
+      if (k < vals.length - 1) { ctx.lineTo(X(k + 0.65), Y(vals[k + 1])); }
+    });
+    ctx.stroke();
+  }
+  stair(g0, "#4ea1ff");
+  if (d.potential_V) stair(gU, "#ffc857");
+  ctx.lineWidth = 1; ctx.fillStyle = fg;
+  ctx.fillText("reaction coordinate", W / 2 - 50, H - 10);
+  ctx.save(); ctx.translate(13, H / 2 + 20); ctx.rotate(-Math.PI / 2);
+  ctx.fillText("ΔG (eV)", 0, 0); ctx.restore();
+  ctx.fillText("U=0", W - 60, T + 14);
+  if (d.potential_V) { ctx.fillStyle = "#ffc857"; ctx.fillText("U=" + d.potential_V, W - 60, T + 28); }
 }
 
 /* ---------- folder picker ---------- */

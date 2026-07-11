@@ -1190,6 +1190,77 @@ def poll_detached_job(remote: dict, control_dir: str, pid: str | None = None) ->
     return {"state": "unknown", "return_code": None, "raw": res.stdout.strip() or res.stderr.strip()}
 
 
+def kill_detached_job(remote: dict, control_dir: str, pid: str | None = None) -> dict:
+    """Terminate a detached offload job by its recorded PID over SSH.
+
+    Detached jobs are launched under ``setsid``, so the recorded PID leads its own
+    process group — ``kill -TERM -<pid>`` takes down mpirun/vasp and the driver in
+    one shot (with a bare-PID fallback). Stamps ``rc=143`` (128+SIGTERM) in the
+    control dir so a later :func:`poll_detached_job` reads "completed", not "unknown".
+    Returns ``{"killed", "raw"}``.
+    """
+    if not pid:
+        return {"killed": False, "raw": "no PID recorded for this job"}
+    target = _ssh_target(remote)
+    ssh_opts = _ssh_options(remote)
+    p = shlex.quote(str(pid))
+    cd = shlex.quote(control_dir.rstrip("/")) if control_dir else ""
+    # Stamp rc=143 (poll reads "completed") and drop a .terminated marker in the
+    # job dir the control dir points at, so the Running tab reads "terminated".
+    stamp = (f"echo 143 > {cd}/rc; jd=$(cat {cd}/job_dir 2>/dev/null); "
+             f'[ -n "$jd" ] && echo terminated > "$jd/.terminated" 2>/dev/null; ') if control_dir else ""
+    cmd = f"kill -TERM -{p} 2>/dev/null; kill -TERM {p} 2>/dev/null; {stamp}true"
+    try:
+        res = subprocess.run(["ssh", "-x", *ssh_opts, target, cmd],
+                             capture_output=True, encoding="utf-8", errors="replace", timeout=30)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return {"killed": False, "raw": str(exc)}
+    return {"killed": res.returncode == 0, "raw": (res.stdout + res.stderr).strip()}
+
+
+def kill_job_by_dir(remote: dict, remote_dir: str) -> dict:
+    """Terminate the job running in a remote job directory: the process group of
+    the PID recorded in ``<dir>/.pid``, plus any live process whose cwd is inside
+    the dir — the same two liveness signals the Running board uses, so anything
+    it shows as "running" can be stopped. Drops a ``.terminated`` marker so the
+    listing reads "terminated". Works for any job on the machine, not just ones
+    this host launched. Returns {"killed","raw"}.
+    """
+    rd = shlex.quote(remote_dir.rstrip("/"))
+    cmd = (
+        f'd={rd}; pid=$(cat "$d/.pid" 2>/dev/null); ok=0; '
+        f'if [ -n "$pid" ]; then kill -TERM -"$pid" 2>/dev/null; kill -TERM "$pid" 2>/dev/null; ok=1; fi; '
+        # Also processes working inside the dir (cwd match) — covers jobs with no
+        # recorded .pid, exactly what the running scan counts as alive.
+        'for l in /proc/[0-9]*/cwd; do c=$(readlink "$l" 2>/dev/null); '
+        'case "$c" in "$d"|"$d"/*) p=${l#/proc/}; p=${p%/cwd}; '
+        'kill -TERM "$p" 2>/dev/null && ok=1;; esac; done; '
+        f'echo terminated > "$d/.terminated" 2>/dev/null; echo "$ok"'
+    )
+    try:
+        res = remote_command(remote, cmd, timeout=30)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return {"killed": False, "raw": str(exc)}
+    last = res.stdout.strip().splitlines()[-1:] if res.stdout.strip() else []
+    return {"killed": last == ["1"], "raw": (res.stdout + res.stderr).strip()}
+
+
+def delete_remote_dir(remote: dict, remote_dir: str) -> None:
+    """``rm -rf`` a directory on the remote machine. The caller MUST have checked
+    that ``remote_dir`` is inside the machine's remote_root — this does not."""
+    res = remote_command(remote, f"rm -rf {shlex.quote(remote_dir)}", timeout=60)
+    if res.returncode != 0:
+        raise RuntimeError(res.stderr.strip() or f"could not delete {remote_dir}")
+
+
+def clear_remote_terminated(remote: dict, remote_dir: str) -> None:
+    """Remove a stale ``.terminated`` marker before a remote resume (best effort)."""
+    try:
+        remote_command(remote, f"rm -f {shlex.quote(remote_dir.rstrip('/'))}/.terminated", timeout=30)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+
 def resolve_detached_job_dir(remote: dict, control_dir: str) -> str | None:
     """The real (numbered) job root a detached offload chose, or None if not yet known.
 
@@ -1448,9 +1519,16 @@ def list_remote_jobs(remote: dict, root: str) -> list[dict]:
     """
     root = (root or "").rstrip("/") or "/"
     rq = shlex.quote(root)
-    # POSIX sh: a job dir has any VASP I/O; emit "<mtime>\t<o><v><z>\t<path>".
+    # POSIX sh: a job dir has any VASP I/O; emit
+    # "<mtime>\t<o><v><z>\t<type><converged>\t<energy>\t<path>" per job, where
+    # type is n(eb)/c(onvergence)/s(cf) and energy is the last OSZICAR E0=
+    # (or "-"). Mirrors the local _result_calc_type / CONVERGENCE_MARKERS /
+    # parse_outcar_summary semantics so remote rows fill the same columns.
     script = (
         f"r={rq}; "
+        # One snapshot of every visible process's cwd, shared by all dirs below
+        # (only this user's /proc entries are readable — VASP runs as this user).
+        'cw=$(readlink /proc/[0-9]*/cwd 2>/dev/null); '
         'isjob() { [ -e "$1/OUTCAR" ] || [ -e "$1/vasprun.xml" ] || '
         '[ -e "$1/OSZICAR" ] || [ -e "$1/INCAR" ] || [ -e "$1/POSCAR" ] || '
         '[ -e "$1/pw.in" ]; }; '
@@ -1462,7 +1540,32 @@ def list_remote_jobs(remote: dict, root: str) -> list[dict]:
         'o=0; { [ -e "$d/OUTCAR" ] || [ -e "$d/pw.out" ]; } && o=1; '
         'v=0; [ -e "$d/vasprun.xml" ] && v=1; '
         'z=0; [ -e "$d/OSZICAR" ] && z=1; '
-        'printf "%s\\t%s%s%s\\t%s\\n" "$n" "$o" "$v" "$z" "$d"; }; '
+        # g: run actually finished (job.log / OUTCAR footer / QE JOB DONE / ASE
+        # results — mirrors job_finished); k: killed via the stop button.
+        'g=0; { [ -e "$d/job.log" ] || [ -e "$d/ase_results.json" ] || '
+        'grep -q "General timing" "$d/OUTCAR" 2>/dev/null || '
+        'grep -q "JOB DONE" "$d/pw.out" 2>/dev/null; } && g=1; '
+        'k=0; [ -e "$d/.terminated" ] && k=1; '
+        # p: a .pid is recorded; a: the job is actually alive right now — its
+        # recorded PID exists, or some live process has its cwd inside the dir
+        # (real liveness, not just "output file exists"). pd: PID for display.
+        'p=0; a=0; pd=-; '
+        'if [ -f "$d/.pid" ]; then pd=$(cat "$d/.pid" 2>/dev/null); p=1; '
+        'kill -0 "$pd" 2>/dev/null && a=1; fi; '
+        # ponytail: word-splits $cw, so job paths with spaces are missed here;
+        # the .pid check above still covers those.
+        'if [ "$a" = 0 ]; then for cwd_i in $cw; do case "$cwd_i" in '
+        '"$d"|"$d"/*) a=1;; esac; done; fi; '
+        # ponytail: NEB detected via initial/final or 00+01 image dirs (VASP
+        # always numbers images with two digits); good enough for a listing.
+        'y=s; [ -d "$d/scf_convergence" ] && y=c; '
+        '{ [ -e "$d/initial/POSCAR" ] && [ -e "$d/final/POSCAR" ]; } && y=n; '
+        '{ [ -d "$d/00" ] && [ -d "$d/01" ]; } && y=n; '
+        'c=0; grep -q -e "reached required accuracy" '
+        '-e "aborting loop because EDIFF is reached" "$d/OUTCAR" 2>/dev/null && c=1; '
+        "e=$(awk '$4==\"E0=\"{x=$5} END{print x}' \"$d/OSZICAR\" 2>/dev/null); "
+        '[ -n "$e" ] || e=-; '
+        'printf "%s\\t%s%s%s%s%s%s%s\\t%s%s\\t%s\\t%s\\t%s\\n" "$n" "$o" "$v" "$z" "$g" "$k" "$p" "$a" "$y" "$c" "$e" "$pd" "$d"; }; '
         'for d in "$r"/*/; do d=${d%/}; [ -d "$d" ] || continue; '
         'if isjob "$d"; then emit "$d"; else '
         'for s in "$d"/*/; do s=${s%/}; [ -d "$s" ] || continue; '
@@ -1477,23 +1580,178 @@ def list_remote_jobs(remote: dict, root: str) -> list[dict]:
     rows: list[dict] = []
     for line in res.stdout.splitlines():
         parts = line.split("\t")
-        if len(parts) != 3:
+        if len(parts) != 6:
             continue
-        mt, flags, path = parts
-        flags = (flags + "000")[:3]
+        mt, flags, type_conv, energy, pid, path = parts
+        flags = (flags + "0000000")[:7]
         has_out, has_vr, has_osz = flags[0] == "1", flags[1] == "1", flags[2] == "1"
+        has_log, killed = flags[3] == "1", flags[4] == "1"
+        has_pid, alive = flags[5] == "1", flags[6] == "1"
+        type_conv = (type_conv + "s0")[:2]
         rel = path[len(root):].lstrip("/") if path.startswith(root) else path
-        rows.append({
+        # Same rule as _local_job_rows: terminated > finished > actually alive
+        # (live PID or a process working in the dir) > output-without-a-process
+        # = stalled. A created file alone never counts as "running".
+        status = ("terminated" if killed else "done" if has_log
+                  else "running" if alive
+                  else "stalled" if (has_pid or has_osz or has_out)
+                  else "prepared")
+        row = {
             "path": path,
             "name": Path(path).name,
             "rel": rel or Path(path).name,
             "modified_ts": int(mt) if mt.isdigit() else 0,
-            "status": "done" if has_out else ("running" if has_osz else "prepared"),
+            "status": status,
             "has_outcar": has_out,
             "has_vasprun": has_vr,
-        })
+            "calculation_type": {"n": "tss", "c": "convergence"}.get(type_conv[0], "scf"),
+            "converged": type_conv[1] == "1",
+        }
+        if pid and pid != "-" and pid.isdigit():
+            row["pid"] = int(pid)
+        try:
+            row["energy_eV"] = float(energy)
+        except ValueError:
+            pass  # "-": no OSZICAR ionic step yet (or a QE job)
+        rows.append(row)
     rows.sort(key=lambda r: r["modified_ts"], reverse=True)
     return rows
+
+
+def _last_oszicar_e0(path: Path) -> float | None:
+    """Last ionic step's E0 from an OSZICAR (matches the awk in list_remote_jobs)."""
+    try:
+        last = None
+        for line in path.read_text(errors="ignore").splitlines():
+            parts = line.split()
+            if len(parts) >= 5 and parts[3] == "E0=":
+                last = parts[4]
+        return float(last) if last is not None else None
+    except (OSError, ValueError):
+        return None
+
+
+def _local_job_rows(root: str) -> list[dict]:
+    """Local mirror of list_remote_jobs: job dirs under ``root`` (up to two
+    levels), newest first, same row shape (name/status/calculation_type/energy).
+
+    ponytail: duplicates the remote shell walk in Python so the CLI and UI can
+    scan the local machine without importing the UI's server-side scanner.
+    """
+    base = Path(root)
+    if not base.is_dir():
+        return []
+    from vasp_auto.workflow import proc_cwds
+    cwds = proc_cwds()  # one /proc snapshot shared by every row's liveness check
+    io = ("OUTCAR", "vasprun.xml", "OSZICAR", "INCAR", "POSCAR", "pw.in")
+    stamp = ("OUTCAR", "vasprun.xml", "OSZICAR", "run.log", "CONTCAR",
+             "INCAR", "POSCAR", "pw.out")
+
+    def is_job(d: Path) -> bool:
+        return any((d / f).exists() for f in io)
+
+    def row_for(d: Path) -> dict:
+        mt = max((int((d / f).stat().st_mtime) for f in stamp if (d / f).exists()),
+                 default=int(d.stat().st_mtime))
+        has_out = (d / "OUTCAR").exists() or (d / "pw.out").exists()
+        has_osz = (d / "OSZICAR").exists()
+        calc = "scf"
+        if (d / "scf_convergence").is_dir():
+            calc = "convergence"
+        if ((d / "initial" / "POSCAR").exists() and (d / "final" / "POSCAR").exists()) \
+                or ((d / "00").is_dir() and (d / "01").is_dir()):
+            calc = "tss"
+        # Only "done" once the run has actually finished (job_finished), and only
+        # "running" when something is actually alive — the recorded .pid, or a
+        # live process working inside the dir. Output without a live process is
+        # "stalled": a created file is not proof the job still runs. Killed via
+        # the app → .terminated.
+        from vasp_auto.workflow import _read_pid, job_finished, pid_alive
+        pid = _read_pid(d)
+        alive = (pid is not None and pid_alive(pid)) or \
+            any(c == str(d) or c.startswith(str(d) + "/") for c in cwds)
+        if (d / ".terminated").exists():
+            status = "terminated"
+        elif job_finished(d):
+            status = "done"
+        elif alive:
+            status = "running"
+        elif pid is not None or has_out or has_osz:
+            status = "stalled"
+        else:
+            status = "prepared"
+        r = {
+            "path": str(d), "name": d.name,
+            "rel": str(d.relative_to(base)) if d != base else d.name,
+            "modified_ts": mt,
+            "status": status,
+            "has_outcar": has_out, "calculation_type": calc,
+        }
+        if pid is not None:
+            r["pid"] = pid
+        e = _last_oszicar_e0(d / "OSZICAR")
+        if e is not None:
+            r["energy_eV"] = e
+        return r
+
+    dirs: list[Path] = []
+    for d in sorted(base.iterdir()):
+        if not d.is_dir():
+            continue
+        if is_job(d):
+            dirs.append(d)
+        else:  # a project folder holding job dirs
+            dirs += [s for s in sorted(d.iterdir()) if s.is_dir() and is_job(s)]
+    rows = [row_for(d) for d in dirs]
+    rows.sort(key=lambda r: r["modified_ts"], reverse=True)
+    return rows
+
+
+def list_running_jobs(config: dict, running_only: bool = True,
+                      machine: str | None = None) -> dict:
+    """Jobs across the local machine and every configured remote, newest first.
+
+    "running" means a process is actually alive in the job dir (recorded PID or
+    a live cwd match); output files without a live process read "stalled".
+    Remotes come from ``config['remotes']`` (config.yaml + the UI's remotes.json,
+    already merged by load_config) plus a single ``config['remote']``. An
+    unreachable machine lands in ``errors`` instead of aborting the whole
+    listing. ``machine`` narrows the scan to "local" or one remote name
+    (None/"all" = everything).
+    """
+    want = machine or "all"
+    jobs: list[dict] = []
+    errors: list[dict] = []
+    if want in ("all", "local"):
+        for row in _local_job_rows(str(config.get("jobs_root") or "")):
+            row["machine"] = "local"
+            jobs.append(row)
+    machines = dict(config.get("remotes") or {})
+    if config.get("remote"):
+        machines.setdefault("default", config["remote"])
+    if want not in ("all", "local"):
+        machines = {want: machines[want]} if want in machines else {}
+        if not machines:
+            errors.append({"machine": want, "error": "unknown machine"})
+    elif want == "local":
+        machines = {}
+    for name, entry in machines.items():
+        root = (entry.get("remote_root") or "").strip()
+        if not root:
+            errors.append({"machine": name, "error": "no remote_root set"})
+            continue
+        try:
+            for row in list_remote_jobs({**entry, "name": name}, root):
+                row["machine"] = name
+                jobs.append(row)
+        except Exception as exc:  # unreachable / SSH error — keep the other machines
+            errors.append({"machine": name, "error": str(exc)})
+    if running_only:
+        # "stalled" = had a PID that has since died without finishing; surface it
+        # too so a job that silently crashed doesn't just vanish from the board.
+        jobs = [j for j in jobs if j.get("status") in ("running", "stalled")]
+    jobs.sort(key=lambda j: j.get("modified_ts", 0), reverse=True)
+    return {"jobs": jobs, "errors": errors}
 
 
 def list_remote_dir(remote: dict, path: str) -> dict:

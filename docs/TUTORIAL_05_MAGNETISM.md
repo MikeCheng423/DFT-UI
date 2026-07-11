@@ -174,5 +174,5 @@ vasp-auto inputs/Fe_bulk --parse-only
 
 ---
 
-**Next**: Tutorial 06 shows how to build a human-readable multi-step workflow
+**Next**: Tutorial 06 shows how to build a multi-step workflow
 (`converge → relax → scf → dos`) in a single command.

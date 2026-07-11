@@ -220,6 +220,102 @@ def test_absorption_spectrum_missing_block(tmp_path):
         analysis.absorption_spectrum(vasprun)
 
 
+SLAB_POSCAR_HEADER = """slab
+1.0
+4.0 0.0 0.0
+0.0 4.0 0.0
+0.0 0.0 20.0
+Al
+{n}
+Direct
+"""
+
+
+def _make_job_with_poscar(tmp_path, name, energy, natoms):
+    job = _make_job(tmp_path, name, energy)
+    coords = "\n".join(f"0.0 0.0 {i / (natoms + 1):.3f}" for i in range(natoms))
+    (job / "POSCAR").write_text(SLAB_POSCAR_HEADER.format(n=natoms) + coords + "\n",
+                                encoding="utf-8")
+    return job
+
+
+def test_surface_energy(tmp_path):
+    slab = _make_job_with_poscar(tmp_path, "slab", -40.0, 4)
+    bulk = _make_job_with_poscar(tmp_path, "bulk", -18.0, 2)
+    # area = |a×b| = 16 Å²; γ = (-40 − (4/2)(−18)) / (2·16) = (-40+36)/32.
+    result = analysis.surface_energy(slab, bulk)
+    assert result["area_A2"] == pytest.approx(16.0)
+    assert result["surface_energy_eV_A2"] == pytest.approx(-4.0 / 32.0)
+    assert result["surface_energy_J_m2"] == pytest.approx((-4.0 / 32.0) * analysis.EV_A2_TO_J_M2)
+    assert result["all_converged"]
+
+
+def test_free_energy_diagram_staircase_and_overpotential():
+    steps = [
+        {"label": "*OH", "delta_e": 1.0, "n_electrons": 1},
+        {"label": "*O", "delta_e": 0.5, "n_electrons": 1},
+        {"label": "*OOH", "delta_e": -0.2, "n_electrons": 1},
+    ]
+    d = analysis.free_energy_diagram(steps, potential=0.5, u_equilibrium=1.23)
+    assert d["cumulative_g0_eV"] == pytest.approx([0.0, 1.0, 1.5, 1.3])
+    assert d["cumulative_g_eV"] == pytest.approx([0.0, 0.5, 0.5, -0.2])  # each −1·0.5
+    assert d["potential_determining_step"] == "*OH"
+    assert d["max_delta_g0_eV"] == pytest.approx(1.0)
+    assert d["limiting_potential_V"] == pytest.approx(-1.0)
+    assert d["overpotential_V"] == pytest.approx(abs(1.23 - (-1.0)))
+
+
+def test_free_energy_diagram_from_freq_and_ads(tmp_path):
+    total = _make_job(tmp_path, "slab_ads", -110.0)
+    slab = _make_job(tmp_path, "slab", -100.0)
+    mol = _make_job(tmp_path, "h2", -6.0)
+    freq = tmp_path / "freq"
+    freq.mkdir()
+    (freq / "OUTCAR").write_text(FREQ_OUTCAR, encoding="utf-8")
+
+    steps = [{"label": "ads", "ads": {"total": str(total), "slab": str(slab),
+                                      "molecule": str(mol), "scale": 0.5},
+              "freq_job": str(freq)}]
+    d = analysis.free_energy_diagram(steps)
+    g_corr = analysis.thermo_from_job(freq)["g_correction_eV"]
+    assert d["steps"][0]["delta_e_eV"] == pytest.approx(-110.0 + 100.0 + 3.0)
+    assert d["steps"][0]["g_correction_eV"] == pytest.approx(g_corr)
+
+
+def test_read_job_energy_qe(tmp_path):
+    from vasp_auto.parser import RY_TO_EV
+
+    job = tmp_path / "qe"
+    job.mkdir()
+    (job / ".engine").write_text("qe", encoding="utf-8")
+    (job / "pw.out").write_text(
+        "!    total energy              =     -15.83792000 Ry\n"
+        "     convergence has been achieved in  11 iterations\n",
+        encoding="utf-8",
+    )
+    result = analysis.read_job_energy(job)
+    assert result["energy_eV"] == pytest.approx(-15.83792000 * RY_TO_EV)
+    assert result["converged"]
+
+
+def test_read_volumetric_spin_block(tmp_path):
+    from vasp_auto.chgcar import read_volumetric
+
+    chgcar = tmp_path / "CHGCAR"
+    chgcar.write_text(
+        "c\n1.0\n4 0 0\n0 4 0\n0 0 4\nAl\n1\nDirect\n0 0 0\n"
+        "\n 2 1 1\n 1.0 2.0\n"
+        "augmentation occupancies 1 4\n 0.0 0.0 0.0 0.0\n"
+        " 2 1 1\n 0.5 -0.5\n",
+        encoding="utf-8",
+    )
+    volume = read_volumetric(chgcar, spin=True)
+    assert volume["data"] == pytest.approx([1.0, 2.0])
+    assert volume["spin_data"] == pytest.approx([0.5, -0.5])
+    # Without spin=True the second block is not read.
+    assert "spin_data" not in read_volumetric(chgcar)
+
+
 def test_cli_adsorption_energy(tmp_path, monkeypatch, capsys):
     total = _make_job(tmp_path, "slab_ads", -110.0)
     slab = _make_job(tmp_path, "slab", -100.0)

@@ -1,4 +1,4 @@
-"""Human-language INCAR option catalog (human-readable picker).
+"""Human-language INCAR option catalog (guided picker).
 
 Data only — no VASP knowledge beyond these tables. The GUI, CLI `--help`, and
 NL builder read this; writing stays in `incar.set_incar_value`.
@@ -28,7 +28,7 @@ class IncarOption:
 class IncarField:
     tag: str                                    # VASP tag, e.g. "ALGO"
     label: str                                  # UI label, plain language
-    group: str                                  # GUI tab: "Calculation" | "SCF"
+    group: str                                  # form tab: "Calculation" | "SCF"
     kind: str                                   # "choice" | "number" | "bool"
     default: str | None = None                  # default value (an option.value for choices)
     options: list[IncarOption] = field(default_factory=list)
@@ -144,6 +144,40 @@ FIELDS: list[IncarField] = [
         tag="NELMIN", label="Minimum electronic steps", group="SCF", kind="number",
         default="2", doc=f"{WIKI}/NELMIN",
     ),
+    # --- DFT+U (Hubbard correction; per-species vectors follow POSCAR order) --
+    IncarField(
+        tag="LDAU", label="Hubbard U correction (DFT+U)", group="DFT+U", kind="bool",
+        default=".FALSE.", doc=f"{WIKI}/LDAU",
+    ),
+    IncarField(
+        tag="LDAUTYPE", label="DFT+U flavour", group="DFT+U", kind="choice",
+        default="2", doc=f"{WIKI}/LDAUTYPE",
+        options=[
+            IncarOption("Dudarev (effective U−J)", "2", "The common choice; only U−J matters"),
+            IncarOption("Liechtenstein (separate U and J)", "1", "Rotationally invariant, uses both U and J"),
+        ],
+    ),
+    IncarField(
+        tag="LDAUL", label="Orbital to correct, per species", group="DFT+U", kind="number",
+        default=None, doc=f"{WIKI}/LDAUL",
+        unit="2=d 3=f −1=none, one per element in POSCAR order",
+    ),
+    IncarField(
+        tag="LDAUU", label="U per species", group="DFT+U", kind="number",
+        default=None, unit="eV, one per element (e.g. 4.0 0.0)", doc=f"{WIKI}/LDAUU",
+    ),
+    IncarField(
+        tag="LDAUJ", label="J per species", group="DFT+U", kind="number",
+        default=None, unit="eV, one per element (e.g. 0.0 0.0)", doc=f"{WIKI}/LDAUJ",
+    ),
+    IncarField(
+        tag="LMAXMIX", label="Mixed density l-quantum number", group="DFT+U", kind="choice",
+        default="4", doc=f"{WIKI}/LMAXMIX",
+        options=[
+            IncarOption("4 — d electrons", "4", "Use when correcting d orbitals"),
+            IncarOption("6 — f electrons", "6", "Use when correcting f orbitals"),
+        ],
+    ),
     # --- DOS-only fields (shown when the calculation type is "dos") ----------
     IncarField(
         tag="LORBIT", label="Orbital projection", group="DOS", kind="choice",
@@ -184,7 +218,7 @@ def fields_for(calc_type: str | None) -> list[IncarField]:
 
 
 def fields_by_group(calc_type: str | None = None) -> dict[str, list[IncarField]]:
-    """Fields grouped by GUI tab, in declaration order — for form rendering."""
+    """Fields grouped by form tab, in declaration order — for form rendering."""
     groups: dict[str, list[IncarField]] = {}
     for f in fields_for(calc_type):
         groups.setdefault(f.group, []).append(f)

@@ -881,6 +881,26 @@ def parse_args():
         help="Query the scheduler (--scheduler) for the status of a submitted job ID "
         "and print the result. Exits after printing. Does not affect --parse-only.",
     )
+    parser.add_argument(
+        "--list-jobs",
+        action="store_true",
+        help="Show which jobs are running now across this machine and every "
+        "configured remote, then exit. Add --all to include finished/prepared jobs.",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="With --list-jobs, list every job (done/running/prepared), not just running.",
+    )
+    parser.add_argument(
+        "--kill",
+        default=None,
+        metavar="JOB_DIR",
+        help="Stop a running detached (offload) job by its local job directory: "
+        "reads that dir's .remote.json for the machine + PID and kills the remote "
+        "process group over SSH. Local runs stop with Ctrl-C; scheduler jobs with "
+        "scancel/qdel. Exits after.",
+    )
     # Implicit solvation (VASPsol-patched binary required)
     parser.add_argument(
         "--solvation",
@@ -1590,6 +1610,55 @@ def _poll_job(args, config) -> bool:
     print(f"State     : {result['state']}")
     if result["raw"]:
         print(f"Raw       : {result['raw']}")
+    return True
+
+
+def _list_jobs(args, config) -> bool:
+    """--list-jobs: print running jobs across local + every remote, then exit."""
+    if not getattr(args, "list_jobs", False):
+        return False
+    from vasp_auto.runner import list_running_jobs
+
+    result = list_running_jobs(config, running_only=not args.all)
+    jobs = result["jobs"]
+    if not jobs:
+        print("No jobs running" if not args.all else "No jobs found")
+    else:
+        print(f"{'MACHINE':<12} {'STATUS':<9} {'TYPE':<11} {'ENERGY (eV)':>13}  JOB")
+        for j in jobs:
+            energy = f"{j['energy_eV']:.4f}" if "energy_eV" in j else "-"
+            print(f"{j['machine']:<12} {j['status']:<9} "
+                  f"{j.get('calculation_type', 'scf'):<11} {energy:>13}  {j['name']}")
+    for err in result["errors"]:
+        print(f"  ! {err['machine']}: {err['error']}")
+    return True
+
+
+def _kill_job(args, config) -> bool:
+    """--kill JOB_DIR: stop a detached offload job on its remote machine, then exit."""
+    if not args.kill:
+        return False
+    from vasp_auto.runner import kill_detached_job
+    from vasp_auto.workflow import read_remote_marker
+
+    job_dir = Path(args.kill).expanduser().resolve()
+    marker = read_remote_marker(job_dir)
+    if not marker or marker.get("mode") != "ssh_detached":
+        raise SystemExit(
+            f"No detached-offload job in {job_dir} (no ssh_detached .remote.json). "
+            "Local runs stop with Ctrl-C; scheduler jobs with scancel/qdel."
+        )
+    name = marker.get("machine") or marker.get("host")
+    remote = (config.get("remotes") or {}).get(name) or {"host": marker.get("host")}
+    result = kill_detached_job(remote, marker.get("control_dir", ""), marker.get("pid"))
+    try:  # local mirror marker so the UI Results tab reads "terminated"
+        (job_dir / ".terminated").write_text("terminated", encoding="utf-8")
+    except OSError:
+        pass
+    status = "stopped" if result["killed"] else "sent (job may already have exited)"
+    print(f"Kill      : {name} pid {marker.get('pid') or '?'} — {status}")
+    if result["raw"]:
+        print(f"  {result['raw']}")
     return True
 
 
@@ -2523,6 +2592,12 @@ def main():
     config = load_config()
 
     if _poll_job(args, config):
+        return
+
+    if _list_jobs(args, config):
+        return
+
+    if _kill_job(args, config):
         return
 
     if _run_resume(args, config):

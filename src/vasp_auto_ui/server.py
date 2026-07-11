@@ -1,6 +1,6 @@
 """vasp_auto_ui — local web UI for the vasp_auto engine.
 
-A human-readable front end: structure builders, calculation forms, workflow
+A workflow-builder front end: structure builders, calculation forms, workflow
 builder, run console, and results table. Standard library only (http.server);
 it imports vasp_auto for structure/preview/parse operations and launches the
 vasp-auto CLI as a subprocess for runs, so UI and CLI behave identically.
@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -46,13 +48,16 @@ from vasp_auto.structure import (
     per_atom_symbols,
     read_poscar,
     resolve_prototype,
+    rotate_atoms,
     scale_cell,
     scaled_lattice,
     substitute,
     write_poscar,
 )
 from vasp_auto import py4vasp_tools
-from vasp_auto.parser import aggregate_pdos, parse_bands, parse_dos, parse_pdos
+from vasp_auto.parser import (
+    aggregate_pdos, parse_bands, parse_dos, parse_pdos, parse_qe_bands, parse_qe_dos,
+)
 from vasp_auto.report import build_job_report, write_job_report
 from vasp_auto.runner import (
     fetch_remote_file,
@@ -60,6 +65,11 @@ from vasp_auto.runner import (
     list_remote_cases,
     list_remote_dir,
     list_remote_jobs,
+    list_running_jobs,
+    kill_detached_job,
+    kill_job_by_dir,
+    delete_remote_dir,
+    clear_remote_terminated,
     poll_detached_job,
     poll_remote_job,
     read_remote_text,
@@ -72,8 +82,11 @@ from vasp_auto.runner import (
 from vasp_auto.target_utils import get_case_type, inspect_target
 from vasp_auto.trajectory import job_trajectory, oszicar_energies
 from vasp_auto.workflow import (
+    _read_pid as read_pid,
     build_row,
+    job_engine,
     neb_energy_profile,
+    parse_magmoms,
     read_remote_marker,
     scan_vasp_errors,
 )
@@ -473,23 +486,40 @@ def api_nl_agent(_query, body):
     return {"transcript": transcript, "structure": _struct_payload(struct)}
 
 
+def _load_struct_arg(body: dict, key: str) -> dict:
+    """A structure argument for combine/match: an inline editor payload
+    (`<key>_struct`), a local case path/POSCAR, or — with a remote working
+    `machine` in the body — a path on that machine, fetched over SSH."""
+    inline = body.get(f"{key}_struct")
+    if inline:
+        return _struct_from_payload(inline)
+    path = body.get(key)
+    if not path:
+        raise ValueError(f"Missing {key} structure")
+    loc = _remote_loc(str(path), body.get("machine"))
+    if loc:
+        remote = _resolve_remote(loc["machine"])
+        base = str(loc["remote_dir"]).rstrip("/")
+        with tempfile.TemporaryDirectory(prefix="vasp_auto_rc_") as tmp:
+            local = Path(tmp) / "POSCAR"
+            try:
+                fetch_remote_file(remote, f"{base}/POSCAR", local)
+            except Exception:
+                # The path may be the structure file itself, not a case folder.
+                fetch_remote_file(remote, base, local)
+            return read_poscar(local)
+    return read_poscar(_find_poscar(Path(str(path)).expanduser().resolve()))
+
+
 def api_combine(_query, body):
     """Combine two structures with different unit cells (stack/insert).
 
-    Host and guest are case paths; either can instead be sent inline as
-    `host_struct` / `guest_struct` (the editor's unsaved working structure).
+    Host and guest are case paths (on the working machine when it is a
+    remote); either can instead be sent inline as `host_struct` /
+    `guest_struct` (the editor's unsaved working structure).
     Returns the combined structure for the editor — nothing is written.
     """
-    def load(key):
-        inline = body.get(f"{key}_struct")
-        if inline:
-            return _struct_from_payload(inline)
-        path = body.get(key)
-        if not path:
-            raise ValueError(f"Missing {key} structure")
-        return read_poscar(_find_poscar(Path(str(path)).expanduser().resolve()))
-
-    host, guest = load("host"), load("guest")
+    host, guest = _load_struct_arg(body, "host"), _load_struct_arg(body, "guest")
     # Optional in-plane supercells (from the cell-match suggestions) applied
     # before stacking, e.g. 9x9 graphene under a 4x4 TiO2 slab.
     if body.get("host_repeat"):
@@ -728,6 +758,11 @@ def api_build(_query, body):
             from vasp_auto.cli import _parse_cell_spec
             struct = scale_cell(struct, _parse_cell_spec(struct, str(body["scale_cell"])))
             suffix += "_cell"
+        if body.get("rotate"):
+            selection, axis, angle = body["rotate"]
+            indices = parse_atom_selection(struct, str(selection))
+            struct = rotate_atoms(struct, indices, axis, float(angle))
+            suffix += "_rot"
         if body.get("freeze"):
             selection, axes = body["freeze"]
             indices = parse_atom_selection(struct, str(selection))
@@ -1099,8 +1134,21 @@ def api_neb(query, _body):
     return profile
 
 
+# Remote QE jobs exclude tmp/ from the rsync; the eigenvalue XML is pulled on
+# demand as a "heavy" file (harmless miss for VASP/local jobs).
+QE_SAVE_XML = "tmp/vasp_auto.save/data-file-schema.xml"
+
+
 def api_dos(query, _body):
-    job_dir = _analysis_query_dir(query)
+    job_dir = _analysis_query_dir(query, heavy=(QE_SAVE_XML,))
+    if job_engine(job_dir) == "qe":
+        dos = parse_qe_dos(job_dir)
+        if dos is None:
+            raise FileNotFoundError(
+                "No QE eigenvalues in this job — run a 'dos'/'nscf' calculation "
+                "(tmp/<prefix>.save/data-file-schema.xml must exist)."
+            )
+        return dos
     dos = py4vasp_tools.dos(job_dir) or parse_dos(job_dir / "vasprun.xml")
     if dos is None:
         raise FileNotFoundError(
@@ -1135,7 +1183,15 @@ def api_pdos(query, _body):
 
 
 def api_bands(query, _body):
-    job_dir = _analysis_query_dir(query)
+    job_dir = _analysis_query_dir(query, heavy=(QE_SAVE_XML,))
+    if job_engine(job_dir) == "qe":
+        bands = parse_qe_bands(job_dir)
+        if bands is None:
+            raise FileNotFoundError(
+                "No QE band eigenvalues in this job — run a 'bands' calculation "
+                "(a k-path) there first."
+            )
+        return bands
     bands = parse_bands(job_dir / "vasprun.xml", job_dir / "KPOINTS")
     if bands is None:
         raise FileNotFoundError(
@@ -1209,19 +1265,52 @@ def api_volume(query, _body):
                " — run with LCHARG (charge type) or LVHAR (workfunction type) first.")
         )
     from vasp_auto.chgcar import read_volumetric
-    return _volume_payload(read_volumetric(path), file_name, axis, fraction)
+    component = (query.get("component") or ["total"])[0].lower()
+    volume = read_volumetric(path, spin=(component == "spin"))
+    if component == "spin":
+        if volume.get("spin_data") is None:
+            raise FileNotFoundError(
+                f"No spin density in {file_name} — needs a spin-polarised run "
+                "(ISPIN=2) whose CHGCAR carries a second (magnetisation) block."
+            )
+        volume = {**volume, "data": volume["spin_data"]}
+        payload = _volume_payload(volume, file_name, axis, fraction)
+        payload["kind"] = "spin density ρ↑−ρ↓"
+        return payload
+    return _volume_payload(volume, file_name, axis, fraction)
+
+
+def _slot_dir(value, heavy: tuple[str, ...] = ()) -> Path:
+    """Resolve one analysis job slot to a local dir.
+
+    Accepts a bare path string (= local) or a {"path", "machine"} object, so a
+    multi-job analysis can mix machines. Remote slots route through
+    _analysis_dir (rsync into the cache + on-demand heavy files).
+    """
+    if isinstance(value, dict):
+        path, machine = value.get("path"), value.get("machine")
+    else:
+        path, machine = value, None
+    if not path or not str(path).strip():
+        raise ValueError("Missing job directory")
+    return _analysis_dir(str(path), machine, heavy=heavy)
 
 
 def api_chgdiff(_query, body):
-    """Δρ = ρ(total) − Σρ(parts) from job dirs/CHGCAR paths; writes CHGCAR_diff."""
+    """Δρ = ρ(total) − Σρ(parts) from job dirs/CHGCAR paths; writes CHGCAR_diff.
+
+    Each of total/parts may be a bare path (local) or {path, machine} — remote
+    jobs are captured (with their CHGCAR) into the cache and analyzed locally.
+    """
     from vasp_auto.chgcar import charge_difference
 
-    def chgcar_path(text):
-        path = Path(str(text)).expanduser().resolve()
-        return path if path.is_file() else path / "CHGCAR"
+    def chgcar_path(value):
+        resolved = _slot_dir(value, heavy=("CHGCAR",))
+        return resolved if resolved.is_file() else resolved / "CHGCAR"
 
     total = chgcar_path(body["total"])
-    parts = [chgcar_path(p) for p in body.get("parts") or [] if str(p).strip()]
+    parts = [chgcar_path(p) for p in body.get("parts") or []
+             if (p if isinstance(p, dict) else str(p).strip())]
     if not parts:
         raise ValueError("Charge difference needs at least one part to subtract")
     output = total.parent / "CHGCAR_diff"
@@ -1232,19 +1321,99 @@ def api_chgdiff(_query, body):
 
 
 def api_adsorption(_query, body):
-    """E_ads = E(slab+adsorbate) − E(slab) − scale·E(molecule) from job dirs."""
+    """E_ads = E(slab+adsorbate) − E(slab) − scale·E(molecule) from job dirs.
+
+    Each of total/slab/molecule may be a bare path or {path, machine}; VASP or
+    QE (read_job_energy dispatches on the engine)."""
     from vasp_auto.analysis import adsorption_energy
 
     def job_dir(key):
-        path = body.get(key)
-        if not path:
+        if not body.get(key):
             raise ValueError(f"Missing {key} job directory")
-        return Path(str(path)).expanduser().resolve()
+        return _slot_dir(body[key])
 
     return adsorption_energy(
         job_dir("total"), job_dir("slab"), job_dir("molecule"),
         molecule_scale=float(body.get("scale") or 1.0),
     )
+
+
+def api_surface(_query, body):
+    """Surface energy γ from a slab job and a bulk job (VASP or QE)."""
+    from vasp_auto.analysis import surface_energy
+
+    slab = _slot_dir(body.get("slab"))
+    bulk = _slot_dir(body.get("bulk"))
+    axis = "abc".index(str(body.get("axis") or "c").lower())
+    return surface_energy(slab, bulk, axis=axis)
+
+
+def api_gdiagram(_query, body):
+    """Free-energy diagram + overpotential from ordered reaction steps.
+
+    Each step: {label, delta_e | ads:{total,slab,molecule,scale}, freq_job?,
+    n_electrons?}; job dirs inside ads/freq_job may be {path, machine}."""
+    from vasp_auto.analysis import DEFAULT_TEMPERATURE_K, free_energy_diagram
+
+    def resolve(step):
+        out = dict(step)
+        if step.get("ads"):
+            out["ads"] = {k: (str(_slot_dir(v)) if k in ("total", "slab", "molecule") else v)
+                          for k, v in step["ads"].items()}
+        if step.get("freq_job"):
+            out["freq_job"] = str(_slot_dir(step["freq_job"]))
+        return out
+
+    steps = [resolve(s) for s in body.get("steps") or []]
+    if not steps:
+        raise ValueError("A free-energy diagram needs at least one step")
+    return free_energy_diagram(
+        steps,
+        temperature=float(body.get("T") or DEFAULT_TEMPERATURE_K),
+        potential=float(body.get("U") or 0.0),
+        u_equilibrium=float(body.get("U_eq") if body.get("U_eq") is not None else 1.23),
+    )
+
+
+def api_magmoms(query, _body):
+    """Per-atom magnetic moments from the last OUTCAR magnetization block."""
+    job_dir = _analysis_query_dir(query)
+    moments = parse_magmoms(job_dir / "OUTCAR")
+    if not moments:
+        raise FileNotFoundError(
+            "No per-atom magnetic moments in this job — needs a spin-polarised "
+            "run (ISPIN=2) whose OUTCAR has a 'magnetization (x)' table."
+        )
+    struct = read_poscar(job_dir / "POSCAR")
+    symbols = per_atom_symbols(struct)
+    rows = [{"index": i + 1, "element": symbols[i] if i < len(symbols) else "?",
+             "moment": m} for i, m in enumerate(moments)]
+    return {"moments": rows, "total_moment": sum(moments), "natoms": len(moments)}
+
+
+def _dir_size(path: Path) -> int:
+    total = 0
+    for p in path.rglob("*"):
+        if p.is_file():
+            try:
+                total += p.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def api_cache_size(_query, _body):
+    """Size of the fetched-remote-results cache (volumetric pulls are big)."""
+    size = _dir_size(REMOTE_RESULT_CACHE) if REMOTE_RESULT_CACHE.exists() else 0
+    return {"bytes": size, "path": str(REMOTE_RESULT_CACHE)}
+
+
+def api_cache_clear(_query, _body):
+    """Delete the whole fetched-remote-results cache."""
+    import shutil as _shutil
+    if REMOTE_RESULT_CACHE.exists():
+        _shutil.rmtree(REMOTE_RESULT_CACHE)
+    return {"cleared": True, "path": str(REMOTE_RESULT_CACHE)}
 
 
 def api_thermo(query, _body):
@@ -1316,17 +1485,8 @@ def api_bader(_query, body):
 
 def api_match(_query, body):
     """Supercell suggestions for combining two structures with different cells."""
-    def load(key):
-        inline = body.get(f"{key}_struct")
-        if inline:
-            return _struct_from_payload(inline)
-        path = body.get(key)
-        if not path:
-            raise ValueError(f"Missing {key} structure")
-        return read_poscar(_find_poscar(Path(str(path)).expanduser().resolve()))
-
     matches = match_supercells(
-        load("host"), load("guest"),
+        _load_struct_arg(body, "host"), _load_struct_arg(body, "guest"),
         max_repeat=int(body.get("max_repeat") or 6),
         max_strain=float(body.get("max_strain") or 0.1),
         gamma_tol=float(body.get("gamma_tol") or 8.0),
@@ -1753,8 +1913,11 @@ def _spawn_cli_job(args: list[str], target_label: str) -> dict:
     log_handle = log_path.open("w", encoding="utf-8")
     log_handle.write("$ vasp-auto " + " ".join(args) + "\n\n")
     log_handle.flush()
+    # Own session so the ✕ stop button can killpg the whole tree (mpirun/vasp),
+    # not just the python wrapper.
     process = subprocess.Popen(
-        command, cwd=REPO_ROOT, stdout=log_handle, stderr=subprocess.STDOUT, text=True
+        command, cwd=REPO_ROOT, stdout=log_handle, stderr=subprocess.STDOUT, text=True,
+        start_new_session=True,
     )
     with JOBS_LOCK:
         JOBS[token] = {
@@ -1855,6 +2018,7 @@ def _job_state(job: dict) -> dict:
         "running": returncode is None,
         "stopped": job["stopped"],
         "returncode": returncode,
+        "pid": job["process"].pid,
     }
 
 
@@ -1864,10 +2028,193 @@ def api_stop(_query, body):
         job = JOBS.get(token)
     if job is None:
         raise KeyError(f"Unknown job: {token}")
-    if job["process"].poll() is None:
+    proc = job["process"]
+    if proc.poll() is None:
         job["stopped"] = True
-        job["process"].terminate()
+        try:  # kill the whole process group (mpirun/vasp children), see start_new_session
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            proc.terminate()
+        _mark_terminated_local(job.get("target"))
     return {"token": token, "stopped": True}
+
+
+def _mark_terminated_local(target) -> None:
+    """Best-effort: drop a .terminated marker in the newest unfinished job dir for
+    ``target``'s case, so the Results/Running tabs read "terminated" not "running".
+
+    ponytail: heuristic — the UI doesn't capture the CLI's chosen job number, so
+    match the case name and pick the newest dir without a job.log. A miss just
+    leaves the row reading "running"; nothing outside jobs_root is touched.
+    """
+    if not target:
+        return
+    try:
+        t = Path(target).expanduser().resolve()
+        jobs_root = Path(merge_local_config(load_config(), t)["jobs_root"]).resolve()
+        cands = [d for d in [*jobs_root.glob(f"*_{t.name}"), jobs_root / t.name]
+                 if d.is_dir() and not (d / "job.log").exists()]
+        if cands:
+            (max(cands, key=lambda d: d.stat().st_mtime) / ".terminated").write_text(
+                "terminated", encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _assert_under_remote_root(machine: str, remote: dict, remote_dir: str) -> str:
+    """Validate a client-supplied remote path sits strictly inside the machine's
+    remote_root before any destructive op. The boundary is the machine's config,
+    never the client. Returns the normalized path."""
+    root = (remote.get("remote_root") or "").rstrip("/")
+    rd = remote_dir.rstrip("/")
+    if not root:
+        raise ValueError(f"{machine} has no remote_root configured — refusing to touch {rd}.")
+    if ".." in rd.split("/") or rd == root or not rd.startswith(root + "/"):
+        raise ValueError(f"Refusing: {rd} is not inside {machine}'s work folder ({root}).")
+    return rd
+
+
+def api_job_delete(_query, body):
+    """Delete a job/case folder. Local: strictly inside the configured jobs_root.
+    Remote (``machine`` given): ``rm -rf`` over SSH, strictly inside that machine's
+    remote_root. The delete boundary always comes from server config, never the
+    client, so nothing outside can be removed."""
+    machine = body.get("machine")
+    if machine and _is_remote_machine(machine):
+        remote = _resolve_remote(machine)
+        rd = _assert_under_remote_root(machine, remote, str(body["job_dir"]))
+        delete_remote_dir(remote, rd)
+        return {"deleted": rd, "machine": machine}
+    job_dir = Path(body["job_dir"]).expanduser().resolve()
+    jobs_root = Path(_config()["jobs_root"]).resolve()
+    if job_dir == jobs_root or not job_dir.is_relative_to(jobs_root):
+        raise ValueError("Refusing to delete: only folders inside the jobs/results folder can be removed.")
+    if not job_dir.is_dir():
+        raise ValueError(f"Not a folder: {job_dir}")
+    shutil.rmtree(job_dir)
+    return {"deleted": str(job_dir)}
+
+
+def api_kill_remote(_query, body):
+    """Stop a running detached (offload) job on its remote machine, via its
+    local mirror's ``.remote.json`` (machine + control dir + PID)."""
+    job_dir = Path(body["job_dir"]).expanduser().resolve()
+    marker = read_remote_marker(job_dir)
+    if not marker:
+        raise ValueError("This case was not submitted to a remote machine.")
+    if marker.get("mode") != "ssh_detached":
+        raise ValueError("Only detached (offload) jobs can be stopped from here — "
+                         "scheduler jobs stop with the queue's scancel/qdel.")
+    remote = _remote_for_marker(marker)
+    result = kill_detached_job(remote, marker.get("control_dir", ""), marker.get("pid"))
+    # Mark the local mirror so the Results tab reads "terminated" right away.
+    try:
+        (job_dir / ".terminated").write_text("terminated", encoding="utf-8")
+    except OSError:
+        pass
+    result["machine"] = marker.get("machine") or marker.get("host")
+    result["pid"] = marker.get("pid")
+    return result
+
+
+def _kill_local_job(job_dir: Path) -> dict:
+    """Stop a local run: the process group of the PID recorded in ``.pid``, plus
+    any live process whose cwd is inside the job dir — the same two signals the
+    Running board uses, so anything it shows as "running" can be stopped."""
+    from vasp_auto.workflow import pids_in_dir
+    killed: list[int] = []
+    pid = read_pid(job_dir)
+    if pid is not None:
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+            killed.append(pid)
+        except (ProcessLookupError, PermissionError):
+            pass
+    for p in pids_in_dir(job_dir):
+        try:
+            os.kill(p, signal.SIGTERM)
+            killed.append(p)
+        except (ProcessLookupError, PermissionError):
+            pass
+    if killed:
+        return {"killed": True, "pid": killed[0]}
+    return {"killed": False, "pid": pid,
+            "raw": "no live process found for this job — already finished?"}
+
+
+def api_terminate(_query, body):
+    """Stop a job by its job directory — one entry point for the Results tab.
+    A job browsed on a remote machine (``machine`` given) is killed there by the
+    PID in its ``<dir>/.pid``; a detached-offload job dies on its remote via its
+    marker; a local run dies by its recorded PID. Either way a ``.terminated``
+    marker is dropped so the row reads "terminated"."""
+    machine = body.get("machine")
+    if machine and _is_remote_machine(machine):
+        remote = _resolve_remote(machine)
+        result = kill_job_by_dir(remote, str(body["job_dir"]))
+        result["machine"] = machine
+        return result
+    job_dir = Path(body["job_dir"]).expanduser().resolve()
+    marker = read_remote_marker(job_dir)
+    if marker and marker.get("mode") == "ssh_detached":
+        remote = _remote_for_marker(marker)
+        result = kill_detached_job(remote, marker.get("control_dir", ""), marker.get("pid"))
+        result["machine"] = marker.get("machine") or marker.get("host")
+        result.setdefault("pid", marker.get("pid"))
+    else:
+        result = _kill_local_job(job_dir)
+    try:
+        (job_dir / ".terminated").write_text("terminated", encoding="utf-8")
+    except OSError:
+        pass
+    return result
+
+
+def api_resume_job(_query, body):
+    """Resume one specific job directory in place (local, detached-offload, or a
+    job browsed on a remote machine), streaming to the live log like a fresh run.
+    Clears any stale ``.terminated`` marker first so the restarted job isn't still
+    shown as terminated."""
+    cpus = body.get("cpus")
+    machine = body.get("machine")
+    # A job browsed directly on a remote machine: resume it in place on that
+    # machine (offload machines resume detached; others run over SSH).
+    if machine and _is_remote_machine(machine):
+        remote = _resolve_remote(machine)
+        remote_dir = str(body["job_dir"]).rstrip("/")
+        clear_remote_terminated(remote, remote_dir)
+        args = ["--resume-job-dir", remote_dir]
+        if cpus:
+            args += ["-n", str(cpus)]
+        if resolve_remote_run_mode(remote) == "ssh_detached":
+            mirror = Path(load_config()["jobs_root"]).resolve() / Path(remote_dir).name
+            mirror.mkdir(parents=True, exist_ok=True)
+            args += ["--resume-local-mirror", str(mirror)]
+        args += ["--remote-config", _write_remote_config(machine)]
+        return _spawn_cli_job(args, f"{machine}:{remote_dir}")
+
+    job_dir = Path(body["job_dir"]).expanduser().resolve()
+    marker = read_remote_marker(job_dir)
+    try:
+        (job_dir / ".terminated").unlink()
+    except OSError:
+        pass
+    if marker and marker.get("mode") == "ssh_detached":
+        machine = marker.get("machine") or marker.get("host")
+        remote = _resolve_remote(machine)
+        remote_dir = _resolve_remote_job_dir(job_dir, marker, remote) or marker.get("remote_dir")
+        if not remote_dir:
+            raise ValueError("No remote directory recorded for this offload job.")
+        args = ["--resume-job-dir", remote_dir]
+        if cpus:
+            args += ["-n", str(cpus)]
+        args += ["--resume-local-mirror", str(job_dir),
+                 "--remote-config", _write_remote_config(machine)]
+        return _spawn_cli_job(args, f"{machine}:{remote_dir}")
+    args = ["--resume-job-dir", str(job_dir)]
+    if cpus:
+        args += ["-n", str(cpus)]
+    return _spawn_cli_job(args, str(job_dir))
 
 
 def api_jobs(_query, _body):
@@ -1875,6 +2222,21 @@ def api_jobs(_query, _body):
         jobs = [_job_state(job) for job in JOBS.values()]
     jobs.sort(key=lambda j: j["started"], reverse=True)
     return {"jobs": jobs}
+
+
+def api_running(query, _body):
+    """Jobs running now across the local machine + every configured remote.
+
+    ?all=1 lists finished/prepared jobs too; ?machine=local|<name> narrows the
+    scan to one machine (default: everything). Unreachable machines are returned
+    under "errors" so one down machine doesn't blank the whole board.
+    """
+    all_jobs = (query.get("all", ["0"])[0] or "0").lower() in ("1", "true", "yes")
+    machine = (query.get("machine", [""])[0] or "").strip() or None
+    result = list_running_jobs(_config(), running_only=not all_jobs, machine=machine)
+    for j in result["jobs"]:
+        j["modified"] = _fmt_ts(j.get("modified_ts"))
+    return result
 
 
 def api_job(query, _body):
@@ -2204,6 +2566,7 @@ GET_ROUTES = {
     "/api/incar_options": api_incar_options,
     "/api/file": api_file_get,
     "/api/jobs": api_jobs,
+    "/api/running": api_running,
     "/api/job": api_job,
     "/api/trajectory": api_trajectory,
     "/api/neb": api_neb,
@@ -2216,6 +2579,8 @@ GET_ROUTES = {
     "/api/dband": api_dband,
     "/api/workfunction": api_workfunction,
     "/api/optics": api_optics,
+    "/api/magmoms": api_magmoms,
+    "/api/cache_size": api_cache_size,
 }
 
 POST_ROUTES = {
@@ -2228,12 +2593,19 @@ POST_ROUTES = {
     "/api/match": api_match,
     "/api/chgdiff": api_chgdiff,
     "/api/adsorption": api_adsorption,
+    "/api/surface": api_surface,
+    "/api/gdiagram": api_gdiagram,
+    "/api/cache_clear": api_cache_clear,
     "/api/bader": api_bader,
     "/api/preview": api_preview,
     "/api/incar_apply": api_incar_apply,
     "/api/run": api_run,
     "/api/resume": api_resume,
     "/api/stop": api_stop,
+    "/api/kill_remote": api_kill_remote,
+    "/api/terminate": api_terminate,
+    "/api/resume_job": api_resume_job,
+    "/api/job_delete": api_job_delete,
     "/api/report": api_report,
     "/api/mlrelax": api_mlrelax,
     "/api/mlenergy": api_mlenergy,

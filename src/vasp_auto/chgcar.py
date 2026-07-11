@@ -13,11 +13,15 @@ import subprocess
 from pathlib import Path
 
 
-def read_volumetric(path: Path) -> dict:
+def read_volumetric(path: Path, spin: bool = False) -> dict:
     """Read a CHGCAR/LOCPOT/AECCAR file into {"poscar_lines", "grid", "data"}.
 
     CHGCAR-family files store rho*V_cell on the grid; LOCPOT stores the
     potential in eV directly. This function does not rescale either.
+
+    With ``spin=True`` a spin-polarised CHGCAR's second grid block
+    (magnetisation ρ↑−ρ↓) is also returned under ``"spin_data"`` — None when
+    the file holds no second block (non-spin run, LOCPOT).
     """
     path = Path(path)
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -45,14 +49,35 @@ def read_volumetric(path: Path) -> dict:
     idx += 1
 
     npoints = nx * ny * nz
-    data: list[float] = []
-    while idx < len(lines) and len(data) < npoints:
-        data.extend(float(x) for x in lines[idx].split())
-        idx += 1
+
+    def read_block(start: int) -> tuple[list[float], int]:
+        block: list[float] = []
+        i = start
+        while i < len(lines) and len(block) < npoints:
+            block.extend(float(x) for x in lines[i].split())
+            i += 1
+        return block, i
+
+    data, idx = read_block(idx)
     if len(data) < npoints:
         raise ValueError(f"Grid data is truncated in {path}: {len(data)} < {npoints}")
 
-    return {"poscar_lines": poscar_lines, "grid": (nx, ny, nz), "data": data[:npoints]}
+    result = {"poscar_lines": poscar_lines, "grid": (nx, ny, nz), "data": data[:npoints]}
+
+    if spin:
+        # After the total block come PAW augmentation lines, then the grid
+        # dimensions repeat to start the magnetisation block. Scan for that.
+        result["spin_data"] = None
+        dims = [str(nx), str(ny), str(nz)]
+        while idx < len(lines):
+            if lines[idx].split() == dims:
+                spin_data, _ = read_block(idx + 1)
+                if len(spin_data) >= npoints:
+                    result["spin_data"] = spin_data[:npoints]
+                break
+            idx += 1
+
+    return result
 
 
 def write_volumetric(volume: dict, path: Path):

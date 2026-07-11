@@ -27,6 +27,8 @@ PW_OUT = """
 !    total energy              =     -15.83792000 Ry
      Total force =     0.000100     Total SCF correction =     0.000001
      number of bfgs steps      =      4
+
+     JOB DONE.
 """
 
 
@@ -188,6 +190,70 @@ def test_parse_pw_output(tmp_path):
 
 def test_parse_pw_output_missing(tmp_path):
     assert parse_pw_output(tmp_path / "none.out") is None
+
+
+DATA_FILE_SCHEMA = """<?xml version="1.0" encoding="UTF-8"?>
+<qes:espresso xmlns:qes="http://www.quantum-espresso.org/ns/qes/qes-1.0">
+ <output>
+  <band_structure>
+   <fermi_energy>0.5</fermi_energy>
+   <ks_energies>
+    <k_point weight="0.5">0.0 0.0 0.0</k_point>
+    <eigenvalues size="3">-0.1 0.0 0.2</eigenvalues>
+    <occupations size="3">1.0 1.0 0.0</occupations>
+   </ks_energies>
+   <ks_energies>
+    <k_point weight="0.5">0.5 0.0 0.0</k_point>
+    <eigenvalues size="3">-0.05 0.1 0.3</eigenvalues>
+    <occupations size="3">1.0 0.0 0.0</occupations>
+   </ks_energies>
+  </band_structure>
+ </output>
+</qes:espresso>
+"""
+
+
+def _qe_dos_job(tmp_path):
+    from vasp_auto.parser import HARTREE_TO_EV
+
+    job = tmp_path / "qe_dos"
+    save = job / "tmp" / "vasp_auto.save"
+    save.mkdir(parents=True)
+    (job / ".engine").write_text("qe", encoding="utf-8")
+    (save / "data-file-schema.xml").write_text(DATA_FILE_SCHEMA, encoding="utf-8")
+    return job, HARTREE_TO_EV
+
+
+def test_parse_qe_eigenvalues(tmp_path):
+    from vasp_auto.parser import parse_qe_eigenvalues
+
+    job, h = _qe_dos_job(tmp_path)
+    data = parse_qe_eigenvalues(job)
+    assert data["efermi"] == pytest.approx(0.5 * h)
+    assert len(data["kpoints"]) == 2
+    assert data["eigenvalues"][0][0] == pytest.approx(-0.1 * h)
+    assert data["weights"] == pytest.approx([0.5, 0.5])
+
+
+def test_parse_qe_dos(tmp_path):
+    from vasp_auto.parser import parse_qe_dos
+
+    job, h = _qe_dos_job(tmp_path)
+    dos = parse_qe_dos(job)
+    assert dos["efermi"] == pytest.approx(0.5 * h)
+    assert len(dos["energies"]) == len(dos["total"][0])
+    assert max(dos["total"][0]) > 0  # peaks where eigenvalues sit
+    assert parse_qe_dos(tmp_path / "not_a_job") is None
+
+
+def test_parse_qe_bands(tmp_path):
+    from vasp_auto.parser import parse_qe_bands
+
+    job, h = _qe_dos_job(tmp_path)
+    bands = parse_qe_bands(job)
+    assert bands["distances"] == pytest.approx([0.0, 0.5])
+    assert len(bands["bands"][0]) == 3          # 3 bands, one spin channel
+    assert len(bands["bands"][0][0]) == 2        # over 2 k-points
 
 
 def test_parse_pw_final_structure(tmp_path):

@@ -21,12 +21,22 @@ DEFAULT_TEMPERATURE_K = 298.15
 def read_job_energy(job_dir: Path) -> dict:
     """Final energy and convergence flag of a finished job directory.
 
-    Prefers OUTCAR (free energy TOTEN); falls back to vasprun.xml. Raises
-    when the directory holds neither, naming the directory.
+    QE jobs (``.engine`` = qe, or a pw.out present) read pw.out; VASP jobs
+    prefer OUTCAR (free energy TOTEN) and fall back to vasprun.xml. Raises
+    when the directory holds no readable energy, naming the directory.
     """
-    from vasp_auto.workflow import parse_outcar_summary
+    from vasp_auto.workflow import job_engine, parse_outcar_summary
 
     job_dir = Path(job_dir)
+
+    if job_engine(job_dir) == "qe":
+        from vasp_auto.parser import parse_pw_output
+
+        summary = parse_pw_output(job_dir / "pw.out")
+        if summary and summary.get("energy_eV") is not None:
+            return {"energy_eV": summary["energy_eV"], "converged": summary["converged"]}
+        raise FileNotFoundError(f"No final energy found (pw.out) in {job_dir}")
+
     outcar = job_dir / "OUTCAR"
     if outcar.exists():
         summary = parse_outcar_summary(outcar)
@@ -63,6 +73,141 @@ def adsorption_energy(
         "molecule_energy_eV": molecule["energy_eV"],
         "molecule_scale": molecule_scale,
         "all_converged": total["converged"] and slab["converged"] and molecule["converged"],
+    }
+
+
+EV_A2_TO_J_M2 = 16.021766208  # 1 eV/Å² = 16.0218 J/m²
+
+
+def _cross_area(lattice: list[list[float]], axis: int) -> float:
+    """Area (Å²) of the cell face perpendicular to `axis` = |a⃗ × b⃗| of the
+    two other lattice vectors."""
+    u = lattice[(axis + 1) % 3]
+    v = lattice[(axis + 2) % 3]
+    cx = u[1] * v[2] - u[2] * v[1]
+    cy = u[2] * v[0] - u[0] * v[2]
+    cz = u[0] * v[1] - u[1] * v[0]
+    return math.sqrt(cx * cx + cy * cy + cz * cz)
+
+
+def surface_energy(slab_dir: Path, bulk_dir: Path, axis: int = 2) -> dict:
+    """Surface energy γ = (E_slab − (N_slab/N_bulk)·E_bulk) / (2A).
+
+    E from `read_job_energy` (VASP or QE). A is the slab cell face ⟂ `axis`
+    (0=a,1=b,2=c; default c ⇒ area of the a,b plane). N are atom counts from
+    each POSCAR. Two surfaces ⇒ the factor 2. Returns eV/Å² and J/m².
+    """
+    from vasp_auto.structure import read_poscar
+
+    slab_dir, bulk_dir = Path(slab_dir), Path(bulk_dir)
+    e_slab = read_job_energy(slab_dir)
+    e_bulk = read_job_energy(bulk_dir)
+
+    slab_struct = read_poscar(slab_dir / "POSCAR")
+    bulk_struct = read_poscar(bulk_dir / "POSCAR")
+    n_slab = sum(slab_struct["counts"])
+    n_bulk = sum(bulk_struct["counts"])
+    if n_bulk == 0:
+        raise ValueError(f"Bulk POSCAR in {bulk_dir} has no atoms")
+
+    scale = slab_struct["scale"]
+    if scale <= 0:
+        scale = 1.0  # negative-scale (target-volume) POSCARs are unusual for slabs
+    lattice = [[x * scale for x in row] for row in slab_struct["lattice"]]
+    area = _cross_area(lattice, axis)
+
+    gamma = (e_slab["energy_eV"] - (n_slab / n_bulk) * e_bulk["energy_eV"]) / (2.0 * area)
+    return {
+        "surface_energy_eV_A2": gamma,
+        "surface_energy_J_m2": gamma * EV_A2_TO_J_M2,
+        "slab_energy_eV": e_slab["energy_eV"],
+        "bulk_energy_eV": e_bulk["energy_eV"],
+        "n_slab": n_slab,
+        "n_bulk": n_bulk,
+        "area_A2": area,
+        "axis": axis,
+        "all_converged": e_slab["converged"] and e_bulk["converged"],
+    }
+
+
+def free_energy_diagram(
+    steps: list[dict],
+    temperature: float = DEFAULT_TEMPERATURE_K,
+    potential: float = 0.0,
+    u_equilibrium: float = 1.23,
+) -> dict:
+    """Cumulative free-energy diagram + overpotential (computational H electrode).
+
+    `steps` is an ordered list; each step is a *reaction step* whose ΔG is:
+
+        ΔG = ΔE  + Δ(g_correction)  − n·e·U
+
+    where per step:
+      - ΔE is either an explicit ``delta_e`` (eV) or, when ``ads`` =
+        ``{total, slab, molecule, scale?}`` job dirs is given, the adsorption
+        energy of that step via `adsorption_energy`.
+      - Δ(g_correction) comes from `thermo_from_job(freq_job, T)` when a
+        ``freq_job`` dir is given (ZPE + U_vib − T·S), else 0.
+      - ``n_electrons`` (default 0) couples the step to the potential U
+        (proton-coupled electron transfer): each transferred electron lowers
+        ΔG by e·U.
+
+    Returns the ΔG per step and the cumulative staircase at U=0 and at U, the
+    potential-determining step, the limiting potential U_L = −max(ΔG_i at U=0)/e
+    and the overpotential η = |U_equilibrium − U_L| (sign per the reaction the
+    caller supplies; 1.23 V is the OER/ORR default).
+    """
+    per_step = []
+    for i, step in enumerate(steps):
+        if "delta_e" in step and step["delta_e"] is not None:
+            delta_e = float(step["delta_e"])
+        elif step.get("ads"):
+            ads = step["ads"]
+            delta_e = adsorption_energy(
+                Path(ads["total"]), Path(ads["slab"]), Path(ads["molecule"]),
+                molecule_scale=float(ads.get("scale") or 1.0),
+            )["adsorption_energy_eV"]
+        else:
+            raise ValueError(f"Step {i} ({step.get('label')}) needs delta_e or ads job dirs")
+
+        g_corr = 0.0
+        if step.get("freq_job"):
+            g_corr = thermo_from_job(Path(step["freq_job"]), temperature)["g_correction_eV"]
+
+        n_e = float(step.get("n_electrons") or 0.0)
+        dg0 = delta_e + g_corr            # ΔG at U = 0
+        dg = dg0 - n_e * potential        # ΔG at the applied potential
+        per_step.append({
+            "label": step.get("label", f"step {i + 1}"),
+            "delta_e_eV": delta_e,
+            "g_correction_eV": g_corr,
+            "n_electrons": n_e,
+            "delta_g0_eV": dg0,
+            "delta_g_eV": dg,
+        })
+
+    def _cumulative(key):
+        cum, total = [0.0], 0.0
+        for s in per_step:
+            total += s[key]
+            cum.append(total)
+        return cum
+
+    dg0s = [s["delta_g0_eV"] for s in per_step]
+    pds = max(range(len(per_step)), key=lambda i: dg0s[i]) if per_step else None
+    max_dg0 = max(dg0s) if per_step else 0.0
+    u_limiting = -max_dg0  # per electron; positive ΔG uphill ⇒ negative U_L
+    return {
+        "temperature_K": temperature,
+        "potential_V": potential,
+        "u_equilibrium_V": u_equilibrium,
+        "steps": per_step,
+        "cumulative_g0_eV": _cumulative("delta_g0_eV"),
+        "cumulative_g_eV": _cumulative("delta_g_eV"),
+        "potential_determining_step": per_step[pds]["label"] if pds is not None else None,
+        "max_delta_g0_eV": max_dg0,
+        "limiting_potential_V": u_limiting,
+        "overpotential_V": abs(u_equilibrium - u_limiting),
     }
 
 

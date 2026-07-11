@@ -555,3 +555,147 @@ def parse_pw_final_structure(pw_out_path: Path) -> dict | None:
         "coords": coords,
         "flags": [[] for _ in coords],
     }
+
+
+# --- Quantum ESPRESSO eigenvalues / DOS / bands -----------------------------
+
+HARTREE_TO_EV = 2.0 * RY_TO_EV
+
+
+def _localname(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _find_local(elem, name: str):
+    for e in elem.iter():
+        if _localname(e.tag) == name:
+            return e
+    return None
+
+
+def _find_qe_save_xml(job_dir: Path) -> Path | None:
+    """Locate a pw.x <prefix>.save/data-file-schema.xml under a job dir.
+
+    QE writes outdir=./tmp, prefix=vasp_auto (qe_tools), so the default is
+    tmp/vasp_auto.save/data-file-schema.xml; fall back to any *.save match.
+    """
+    job_dir = Path(job_dir)
+    default = job_dir / "tmp" / "vasp_auto.save" / "data-file-schema.xml"
+    if default.exists():
+        return default
+    for pattern in ("tmp/*.save/data-file-schema.xml",
+                    "*.save/data-file-schema.xml",
+                    "**/data-file-schema.xml"):
+        for match in sorted(job_dir.glob(pattern)):
+            return match
+    return None
+
+
+def parse_qe_eigenvalues(job_dir: Path) -> dict | None:
+    """K-points, eigenvalues (eV), occupations and E_Fermi (eV) from a pw.x
+    data-file-schema.xml. Returns None when no such file exists.
+
+    {"efermi", "kpoints": [[kx,ky,kz], ...], "weights": [...],
+     "eigenvalues": [[e_band, ...] per k], "occupations": [[...] per k]}.
+    Eigenvalues/Fermi are converted Hartree→eV; k-points are the file's
+    2π/alat cartesian coordinates (only their spacing matters for bands).
+    """
+    xml = _find_qe_save_xml(job_dir)
+    if xml is None:
+        return None
+    try:
+        root = ET.parse(xml).getroot()
+    except ET.ParseError:
+        return None
+
+    band = _find_local(root, "band_structure")
+    if band is None:
+        return None
+
+    efermi = None
+    fermi_node = _find_local(band, "fermi_energy")
+    if fermi_node is None:
+        fermi_node = _find_local(band, "highestOccupiedLevel")
+    if fermi_node is not None and fermi_node.text:
+        try:
+            efermi = float(fermi_node.text.split()[0]) * HARTREE_TO_EV
+        except ValueError:
+            pass
+
+    kpoints, weights, eigenvalues, occupations = [], [], [], []
+    for ks in band.iter():
+        if _localname(ks.tag) != "ks_energies":
+            continue
+        kp = _find_local(ks, "k_point")
+        eig = _find_local(ks, "eigenvalues")
+        if kp is None or eig is None or not eig.text:
+            continue
+        kpoints.append([float(x) for x in (kp.text or "").split()[:3]])
+        try:
+            weights.append(float(kp.get("weight", "1.0")))
+        except ValueError:
+            weights.append(1.0)
+        eigenvalues.append([float(x) * HARTREE_TO_EV for x in eig.text.split()])
+        occ = _find_local(ks, "occupations")
+        occupations.append([float(x) for x in occ.text.split()] if (occ is not None and occ.text) else [])
+
+    if not eigenvalues:
+        return None
+    return {"efermi": efermi, "kpoints": kpoints, "weights": weights,
+            "eigenvalues": eigenvalues, "occupations": occupations}
+
+
+def parse_qe_dos(job_dir: Path, sigma: float = 0.05, n_points: int = 600) -> dict | None:
+    """Total DOS by Gaussian-smearing QE eigenvalues, in the parse_dos shape.
+
+    {"efermi", "energies", "total": [channel]} — one channel (both spins
+    summed if the run was spin-polarised). ``sigma`` is the Gaussian width in
+    eV. None when the job has no QE eigenvalue file.
+    """
+    data = parse_qe_eigenvalues(job_dir)
+    if data is None:
+        return None
+
+    flat = [(e, w) for evs, w in zip(data["eigenvalues"], data["weights"]) for e in evs]
+    if not flat:
+        return None
+    emin = min(e for e, _ in flat) - 5.0 * sigma
+    emax = max(e for e, _ in flat) + 5.0 * sigma
+    step = (emax - emin) / (n_points - 1)
+    grid = [emin + i * step for i in range(n_points)]
+
+    norm = 1.0 / (sigma * math.sqrt(2.0 * math.pi))
+    two_s2 = 2.0 * sigma * sigma
+    channel = [0.0] * n_points
+    for e, w in flat:
+        lo = max(0, int((e - 5.0 * sigma - emin) / step))
+        hi = min(n_points, int((e + 5.0 * sigma - emin) / step) + 1)
+        for i in range(lo, hi):
+            d = grid[i] - e
+            channel[i] += w * norm * math.exp(-d * d / two_s2)
+
+    return {"efermi": data["efermi"], "energies": grid, "total": [channel]}
+
+
+def parse_qe_bands(job_dir: Path) -> dict | None:
+    """Band structure from QE eigenvalues, in the parse_bands shape.
+
+    {"efermi", "kpoints", "distances", "bands": [[per-k]... per band], "labels"}.
+    ``distances`` are cumulative |Δk| along the path (in the file's k units);
+    ``labels`` is empty (QE stores no high-symmetry names in this file).
+    """
+    data = parse_qe_eigenvalues(job_dir)
+    if data is None:
+        return None
+    kpoints = data["kpoints"]
+    if len(kpoints) < 2:
+        return None
+
+    distances = [0.0]
+    for a, b in zip(kpoints, kpoints[1:]):
+        distances.append(distances[-1] + math.sqrt(sum((a[i] - b[i]) ** 2 for i in range(3))))
+
+    n_bands = min(len(e) for e in data["eigenvalues"])
+    bands_one_spin = [[data["eigenvalues"][k][b] for k in range(len(kpoints))] for b in range(n_bands)]
+    return {"efermi": data["efermi"], "kpoints": kpoints, "distances": distances,
+            "bands": [bands_one_spin], "labels": []}

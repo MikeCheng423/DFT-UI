@@ -26,6 +26,7 @@ OUTCAR_TEXT = """ vasp.6.4.2 mock output
   some other line
   aborting loop because EDIFF is reached
   free  energy   TOTEN  =       -12.50000000 eV
+ General timing and accounting informations for this run:
 """
 
 OSZICAR_TEXT = """       N       E                     dE             d eps

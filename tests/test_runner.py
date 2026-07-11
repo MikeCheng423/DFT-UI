@@ -14,6 +14,7 @@ from vasp_auto.runner import (
     fetch_remote_results,
     list_remote_dir,
     list_remote_jobs,
+    list_running_jobs,
     poll_detached_job,
     read_remote_text,
     resolve_detached_job_dir,
@@ -724,22 +725,95 @@ def test_fetch_remote_results_rsync(tmp_path):
 def test_list_remote_jobs_parses_and_sorts():
     """list_remote_jobs parses the TSV the remote script prints, newest first."""
     remote = {"host": "c.edu", "remote_root": "/work"}
+    # Flags are o(utcar) v(asprun) z(oszicar) g(finished) k(illed) p(id present)
+    # a(ctually alive); fields: mtime, flags, type+conv, energy, pid, path.
     out = (
-        "1700000000\t100\t/work/Au13_relax\n"      # done (OUTCAR), oldest
-        "1700009999\t001\t/work/Fe2O3_scf\n"        # running (OSZICAR only), newest
-        "1700005000\t000\t/work/proj/NiO_prepared\n"  # prepared (nested), middle
+        "1700000000\t1011000\ts1\t-27.8644\t-\t/work/Au13_relax\n"   # done + converged, oldest
+        "1700009999\t0010000\ts0\t-\t-\t/work/Fe2O3_scf\n"           # OSZICAR, no live proc -> stalled
+        "1700005000\t0000000\tn0\t-\t-\t/work/proj/NiO_prepared\n"   # prepared NEB (nested)
+        "1700007000\t1010100\ts0\t-19.1\t-\t/work/CoO_killed\n"      # killed -> terminated
+        "1700008000\t1000011\ts0\t-5.5\t12345\t/work/Cu_live\n"      # PID alive -> running
+        "1700008200\t0010001\ts0\t-7.7\t-\t/work/Ni_cwd\n"           # live proc in dir -> running
+        "1700008500\t1000010\ts0\t-6.6\t999999\t/work/Zn_stalled\n"  # PID dead -> stalled
         "garbage line without tabs\n"
     )
     with patch("vasp_auto.runner.remote_command",
                return_value=subprocess.CompletedProcess([], 0, out, "")):
         rows = list_remote_jobs(remote, "/work")
 
-    assert [r["name"] for r in rows] == ["Fe2O3_scf", "NiO_prepared", "Au13_relax"]
-    assert rows[0]["status"] == "running" and rows[0]["modified_ts"] == 1700009999
+    st = {r["name"]: r["status"] for r in rows}
+    assert st == {"Fe2O3_scf": "stalled", "Zn_stalled": "stalled", "Cu_live": "running",
+                  "Ni_cwd": "running", "CoO_killed": "terminated",
+                  "NiO_prepared": "prepared", "Au13_relax": "done"}
+    assert rows[0]["modified_ts"] == 1700009999  # newest first
     done = next(r for r in rows if r["name"] == "Au13_relax")
-    assert done["status"] == "done" and done["has_outcar"] is True
+    assert done["has_outcar"] is True and done["converged"] is True
+    assert done["energy_eV"] == -27.8644
+    live = next(r for r in rows if r["name"] == "Cu_live")
+    assert live["pid"] == 12345
     nested = next(r for r in rows if r["name"] == "NiO_prepared")
-    assert nested["status"] == "prepared" and nested["rel"] == "proj/NiO_prepared"
+    assert nested["rel"] == "proj/NiO_prepared" and nested["calculation_type"] == "tss"
+
+
+def test_list_running_jobs_local_and_remote(tmp_path):
+    """Aggregates local running job dirs + remotes; a down machine → errors."""
+    import os
+    (tmp_path / "0001_run" / "").mkdir(parents=True)
+    (tmp_path / "0001_run" / "INCAR").write_text("X")
+    (tmp_path / "0001_run" / "OSZICAR").write_text("   1 F= -.1E+02 E0= -.2345E+02  d E=0\n")
+    (tmp_path / "0001_run" / ".pid").write_text(str(os.getpid()))  # alive -> running
+    (tmp_path / "0002_done").mkdir()
+    (tmp_path / "0002_done" / "OUTCAR").write_text(
+        "reached required accuracy\n General timing and accounting informations for this run:\n")
+    (tmp_path / "0003_stale").mkdir()   # output but nothing alive -> stalled, still on board
+    (tmp_path / "0003_stale" / "OSZICAR").write_text("x")
+    config = {
+        "jobs_root": str(tmp_path),
+        "remotes": {
+            "gpu": {"host": "c.edu", "remote_root": "/work"},
+            "noroot": {"host": "d.edu"},  # no remote_root → an error entry
+        },
+    }
+    remote_out = "1700009999\t0010011\ts0\t-\t4242\t/work/Fe2O3_scf\n"  # alive on the remote
+    with patch("vasp_auto.runner.remote_command",
+               return_value=subprocess.CompletedProcess([], 0, remote_out, "")):
+        res = list_running_jobs(config)
+
+    names = {(j["machine"], j["name"]) for j in res["jobs"]}
+    assert ("local", "0001_run") in names        # local running job included
+    assert ("gpu", "Fe2O3_scf") in names         # remote running job included
+    assert all(j["name"] != "0002_done" for j in res["jobs"])  # finished filtered out
+    local = next(j for j in res["jobs"] if j["name"] == "0001_run")
+    assert local["status"] == "running" and local["energy_eV"] == -23.45
+    assert local["pid"] == os.getpid()
+    stale = next(j for j in res["jobs"] if j["name"] == "0003_stale")
+    assert stale["status"] == "stalled"          # files alone don't mean running
+    assert {"machine": "noroot", "error": "no remote_root set"} in res["errors"]
+
+    # running_only=False also surfaces the finished local job.
+    with patch("vasp_auto.runner.remote_command",
+               return_value=subprocess.CompletedProcess([], 0, remote_out, "")):
+        every = list_running_jobs(config, running_only=False)
+    assert any(j["name"] == "0002_done" and j["status"] == "done" for j in every["jobs"])
+
+    # machine= narrows the scan: local-only never SSHes, one remote skips local.
+    local_only = list_running_jobs(config, machine="local")
+    assert all(j["machine"] == "local" for j in local_only["jobs"])
+    with patch("vasp_auto.runner.remote_command",
+               return_value=subprocess.CompletedProcess([], 0, remote_out, "")):
+        gpu_only = list_running_jobs(config, machine="gpu")
+    assert {j["machine"] for j in gpu_only["jobs"]} == {"gpu"}
+
+
+def test_list_running_jobs_survives_unreachable_remote(tmp_path):
+    """An SSH failure on one machine is captured, not raised."""
+    config = {"jobs_root": str(tmp_path),
+              "remotes": {"gpu": {"host": "c.edu", "remote_root": "/work"}}}
+    with patch("vasp_auto.runner.remote_command",
+               side_effect=OSError("ssh: connection refused")):
+        res = list_running_jobs(config)
+    assert res["jobs"] == []
+    assert res["errors"] and res["errors"][0]["machine"] == "gpu"
 
 
 def test_list_remote_jobs_raises_on_failure():

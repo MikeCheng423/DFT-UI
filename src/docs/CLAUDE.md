@@ -10,7 +10,7 @@ INCAR, KPOINTS, POTCAR, launches VASP through `mpirun`, and writes an Excel
 summary. It supports SCF, structure optimisation (treated as SCF with NSW>0),
 NEB/TSS, ASE structure import, and an automatic NELM+KPOINTS convergence scan.
 
-The long-term goal is a **human-readable GUI layer** on top of this engine — a
+The long-term goal is a **workflow-builder GUI layer** on top of this engine — a
 workflow builder where users pick a calculation type, adjust parameters through
 forms, chain tasks (convergence → optimisation → SCF → DOS), and view results,
 without writing a single INCAR line by hand. All planned GUI work must stay
@@ -37,7 +37,11 @@ src/vasp_auto/          Python package (the engine, the only source of truth)
                         combine_structures for deposition/heterostructures,
                         make_prototype crystal library, match_supercells
                         commensurate-cell search, add_adsorbate)
-  runner.py             mpirun invocation + SLURM/PBS submit scripts
+  runner.py             execution layer, local + remote: mpirun invocation,
+                        SLURM/PBS submit scripts, and all SSH/remote machinery
+                        (see "Execution model — local vs remote")
+  remote_setup.py       interactive remote-machine onboarding: SSH key
+                        provisioning, connection verify, save to config/UI store
   workflow.py           OUTCAR parsing (incl. magmoms), error detection +
                         auto-retry fixes, run-one-case helpers
   chain.py              chained workflows (relax → scf → dos); a leading
@@ -109,7 +113,161 @@ _archive/               historical outputs, not source
 
 ---
 
-## Known problems (as of 2026-06-13)
+## Execution model — local vs remote
+
+Every calculate path — plain run, convergence scan, chained workflow, resume —
+must stay available on **both** the local machine and any configured remote
+(standing rule, see Development conventions). This section is the map of which
+function owns which side; the historical how-we-got-here notes stay in the
+changelog below.
+
+### Local
+
+Jobs run in a numbered dir under `jobs_root` (`<NNNN>_<case>`).
+
+| concern | function |
+|---|---|
+| launch VASP / QE / ASE | `runner.run_vasp` / `run_qe` / `run_ase` — thin `mpirun` subprocess wrappers; `on_progress` streams run.log |
+| one case | `workflow.run_one_case` |
+| convergence scan | `convergence.converge_scf_case` |
+| chained workflow | `chain.run_workflow_case` |
+| resume in place | `workflow.resume_job` (CONTCAR→POSCAR, WAVECAR/CHGCAR kept warm, no new job number) |
+| local queue submit | `runner.submit_job` + `write_submit_script` (`scheduler: slurm\|pbs` writes submit.sh, `sbatch`/`qsub` from this host), `poll_job_status` |
+| results | UI `_scan_result_jobs` builds rows straight from job dirs on disk |
+
+### Remote
+
+**Machine list (shared UI + CLI):** a `remote:` block or `remotes:` map in
+config.yaml, merged with the UI Remote-tab's `remotes.json` by
+`config_loader.load_ui_remotes` — one inventory for `--remote NAME` and the UI;
+never duplicate a machine into config.yaml. `remote_setup.py` (interactive
+`python -m vasp_auto.remote_setup`) provisions the SSH key and saves the entry.
+Machine keys: host, user, port, ssh_key, ssh_options, remote_root,
+vasp_executable (a directory means `<dir>/vasp_std`), env_setup, run_mode,
+scheduler (+scheduler_options), potcar_root.
+
+**Three run modes** (per-machine `run_mode:`, resolved by
+`runner.resolve_remote_run_mode`; `scheduler: ssh|none|local` ⇒ direct ssh):
+
+| mode | what happens | laptop-off safe |
+|---|---|---|
+| scheduler (`slurm`/`pbs`) | inputs rsync'd, `sbatch`/`qsub` over SSH — `submit_job_remote` | yes (queue owns it) |
+| `ssh` (direct) | synchronous `mpirun` over SSH, results rsync'd back — `run_vasp_remote` is a drop-in for `run_vasp` | no |
+| `ssh_detached` (offload) | the whole engine runs remotely under `setsid` — `submit_job_detached` ships an inputs bundle + generated config; one-time `setup_remote_engine` (`--remote-setup`) pip-installs the wheel into `<remote_root>/.vasp_auto/venv` | yes |
+
+**Dispatch points** (where local vs remote is decided): `cli._process_case`
+resolves `remote` once at the top; `ssh_detached` short-circuits to
+`_run_detached_offload` (cli.py:2295), which forwards the calc flags via
+`_forward_calc_flags` so the remote CLI re-branches — convergence and workflows
+"just work" remotely. Otherwise the choice between `run_vasp` and
+`run_vasp_remote` is made per run/step/trial in `workflow.run_one_case`
+(workflow.py:703), `chain.py:192`, and `convergence.py:163` (`remote_subdir`
+keeps trials from different cases from colliding). Scheduler-mode chained
+workflows are rejected with a clear error; NEB/TSS offload is not supported yet
+(needs a single POSCAR).
+
+**runner.py remote inventory:**
+- transport: `remote_command`, `_transfer_dir` (rsync, scp fallback),
+  `fetch_remote_file`, `read_remote_text` (200 KB cap; POTCAR/binaries never
+  printed), `check_remote_connection`
+- submit/run: `submit_job_remote`, `run_vasp_remote`, `submit_job_detached`
+- offload engine: `build_engine_wheel`, `setup_remote_engine`,
+  `remote_engine_installed`
+- track/fetch: `poll_remote_job`, `poll_detached_job`,
+  `resolve_detached_job_dir`, `fetch_remote_results` (heavy binaries skipped
+  unless asked)
+- browse: `list_remote_jobs` (one-round-trip POSIX-sh walk; rows carry
+  status + `calculation_type`/`converged`/`energy_eV` so remote rows fill the
+  same Results columns as local ones), `list_remote_dir`, `list_remote_cases`
+- resume: `resume_job_remote` (synchronous, in place, nothing re-shipped),
+  `resume_job_detached` (setsid + control dir, power-off safe)
+- job control: `kill_job_by_dir` (SSH kill by `.pid` group + cwd-matched
+  processes), `kill_detached_job` (offload setsid group, rc=143),
+  `delete_remote_dir` (rm -rf; caller must guard with
+  `_assert_under_remote_root`), `clear_remote_terminated`
+
+**State and markers:** every remote run writes `.remote.json` into the local
+job dir (machine, mode, job_id/pid, remote_dir/control_dir); `build_row` and
+the UI read it. Detached runs number their own job dir on the remote
+(`<remote_root>/results/<NNNN>_<case>`), recorded through
+`VASP_AUTO_JOBDIR_FILE` → `<control_dir>/job_dir` and resolved back by
+`resolve_detached_job_dir`. `env_setup` (e.g.
+`source /opt/intel/oneapi/setvars.sh`) is sourced before every remote command
+so MKL/MPI resolve in non-interactive shells.
+
+**POTCAR:** ssh/scheduler modes rsync the locally built job dir, POTCAR
+included. Offload ships a locally pre-built POTCAR in the bundle — unless the
+machine sets `potcar_root`, in which case the remote builds its own from its
+library.
+
+**UI:** the Remote tab manages machines (`/api/remotes`,
+`/api/remote/{save,delete,test,status,fetch,setup}`); Calculate and Workflow
+tabs have run-on-machine selectors; the Results tab has a machine selector
+("All machines" aggregates local + every remote in the browser), a live remote
+job/file browser with per-file view/download (`/api/remote/jobs`,
+`/api/remote/files`, `/api/filetext`, `/download_remote` — constrained to the
+machine's `remote_root`), and `_analysis_dir` fetches a remote job into a local
+cache (`ui_logs/remote_results/<machine>/…`) so every analysis viewer
+(DOS/PDOS/bands/volume/report) works on remote jobs unchanged.
+
+**Caveat:** detached offload records the *wrapper's* return code — `rc=0` does
+not mean VASP succeeded. When a job "didn't run", read the remote `run.log`
+under the control dir.
+
+**QE parity:** `engine: qe` works through all three modes (pw.x on the
+remote); the `.engine` marker file travels with the job.
+
+**"What's running now" (cross-machine):**
+`runner.list_running_jobs(config, running_only=True, machine=None)` aggregates
+a local `jobs_root` scan (`_local_job_rows`, a pure-Python mirror of the
+`list_remote_jobs` shell walk) with each configured remote's
+`list_remote_jobs`; `machine=` narrows to `"local"` or one remote name (the
+Running tab's selector — "Local" never opens SSH). A machine that is
+unreachable or has no `remote_root` is collected into `errors` instead of
+aborting the listing. Surfaced as CLI `--list-jobs` (`--all` includes
+done/prepared) and the UI **Running** tab (GET `/api/running`,
+`?all=1&machine=NAME`), which auto-refreshes over SSH only while open and has
+a per-row 🛑 (see job control below).
+
+**Job status is a liveness check, not file existence.** A job dir reads:
+
+| status | meaning |
+|---|---|
+| `running` | something is *actually alive*: the PID recorded in `<job>/.pid` exists (`kill -0`), **or** a live process has its cwd inside the job dir (one `/proc/*/cwd` snapshot per scan — catches NEB/convergence subdir work and jobs with no `.pid`) |
+| `done` | genuinely finished per `workflow.job_finished`: `job.log` (written by `run_one_case` *before* `build_row`, so the returned row is already "done"), the OUTCAR `General timing` footer (legacy runs), QE `JOB DONE.`, or `ase_results.json` |
+| `stalled` | output or a `.pid` exists but nothing is alive — crashed or killed outside the app; kept on the Running board so dead jobs don't vanish |
+| `terminated` | stopped through the app (a `.terminated` marker in the job dir) |
+| `prepared` | inputs only, never started |
+
+The same rule lives in three places so every view agrees: `_local_job_rows`
+(local Python), the `list_remote_jobs` POSIX-sh walk (checked *on* the remote,
+so PIDs are never misread across machines), and `workflow.terminal_status`
+(Results rows via `build_row`). `run_one_case` writes `.pid` around every
+engine run (vasp/qe/ase and the remote-ssh wrapper) and clears it on return;
+rows carry `pid` and the UI shows it (Running rows, job-chip tooltips).
+
+**Job control — terminate / delete / resume. The UI drives local AND every
+remote machine identically:** one endpoint per action; the row's `machine`
+field selects the side, and the server acts over SSH for remote rows.
+
+| action | local | remote | surfaced as |
+|---|---|---|---|
+| terminate | `server._kill_local_job`: `os.killpg` of the `.pid` group + SIGTERM every process whose cwd is in the dir (`workflow.pids_in_dir`) | `runner.kill_job_by_dir` over SSH — same two signals, works for jobs this host never launched; detached offload via `runner.kill_detached_job` (setsid group from the `.remote.json` PID, stamps `rc=143` so polls read completed) | POST `/api/terminate` `{job_dir[,machine]}` — Running-tab 🛑 per row (on a `stalled` row it just drops `.terminated` to clear the board), Results bulk 🛑; CLI `--kill JOB_DIR` (detached offload) |
+| delete folder | `shutil.rmtree`, strictly inside `jobs_root` | `rm -rf` over SSH via `runner.delete_remote_dir`, strictly inside that machine's `remote_root` (`_assert_under_remote_root`; the boundary comes from server config, never the client — root itself and `..` refused) | POST `/api/job_delete` `{job_dir[,machine]}` — Results bulk 🗑 |
+| resume in place | `--resume-job-dir` (newest CONTCAR, own INCAR/KPOINTS/POTCAR, no new job number) | a remote-browsed dir resumes on its machine (`--remote-config`; offload machines resume detached + `--resume-local-mirror`); `runner.clear_remote_terminated` removes a stale marker first | POST `/api/resume_job` `{job_dir[,machine,cpus]}` — Results bulk ▶ |
+
+The Results tab has a checkbox per row — local **and** remote-browsed rows —
+feeding a bulk-action bar (▶ Resume / 🛑 Terminate / 🗑 Delete folder);
+remote rows send `{machine, job_dir}` so the same endpoints run over SSH.
+UI job chips (`_spawn_cli_job`) start their own session
+(`start_new_session=True`) so the ✕ stop kills the whole mpirun/vasp tree via
+`os.killpg`, not just the CLI wrapper. Markers: `.pid` (live), `.terminated`
+(app-killed). Caveat: jobs started before `.pid` existed can still be
+terminated through the cwd match, but only while a process is alive in the dir.
+
+---
+
+## Known problems (as of 2026-07-03)
 
 > Items 1–14 were addressed in the 2026-06-11 build-out (two passes). A
 > third pass on 2026-06-12 (v0.4.0) added the friendly UI redesign, spin
@@ -239,6 +397,55 @@ _archive/               historical outputs, not source
 > `nl_builder`, `nl_agent`). New server route `/api/molecule` feeds the JS
 > quick-build (`adsorptionBuild` fetches the geometry and pushes all atoms).
 > Test: `test_add_adsorbate_molecule_places_all_atoms`.
+> A fifteenth pass (2026-07-03, in the working tree) added a **DFT+U group to
+> the INCAR catalog** (`incar_catalog.py`: LDAU/LDAUTYPE/LDAUL/LDAUU/LDAUJ/
+> LMAXMIX with plain-language options, per-species vectors in POSCAR order)
+> and made **remote result rows match local columns**: the `list_remote_jobs`
+> POSIX-sh walk now also emits calc type (scf/convergence/tss), a
+> reached-required-accuracy converged flag, and the last OSZICAR `E0=` energy,
+> parsed into `calculation_type`/`converged`/`energy_eV` per row.
+> `tests/test_remote_analysis.py` covers the remote analysis cache
+> (`_analysis_dir` → `ui_logs/remote_results/<machine>/…`). 439 tests.
+> A sixteenth pass (2026-07-03) added a **cross-machine "what's running now"
+> view**: `runner.list_running_jobs(config)` aggregates a local jobs_root scan
+> (`_local_job_rows`) + every configured remote's `list_remote_jobs`, filtered
+> to running, with unreachable machines collected into `errors`. CLI
+> `--list-jobs` (`--all` for done/prepared too) and the UI **Running** tab
+> (GET `/api/running`, auto-refresh only while open). See *Execution model —
+> local vs remote*. Tests: `test_list_running_jobs_*` in `tests/test_runner.py`;
+> 441 tests.
+> A seventeenth pass (2026-07-03) built **job control across machines — real
+> status, terminate, delete, resume; the UI drives local + every remote the
+> same way**. Status became a *liveness check, not file existence*: every
+> engine run records its PID in `<job>/.pid` (workflow `_write_pid`/
+> `_clear_pid` around vasp/qe/ase and the remote-ssh wrapper) and a job reads
+> "running" only if that PID is alive or a live process has its cwd inside the
+> dir (`workflow.proc_cwds`/`dir_active`; one `/proc` snapshot per scan; same
+> rule in `_local_job_rows`, the `list_remote_jobs` shell walk — evaluated on
+> the remote — and `workflow.terminal_status`). "done" needs a genuine finish
+> signal (`workflow.job_finished`: `job.log` — now written *before*
+> `build_row` — OUTCAR `General timing`, QE `JOB DONE.`, `ase_results.json`;
+> test fixtures gained the real footers); dead-without-finishing reads
+> "stalled" (kept on the board); app-killed jobs leave `.terminated` →
+> "terminated". **Terminate**: POST `/api/terminate` (Running-tab 🛑 per row,
+> Results bulk 🛑, CLI `--kill JOB_DIR` for detached offload) — local kill is
+> killpg(`.pid`) + SIGTERM of cwd-matched PIDs (`workflow.pids_in_dir`);
+> remote kill is `runner.kill_job_by_dir` over SSH (same two signals) or
+> `kill_detached_job` for offload markers (setsid group, stamps rc=143).
+> **Delete**: POST `/api/job_delete` — `shutil.rmtree` strictly inside
+> `jobs_root`, or `rm -rf` over SSH strictly inside the machine's
+> `remote_root` (`_assert_under_remote_root`; boundary from server config,
+> never the client). **Resume**: POST `/api/resume_job` resumes one dir in
+> place — local, detached offload (local mirror), or a dir browsed on a
+> remote (`--remote-config`), clearing stale `.terminated` first. UI: Results
+> rows (local *and* remote-browsed) got checkboxes + a bulk bar (▶/🛑/🗑);
+> the Running tab got a machine selector (`/api/running?machine=`; "Local"
+> never SSHes), per-row PID display, and 🛑; job chips spawn with
+> `start_new_session=True` so ✕ kills the whole mpirun tree (`os.killpg`).
+> Also fixed: a NUL byte my own edit had left in `index.html` (made grep
+> treat it as binary). Tests: 441 (list-jobs/status tests reworked for the
+> new semantics; kill/delete/resume verified end-to-end incl. running the
+> remote shell walk locally through bash).
 
 ### 1 — Calculation types are severely limited — FIXED 2026-06-11
 
@@ -305,7 +512,7 @@ may interleave.
 
 ---
 
-### 7 — No workflow chaining (the GUI gap) — FIXED 2026-06-11
+### 7 — No workflow chaining — FIXED 2026-06-11
 
 `chain.py` runs ordered steps in per-step subdirectories of the job dir,
 feeding outputs forward (CONTCAR → POSCAR; CHGCAR for dos/bands) via
@@ -357,109 +564,19 @@ Non-local runs write `submit.sh` and call `sbatch`/`qsub`; the row records
 the queue job id with status "submitted". Use `--parse-only` later to harvest
 results — there is no queue polling yet.
 
-**Remote submission** (`--remote`, 2026-06-15): with a `remote:` block (or a
-`remotes:` map of named machines) in config.yaml — host, remote_root,
-vasp_executable; optional user/port/ssh_key/ssh_options/scheduler/
-scheduler_options — the CLI prepares the full input set locally, copies the
-whole job dir (INCAR/KPOINTS/POSCAR/POTCAR/submit.sh) to the remote machine via
-rsync (scp fallback), and submits to its queue over SSH — so the local host can
-be powered off afterwards. `--remote` uses `remote:`; `--remote NAME` uses
-`remotes[NAME]`; `--remote-config FILE` loads one machine from a JSON/YAML file
-(the UI uses this). `runner.submit_job_remote()` does the work;
-`write_submit_script(run_dir=…)` bakes the remote run directory into the script,
-and a `.remote.json` marker is written into the local job dir tagging the
-machine/job_id/remote_dir. `build_row` reads that marker so results are tagged
-with the machine and show status "remote" until fetched.
-`runner.check_remote_connection/poll_remote_job/fetch_remote_results` back the
-UI buttons (test SSH, poll the queue, pull results back — heavy binaries skipped
-unless asked). **UI Remote tab** (`vasp_auto_ui`): manages machines in
-`remotes.json` (`/api/remotes`, `/api/remote/{save,delete,test,status,fetch}`),
-the Calculate tab has a "run on machine" selector, and the Results table gets a
-machine column + per-row 🛰 status / ⬇ fetch buttons. Files stay on the remote;
-fetch pulls a copy back so the local viewers work.
-
-**Direct-SSH run mode (`run_mode: ssh`, 2026-06-17):** the original `--remote`
-path only did fire-and-forget *scheduler* submission (`sbatch`/`qsub`), and the
-convergence-scan and chained-workflow branches in `cli._process_case` ignored
-`remote` entirely — so picking a remote machine while running a convergence scan
-(the common case) silently ran **locally**. Fixed: each remote now has a
-`run_mode` (resolved by `runner.remote_run_mode`; `run_mode: ssh|direct`, or
-`scheduler: ssh|none|local`, ⇒ direct SSH; else the scheduler name).
-`runner.run_vasp_remote()` is a synchronous drop-in for `run_vasp` — rsync inputs
-to `<remote_root>/<subdir>`, run `mpirun` over SSH (sourcing the machine's
-optional `env_setup`, e.g. `source /opt/intel/oneapi/setvars.sh`, so MKL/MPI are
-on the path in a non-interactive shell; `ulimit -s unlimited`), then rsync the
-results back and write a `.remote.json` marker (machine/remote_dir/mode=ssh) so
-the row shows `status: done` + the machine. `_remote_vasp_exe` treats a
-`vasp_executable` that is a directory as `<dir>/vasp_std`. `remote` is now
-resolved once at the top of `_process_case` and threaded into the plain run
-(`run_one_case`), the convergence scan (`converge_scf_case` →
-`_scan_stage`/`_run_trial`, `remote_subdir` keeps trials from different cases
-from colliding), and chained workflows (`run_workflow_case`, each step over SSH;
-scheduler-mode chains are rejected with a clear error). Scheduler submission is
-unchanged. UI: the Remote-tab form gained **run mode** + **env setup** fields
-(`REMOTE_FIELDS` += `run_mode`, `env_setup`); the Test-connection check probes
-`mpirun` for ssh machines (instead of `sbatch`). Verified live on a real
-workstation (apl2, 64-core, oneAPI): plain SCF, ENCUT/SIGMA convergence, and the
-UI HTTP path all run on the remote with results stored in `remote_root` and the
-machine shown on the Results page. Tests: `tests/test_runner.py` (run-mode/exe/
-run_vasp_remote) + `tests/test_workflow.py` (run_one_case dispatch); 368 total.
-
-**Offload / detached run mode (`run_mode: ssh_detached`, 2026-06-18):** lets the
-local host be powered off — the whole engine (incl. the iterative convergence/
-workflow loops) runs on the remote. One-time `setup_remote_engine(remote)` builds
-a wheel (`build_engine_wheel`), ships it, and pip-installs vasp_auto into
-`<remote_root>/.vasp_auto/venv` (venv `--without-pip` + get-pip bootstrap, since
-distro `python3-venv` may be absent; PyYAML+pandas+openpyxl pulled from PyPI —
-needs remote internet). CLI `--remote-setup` / UI `/api/remote/setup` +
-"⚙ Set up offload engine" button. `submit_job_detached()` ships an inputs bundle
-(POSCAR + a locally pre-built POTCAR via `build_potcar`, so no POTCAR library on
-the remote) + a generated `config.yaml` (`jobs_root: <remote_root>/results`),
-writes a `run.sh`, launches it under `setsid` (records PID in
-`<remote_root>/.vasp_auto/runs/<case>/{pid,rc,run.log,job_dir}`), and returns at once
-with a `.remote.json` marker (mode=ssh_detached, pid, control_dir). The remote engine
-numbers each run, so the job root is `<remote_root>/results/<NNNN>_<case>` (not the
-bare `…/results/<case>` placeholder recorded at submit time): `run.sh` exports
-`VASP_AUTO_JOBDIR_FILE=<control_dir>/job_dir` and `cli._process_case` writes the real
-job dir there right after `make_case_info`, so the job root stays on the machine that
-ran it and the submitting host can resolve exactly where. `cli._process_case`
-routes detached runs to `_run_detached_offload` (early, before the workflow/
-converge/run branches) and forwards the calc flags via `_forward_calc_flags(args)`
-— the remote CLI re-branches, so convergence/workflow "just work" remotely.
-`poll_detached_job()` checks the PID/rc files; `api_remote_status` routes
-ssh_detached markers to it (else the scheduler poller). Both poll and fetch call
-`resolve_detached_job_dir(remote, control_dir)` (cats `<control_dir>/job_dir` over SSH)
-to get the real numbered job root, persist it back into `.remote.json`, and `fetch`
-then reuses `fetch_remote_results` against it. UI Remote form run-mode dropdown gained the
-"offload (detached)" option. NEB/TSS offload not supported yet (needs a single
-POSCAR). Verified live end-to-end on apl2 (oneAPI) and engine installed on tlclab
-(system OpenMPI, no env_setup): `--remote-setup`, detached ENCUT convergence via
-CLI and via the UI `/api/run`→status→fetch, laptop-off-safe (SSH returns while the
-job runs under setsid). Tests: `tests/test_runner.py` (engine paths/submit/poll) +
-`tests/test_cli_offload.py` (flag forwarding); 376 total, selfcheck 55/0.
-
-**Resume an unfinished job in place (2026-06-30):** restart a job from its newest
-CONTCAR *without allocating a new `NNNN_` job number* — the job dir's own
-INCAR/KPOINTS/POTCAR are reused verbatim (never rebuilt from the case dir, unlike
-`--retry-failed`); only POSCAR advances (CONTCAR→POSCAR, old kept as POSCAR.bak),
-WAVECAR/CHGCAR are left for a warm start, and NEB/TSS jobs reseed each image
-subdir. A finished job is skipped unless forced. Engine: `workflow.resume_job`
-(local), `runner.resume_job_remote` (synchronous over SSH, in place — nothing
-re-shipped), and `runner.resume_job_detached` (offload machines: seeds + reruns
-`mpirun` under `setsid` with a `<remote_root>/.vasp_auto/runs/<job>` control dir
-holding pid/rc/job_dir, so `poll_detached_job`/`resolve_detached_job_dir` and the
-status/fetch buttons track it — power-off-safe). CLI: `--resume` (case-based:
-resumes the latest numbered local job dir via `_process_case`) and
-`--resume-job-dir DIR` (explicit dir, local **or** remote; `_run_resume` short-circuit
-picks detached vs synchronous by `remote_run_mode`; `--resume-local-mirror` records a
-local marker dir for UI tracking). UI: **⏯ Resume** button on the Calculate tab →
-`/api/resume`, which resolves the job dir (`_latest_remote_job_dir` for a remote
-working machine, newest `<NNNN>_<case>` under `<remote_root>/results`/`<remote_root>`)
-and launches `vasp-auto --resume-job-dir …` through the shared `_spawn_cli_job`
-helper (live log + ✕ stop). Also this pass: the **Save-structure card gained a
-location 📁 picker** (`sv-loc`/`saveBrowse`, folder mode, local or remote over SSH);
-`api_structure_save` now honours a chosen local `root`. Every calculate path stays
-available on both local and remote machines (see the convention below).
+**Remote execution** — machine config, the three run modes
+(scheduler / `ssh` / `ssh_detached` offload), remote resume, POTCAR shipping,
+markers, and the UI surface are documented in **Execution model — local vs
+remote** above. History: remote scheduler submission `--remote` 2026-06-15;
+direct-SSH `run_mode: ssh` 2026-06-17 (fixed convergence/workflow silently
+running locally when a remote was selected); detached offload
+`run_mode: ssh_detached` 2026-06-18 (verified live on apl2 + tlclab); resume
+in place (local, ssh, detached; `--resume`/`--resume-job-dir`, UI ⏯)
+2026-06-30 — that pass also gave the Save-structure card a location 📁 picker
+(`sv-loc`/`saveBrowse`, local or remote over SSH). CLI selectors: `--remote`
+uses `remote:`, `--remote NAME` uses `remotes[NAME]`, `--remote-config FILE`
+loads one machine from JSON/YAML (the UI uses this). Tests:
+`tests/test_runner.py`, `tests/test_workflow.py`, `tests/test_cli_offload.py`.
 
 > **Results now read the jobs/results folder (2026-06-15):** the Results tab
 > had been driven by the *inputs* folder and guessed where each case's output
@@ -476,25 +593,11 @@ available on both local and remote machines (see the convention below).
 > `_result_case_infos`, which mirrors the single-case layout with a fallback to
 > the nested project layout).
 
-> **Results: remote machine browser + per-file downloads (2026-06-18):** the
-> Results tab gained a **machine selector** (`#r-machine`: Local + every saved
-> remote). Picking a remote lists the jobs that physically live on it — a live
-> SSH listing of a chosen **jobs directory** (`#r-rdir`, defaults to the
-> machine's `remote_root`), newest first. New runner helpers do the SSH work
-> with one round-trip each: `list_remote_jobs(remote, root)` (POSIX-sh walk of
-> `root` one + two levels deep, emitting `<mtime>\t<o><v><z>\t<path>`; status
-> done/running/prepared), `list_remote_dir(remote, path)` (immediate entries
-> with size/mtime, dirs-first), and `fetch_remote_file(remote, rpath, local)`
-> (single-file scp). Server: `api_remote_jobs`/`api_remote_files`/`api_job_files`
-> (POST) + GET `/download_local` (any file in a local job dir) and
-> `/download_remote?machine&path` (scp to a temp file, then stream; constrained
-> to the machine's `remote_root`). Front end: clicking a job's **name** opens a
-> full-screen detail modal (`#jobdetailmodal`, `showJobDetail`/`loadJobFiles`)
-> listing every file with a ⬇ link and ↘ folder navigation (convergence trials,
-> NEB images); works for both local and remote jobs. The remote view reuses the
-> sort-by-date control and hides the local-only analysis cards/chart. Tests:
-> `tests/test_runner.py` (list/fetch parsing, +5) + `tests/test_ui_server.py`
-> (endpoints + downloads, +8); 391 total, selfcheck 55/0.
+> **Results: remote machine browser + per-file downloads (2026-06-18):** see
+> the Remote half of *Execution model — local vs remote* (machine selector,
+> `list_remote_jobs`/`list_remote_dir`/`fetch_remote_file`, `/download_remote`,
+> job-detail modal with ⬇ links and ↘ folder navigation). Tests:
+> `tests/test_runner.py` + `tests/test_ui_server.py`; 391 total, selfcheck 55/0.
 
 > **NEB/TSS energy stage graph (2026-06-15):** `workflow.neb_energy_profile()`
 > returns the reaction-coordinate ("minimum energy path") data — per-image
@@ -594,10 +697,20 @@ Entry points a GUI should call: `make_case_info`, `create_job_from_case`,
 - `mpirun` is the only supported parallel launcher. Do not hardcode `srun`.
 - Path handling: always use `pathlib.Path`; never `os.path.join`.
 - Do not import `numpy` in the engine — calculations stay pure Python.
-- Keep `runner.py` a thin subprocess wrapper; all logic lives in `workflow.py`
-  or `convergence.py`.
-- Make sure every calculate function is available on the remote and local
-  machine while modify a function or adding new function.
+- `runner.py` owns *execution* (local subprocesses + everything SSH/remote);
+  calculation logic lives in `workflow.py` or `convergence.py`. Don't put
+  parsing or INCAR logic in runner.py, and don't put SSH calls anywhere else.
+- Every calculate function must work on both the local and remote machines
+  when you modify or add one — wire all three remote run modes or reject them
+  with a clear error (see "Execution model — local vs remote").
+- Same rule for **job control**: status, terminate, delete, and resume must
+  work from the UI on the local machine *and* every saved remote through one
+  endpoint each (`/api/terminate`, `/api/job_delete`, `/api/resume_job`,
+  `/api/running?machine=`) — the row's `machine` field selects the side.
+  Job status must reflect real liveness (`.pid` / process-cwd), never mere
+  file existence. Destructive remote paths are validated against the
+  machine's `remote_root` (`_assert_under_remote_root`), local ones against
+  `jobs_root` — the boundary always comes from server config, never the client.
 - The `jobs/` directory is generated output. Never commit it.
 - POTCAR files are proprietary. Never commit them; never print their content.
 
@@ -623,21 +736,6 @@ Entry points a GUI should call: `make_case_info`, `create_job_from_case`,
 Pick the top unfinished item, do it, then move it to "Done" with a date and
 add any follow-up that surfaced. Keep this list current on every code change.
 
-### Remote / multi-machine control (highest priority)
-- [ ] The engine currently assumes the **local** machine. Upgrade it to control
-      multiple HPC machines and manage their files (submit, poll, fetch results)
-      from one place. See `remotes.json` for the machine inventory.
-- [ ] Workflow page does not reach the remote machine: clicking **Run Workflow**
-      on a selected case must submit to the chosen remote, not run locally.
-
-### Results page rebuild
-- [ ] List results by date (no other sort option).
-- [ ] Clicking a file name opens the remote folder, shows the file, allows download.
-- [ ] Redesign the Results list; make all fonts clear.
-- [ ] Machine filter: pick one machine (show its cases) or "all".
-- [ ] Per-page count, from-date/to-date range, and search-by-case-name inputs.
-- [ ] Remove the "Energy per case" box; clarify or remove the "Analysis" box.
-
 ### ML / MLIP
 - [ ] fairchem-core 2.21.0 is installed; UMA weights are gated on Hugging Face.
       Once an HF token is available, run a UMA relax on `inputs/Au13_uma`
@@ -647,6 +745,22 @@ add any follow-up that surfaced. Keep this list current on every code change.
 ### Done
 - [x] 2026-06-11 — GUI layer (`vasp_auto_ui`) shipped; see Architecture notes.
 - [x] 2026-06-11 — Known problems #1–#14 fixed (see list above).
+- [x] 2026-06-18 — Remote / multi-machine control: submit, poll, fetch, browse
+      files across saved machines from CLI + UI; Workflow tab runs on the
+      chosen remote. See *Execution model — local vs remote*.
+- [x] 2026-06-18 — Results page rebuild: date-sorted, machine filter with
+      "All machines", search/date-range/per-page filters, inline file view +
+      downloads, energy chart removed, analysis cards hidden until invoked.
+- [x] 2026-07-03 — Remote result rows carry calculation_type/converged/
+      energy_eV so the Results columns match local rows.
+- [x] 2026-07-03 — Cross-machine "what's running now": CLI `--list-jobs` +
+      UI Running tab (`runner.list_running_jobs`, `/api/running`).
+- [x] 2026-07-03 — Job control across machines, UI drives local + every
+      remote: real liveness status (`.pid` + `/proc` cwd →
+      running/stalled/terminated/done, PID shown), terminate / delete folder /
+      resume from the Results bulk bar and the Running tab's per-row 🛑,
+      machine selector on Running, CLI `--kill`. Guards: `jobs_root` /
+      `remote_root`. See *Execution model — local vs remote → Job control*.
 
 
 Push the code once a week to the Github: https://github.com/MikeCheng423/DFT-UI

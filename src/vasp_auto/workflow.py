@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 from pathlib import Path
@@ -342,6 +343,138 @@ def _neb_image_energy(image_dir: Path):
     return None
 
 
+def _tail_has(path: Path, needle: str, tail: int = 4000) -> bool:
+    """True if the last ``tail`` bytes of a text file contain ``needle``."""
+    try:
+        with open(path, "rb") as f:
+            try:
+                f.seek(-tail, 2)
+            except OSError:
+                f.seek(0)
+            return needle.encode() in f.read()
+    except OSError:
+        return False
+
+
+def job_finished(job_dir) -> bool:
+    """True once a job has actually run to completion — engine-agnostic.
+
+    Distinguishes a finished run from one whose OUTCAR/pw.out is still streaming
+    (or was killed mid-run): the per-job ``job.log`` summary (VASP), the OUTCAR
+    end-of-run footer (legacy VASP without job.log), QE's ``JOB DONE.``, or ASE's
+    ``ase_results.json`` (only written at the end).
+    """
+    job_dir = Path(job_dir)
+    if (job_dir / "job.log").exists() or (job_dir / "ase_results.json").exists():
+        return True
+    outcar = job_dir / "OUTCAR"
+    if outcar.exists() and _tail_has(outcar, "General timing"):
+        return True
+    pw = job_dir / "pw.out"
+    return pw.exists() and _tail_has(pw, "JOB DONE")
+
+
+def pid_alive(pid: int) -> bool:
+    """True if a process with this PID currently exists on this machine."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists but owned by another user
+    return True
+
+
+def proc_cwds() -> set[str]:
+    """Working directories of every process we can inspect (via /proc).
+
+    The real "is something running here" signal: mpirun/vasp/pw.x execute with
+    cwd inside the job directory, so a job dir with a live process under it is
+    genuinely running whatever files it has or hasn't written yet.
+    """
+    cwds: set[str] = set()
+    for link in Path("/proc").glob("[0-9]*/cwd"):
+        try:
+            cwds.add(os.readlink(link))
+        except OSError:
+            pass  # other users' processes aren't readable — fine
+    return cwds
+
+
+def dir_active(job_dir, cwds: set[str] | None = None) -> bool:
+    """True if any live process is working in ``job_dir`` (or a subdir — NEB
+    images and convergence trials run in nested folders)."""
+    d = str(Path(job_dir))
+    if cwds is None:
+        cwds = proc_cwds()
+    return any(c == d or c.startswith(d + "/") for c in cwds)
+
+
+def pids_in_dir(job_dir) -> list[int]:
+    """PIDs of every live process whose cwd is inside ``job_dir`` — the kill-side
+    counterpart of :func:`dir_active`, so anything the board shows as "running"
+    can also be terminated, even without a recorded ``.pid``."""
+    d = str(Path(job_dir))
+    pids: list[int] = []
+    for link in Path("/proc").glob("[0-9]*/cwd"):
+        try:
+            c = os.readlink(link)
+        except OSError:
+            continue
+        if c == d or c.startswith(d + "/"):
+            pids.append(int(link.parent.name))
+    return pids
+
+
+def _read_pid(job_dir: Path) -> int | None:
+    """The PID a running job recorded in ``.pid`` (None if absent/garbage)."""
+    try:
+        return int((Path(job_dir) / ".pid").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _write_pid(job_dir) -> None:
+    try:
+        (Path(job_dir) / ".pid").write_text(str(os.getpid()), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _clear_pid(job_dir) -> None:
+    try:
+        (Path(job_dir) / ".pid").unlink()
+    except OSError:
+        pass
+
+
+def terminal_status(job_dir, has_output: bool) -> str:
+    """Coarse run state of a job dir (no scheduler override in play).
+
+    Only "done" once the run has genuinely finished (:func:`job_finished`), and
+    only "running" when something is *actually alive*: the PID recorded in
+    ``.pid`` still exists, or a live process has its cwd inside the job dir.
+    Output files without a live process read "stalled" — a file having been
+    created is not proof the job is still running. A job stopped via the kill
+    button/CLI leaves a ``.terminated`` marker. Mirrored by the shell in
+    ``list_remote_jobs`` and by ``_local_job_rows`` so every tab agrees.
+    (Liveness is only ever checked on the machine the job runs on — local dirs
+    here, remote dirs inside the remote shell scan.)
+    """
+    job_dir = Path(job_dir)
+    if (job_dir / ".terminated").exists():
+        return "terminated"
+    if job_finished(job_dir):
+        return "done"
+    pid = _read_pid(job_dir)
+    alive = (pid is not None and pid_alive(pid)) or dir_active(job_dir)
+    if alive:
+        return "running"
+    if pid is not None or has_output or (job_dir / "OSZICAR").exists():
+        return "stalled"
+    return "missing"
+
+
 def _build_neb_row(project_name, mode, case_info, status_override=None):
     job_dir = Path(case_info["job_dir"])
     image_dirs = _neb_image_dirs(job_dir) if job_dir.exists() else []
@@ -407,7 +540,7 @@ def _build_neb_row(project_name, mode, case_info, status_override=None):
         "case": case_info["case_name"],
         "calculation_type": "tss",
         "job_dir": str(job_dir),
-        "status": status_override if status_override else ("done" if has_outputs else "missing"),
+        "status": status_override or terminal_status(job_dir, has_outputs),
         "energy_eV": barrier,
         "neb_barrier_eV": barrier,
         "neb_forward_barrier_eV": forward,
@@ -555,7 +688,7 @@ def _build_qe_row(project_name, mode, case_info, status_override=None):
         "engine": "qe",
         "calculation_type": case_info.get("calculation_type", "scf"),
         "job_dir": str(job_dir),
-        "status": status_override if status_override else ("done" if pw_out.exists() else "missing"),
+        "status": status_override or terminal_status(job_dir, pw_out.exists()),
         "energy_eV": summary.get("energy_eV"),
         "converged": summary.get("converged", False),
         "ionic_steps": summary.get("ionic_steps", 0),
@@ -581,7 +714,7 @@ def _build_ase_row(project_name, mode, case_info, status_override=None):
         "calculator": summary.get("calculator"),
         "calculation_type": case_info.get("calculation_type", "scf"),
         "job_dir": str(job_dir),
-        "status": status_override if status_override else ("done" if summary else "missing"),
+        "status": status_override or terminal_status(job_dir, bool(summary)),
         "energy_eV": summary.get("energy_eV"),
         "converged": summary.get("converged", False),
         "ionic_steps": summary.get("ionic_steps", 0),
@@ -613,7 +746,7 @@ def build_row(project_name, mode, case_info, status_override=None):
         "case": case_info["case_name"],
         "calculation_type": case_info.get("calculation_type", "scf"),
         "job_dir": str(job_dir),
-        "status": status_override if status_override else ("done" if outcar.exists() else "missing"),
+        "status": status_override or terminal_status(job_dir, outcar.exists()),
         "energy_eV": summary["energy_eV"],
         "converged": summary["converged"],
         "ionic_steps": ionic_steps,
@@ -701,19 +834,25 @@ def run_one_case(
         # Direct SSH: run mpirun on the remote synchronously and pull results back
         # (for single-workstation machines with no working scheduler).
         if resolve_remote_run_mode(remote) == "ssh":
-            return_code = run_vasp_remote(
-                str(job_dir), remote, cpus=cpus, on_progress=on_progress, engine=engine
-            )
-            row = build_row(project_name, mode, case_info)
-            row["return_code"] = return_code
+            _write_pid(job_dir)  # liveness marker while this wrapper drives the remote run
+            try:
+                return_code = run_vasp_remote(
+                    str(job_dir), remote, cpus=cpus, on_progress=on_progress, engine=engine
+                )
+            finally:
+                _clear_pid(job_dir)
+            error_summary = None
             if engine == "vasp":
                 # VASP error signatures / job.log don't apply to pw.x output.
                 error_summary = report_vasp_errors(job_dir)
-                if error_summary:
-                    row["errors"] = error_summary
+                # Write job.log before build_row so the row reads "done", not "running".
                 from vasp_auto.job_log import write_job_log
                 write_job_log(job_dir, case_info.get("case_name"),
                               case_info.get("calculation_type"), return_code)
+            row = build_row(project_name, mode, case_info)
+            row["return_code"] = return_code
+            if error_summary:
+                row["errors"] = error_summary
             machine = remote.get("name") or remote.get("host")
             print(f"Finished  : {case_info['case_name']} on {machine} "
                   f"({remote['remote_root'].rstrip('/')}/{job_dir.name})")
@@ -758,10 +897,17 @@ def run_one_case(
         print(f"Submitted : {case_info['case_name']} -> {scheduler} job {submission['job_id']}")
         return row
 
+    # Local execution: record a .pid liveness marker for the running-job scans,
+    # cleared as soon as the process returns (before build_row, since .pid holds
+    # this still-alive wrapper's own PID).
     if engine == "qe":
         # Quantum ESPRESSO: run pw.x; VASP error-signature auto-retry does not
         # apply, so the row is built straight from pw.out.
-        return_code = run_qe(str(job_dir), str(executable), cpus=cpus, on_progress=on_progress)
+        _write_pid(job_dir)
+        try:
+            return_code = run_qe(str(job_dir), str(executable), cpus=cpus, on_progress=on_progress)
+        finally:
+            _clear_pid(job_dir)
         row = build_row(project_name, mode, case_info)
         row["return_code"] = return_code
         return row
@@ -769,31 +915,44 @@ def run_one_case(
     if engine == "ase":
         # Generic ASE calculator: run the run_ase.py driver; results come from
         # ase_results.json. VASP error-signature auto-retry does not apply.
-        return_code = run_ase(str(job_dir), python_exe=ase_python, cpus=cpus,
-                              on_progress=on_progress)
+        _write_pid(job_dir)
+        try:
+            return_code = run_ase(str(job_dir), python_exe=ase_python, cpus=cpus,
+                                  on_progress=on_progress)
+        finally:
+            _clear_pid(job_dir)
         row = build_row(project_name, mode, case_info)
         row["return_code"] = return_code
         return row
 
-    return_code = run_vasp(str(job_dir), str(vasp_executable), cpus=cpus, on_progress=on_progress)
-    findings = scan_vasp_errors(job_dir)
-    retries = 0
-    all_fixes = []
-
-    while findings and retries < auto_retry:
-        fixes = apply_error_fixes(job_dir, findings)
-        if not fixes:
-            break  # nothing safe to change automatically for these errors
-        retries += 1
-        all_fixes.extend(fixes)
-        print(
-            f"Auto-retry {retries}/{auto_retry}: {case_info['case_name']} — "
-            f"applied {', '.join(fixes)}"
-        )
+    _write_pid(job_dir)
+    try:
         return_code = run_vasp(str(job_dir), str(vasp_executable), cpus=cpus, on_progress=on_progress)
         findings = scan_vasp_errors(job_dir)
+        retries = 0
+        all_fixes = []
+
+        while findings and retries < auto_retry:
+            fixes = apply_error_fixes(job_dir, findings)
+            if not fixes:
+                break  # nothing safe to change automatically for these errors
+            retries += 1
+            all_fixes.extend(fixes)
+            print(
+                f"Auto-retry {retries}/{auto_retry}: {case_info['case_name']} — "
+                f"applied {', '.join(fixes)}"
+            )
+            return_code = run_vasp(str(job_dir), str(vasp_executable), cpus=cpus, on_progress=on_progress)
+            findings = scan_vasp_errors(job_dir)
+    finally:
+        _clear_pid(job_dir)
 
     error_summary = report_vasp_errors(job_dir)
+    # Drop a human-readable job.log summary next to the raw VASP output — before
+    # build_row so the returned row reads "done" rather than "running".
+    from vasp_auto.job_log import write_job_log
+    write_job_log(job_dir, case_info.get("case_name"),
+                  case_info.get("calculation_type"), return_code)
     row = build_row(project_name, mode, case_info)
     row["return_code"] = return_code
     if error_summary:
@@ -801,10 +960,6 @@ def run_one_case(
     if retries:
         row["auto_retries"] = retries
         row["auto_fixes"] = "; ".join(all_fixes)
-    # Drop a human-readable job.log summary next to the raw VASP output.
-    from vasp_auto.job_log import write_job_log
-    write_job_log(job_dir, case_info.get("case_name"),
-                  case_info.get("calculation_type"), return_code)
     return row
 
 

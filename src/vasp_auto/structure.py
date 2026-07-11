@@ -265,6 +265,54 @@ def move_atom(struct: dict, index: int, vector: tuple[float, float, float],
     return {**struct, "coords": coords}
 
 
+def rotate_atoms(struct: dict, indices: list[int], axis, angle: float,
+                 center: tuple[float, float, float] | None = None) -> dict:
+    """Rotate the given atoms (1-based) by `angle` degrees about `axis`.
+
+    Axis is "x"/"y"/"z" or a Cartesian 3-vector; `center` is a Cartesian
+    point in Å (default: centroid of the selected atoms).
+    """
+    for index in indices:
+        _check_index(struct, index)
+    if isinstance(axis, str):
+        try:
+            axis = {"x": (1, 0, 0), "y": (0, 1, 0), "z": (0, 0, 1)}[axis.lower()]
+        except KeyError:
+            raise ValueError(f'Rotation axis must be "x", "y", "z" or a 3-vector, got {axis!r}')
+    axis = [float(x) for x in axis]
+    norm = math.sqrt(sum(x * x for x in axis))
+    if norm < 1e-12:
+        raise ValueError("Rotation axis must be a non-zero vector")
+    ux, uy, uz = (x / norm for x in axis)
+
+    theta = math.radians(float(angle))
+    cos, sin = math.cos(theta), math.sin(theta)
+    # Rodrigues rotation matrix (rows act on column vectors).
+    rot = [
+        [cos + ux * ux * (1 - cos), ux * uy * (1 - cos) - uz * sin, ux * uz * (1 - cos) + uy * sin],
+        [uy * ux * (1 - cos) + uz * sin, cos + uy * uy * (1 - cos), uy * uz * (1 - cos) - ux * sin],
+        [uz * ux * (1 - cos) - uy * sin, uz * uy * (1 - cos) + ux * sin, cos + uz * uz * (1 - cos)],
+    ]
+
+    carts = cart_coords(struct)
+    picked = [i - 1 for i in indices]
+    if center is None:
+        center = [sum(carts[i][k] for i in picked) / len(picked) for k in range(3)]
+    center = [float(x) for x in center]
+
+    coords = [list(c) for c in struct["coords"]]
+    scale = struct["scale"]
+    inverse = None if struct["cartesian"] else _invert3(scaled_lattice(struct))
+    for i in picked:
+        d = [carts[i][k] - center[k] for k in range(3)]
+        rotated = [center[k] + sum(rot[k][j] * d[j] for j in range(3)) for k in range(3)]
+        if struct["cartesian"]:
+            coords[i] = [x / scale for x in rotated]
+        else:
+            coords[i] = _matvec(inverse, rotated)
+    return {**struct, "coords": coords}
+
+
 def parse_atom_selection(struct: dict, spec: str) -> list[int]:
     """Resolve an atom selection into sorted 1-based indices.
 
@@ -329,7 +377,7 @@ def freeze_atoms(struct: dict, indices: list[int], axes: str = "XYZ") -> dict:
     return {**struct, "selective": True, "flags": flags}
 
 
-# ------------------------------------------------- human-readable builder ops
+# --------------------------------------------------------- builder ops
 # (see src/periodic_structure_builder_reimplementation.md — open-source
 # reimplementation of the periodic-builder operations: cell <-> parameters,
 # set-cell with frac/cart preservation, wrapping, coordination analysis and
@@ -425,7 +473,7 @@ def set_cell(struct: dict, new_lattice: list[list[float]],
     """Replace the cell with `new_lattice` (Å, scale folded in afterwards).
 
     preserve="fractional": atoms keep their fractional coordinates — the
-    structure deforms with the cell (GUI "scale atoms").
+    structure deforms with the cell ("scale atoms").
     preserve="cartesian": atoms keep their absolute Å positions.
     """
     if preserve not in ("fractional", "cartesian"):

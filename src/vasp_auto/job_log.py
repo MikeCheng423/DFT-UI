@@ -1,4 +1,4 @@
-"""human-readable human-readable per-job summary, written as ``job.log``.
+"""Human-readable per-job summary, written as ``job.log``.
 
 Written automatically when a VASP job finishes or fails (see run_one_case), so
 every job directory carries a readable result summary — parameters, energies,
@@ -150,7 +150,7 @@ def _section(title: str) -> list[str]:
 
 def build_job_log(job_dir: Path, case_name: str | None = None,
                   calc_type: str | None = None, return_code: int | None = None) -> str:
-    """Build the human-readable ``job.log`` text for one finished/failed job dir."""
+    """Build the ``job.log`` text for one finished/failed job dir."""
     job_dir = Path(job_dir)
     case_name = case_name or job_dir.name
     incar_text = (job_dir / "INCAR").read_text(encoding="utf-8", errors="ignore") \

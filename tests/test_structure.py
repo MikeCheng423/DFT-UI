@@ -60,7 +60,7 @@ def test_substitute(scf_case):
     assert doped["coords"] == struct["coords"]
 
 
-# ------------------------------------------- human-readable builder operations
+# --------------------------------------------------- builder operations
 
 from vasp_auto.structure import (  # noqa: E402
     build_struct,
@@ -131,6 +131,25 @@ def test_delete_atoms():
     assert fewer["counts"] == [2, 3]
     with pytest.raises(ValueError):
         delete_atoms(struct, [])
+
+
+def test_rotate_atoms():
+    from vasp_auto.structure import rotate_atoms
+    cube = [[10, 0, 0], [0, 10, 0], [0, 0, 10]]
+    struct = build_struct("t", cube, ["H", "H", "He"],
+                          [[0.5, 0.5, 0.5], [0.7, 0.5, 0.5], [0.1, 0.1, 0.1]])
+    # 90° about z, explicit center on atom 1: atom 2 swings from +x to +y.
+    turned = rotate_atoms(struct, [2], "z", 90.0, center=(5, 5, 5))
+    assert turned["coords"][1] == pytest.approx([0.5, 0.7, 0.5])
+    # 180° about the centroid of atoms 1+2 swaps them; atom 3 is untouched.
+    swapped = rotate_atoms(struct, [1, 2], (0, 0, 1), 180.0)
+    assert swapped["coords"][0] == pytest.approx([0.7, 0.5, 0.5])
+    assert swapped["coords"][1] == pytest.approx([0.5, 0.5, 0.5])
+    assert swapped["coords"][2] == pytest.approx([0.1, 0.1, 0.1])
+    with pytest.raises(ValueError):
+        rotate_atoms(struct, [1], "q", 90.0)
+    with pytest.raises(ValueError):
+        rotate_atoms(struct, [1], (0, 0, 0), 90.0)
 
 
 def test_coordination_rocksalt_and_h2():

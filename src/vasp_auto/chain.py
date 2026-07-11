@@ -1,4 +1,4 @@
-"""Chained workflows: relax → scf → dos in one command (the human-readable flow).
+"""Chained workflows: relax → scf → dos in one command.
 
 Each step runs in its own subdirectory of the case job dir; outputs feed the
 next step's inputs (CONTCAR → POSCAR, CHGCAR for ICHARG=11) either by the
@@ -21,7 +21,7 @@ from vasp_auto.workflow import parse_outcar_summary, report_vasp_errors
 
 # A workflow step name that runs an automatic SCF convergence scan instead of a
 # single VASP calculation. The settings it finds (ENCUT/SIGMA/NELM/KPOINTS) are
-# carried forward as overrides for every later step — the human-readable
+# carried forward as overrides for every later step — the classic
 # "convergence → optimisation → SCF → DOS" flow.
 CONVERGE_STEP = "converge"
 

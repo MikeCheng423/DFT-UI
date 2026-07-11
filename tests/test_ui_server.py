@@ -278,6 +278,37 @@ def test_combine_accepts_inline_host(ui_base, scf_case):
     assert data["structure"]["natoms"] == 4
 
 
+def test_combine_fetches_remote_guest(tmp_path, monkeypatch, scf_case):
+    """With a remote working machine, combine reads case paths from that
+    machine over SSH — given as a case folder or as the POSCAR file itself."""
+    import shutil as _sh
+    from pathlib import Path as _P
+
+    fake_root = tmp_path / "remote"
+    guest_dir = fake_root / "inputs" / "guest"
+    guest_dir.mkdir(parents=True)
+    (guest_dir / "POSCAR").write_text(
+        "H atom\n1.0\n2.0 0 0\n0 2.0 0\n0 0 2.0\nH\n1\nDirect\n0.0 0.0 0.0\n")
+
+    monkeypatch.setattr(ui_server, "_resolve_remote",
+                        lambda name: {"name": "fake", "host": "h",
+                                      "remote_root": str(fake_root)})
+
+    def fake_fetch(rmt, remote_path, local_path):
+        _P(local_path).parent.mkdir(parents=True, exist_ok=True)
+        _sh.copy(remote_path, local_path)  # missing path raises, like real SSH
+        return _P(local_path)
+
+    monkeypatch.setattr(ui_server, "fetch_remote_file", fake_fetch)
+
+    host = ui_server.api_structure({"path": [str(scf_case)]}, None)
+    for guest in (str(guest_dir), str(guest_dir / "POSCAR")):
+        data = ui_server.api_combine({}, {
+            "host_struct": host, "guest": guest, "machine": "fake",
+            "mode": "stack", "gap": 2.0, "vacuum": 5.0})
+        assert data["structure"]["symbols"] == ["Al", "O", "H"]
+
+
 # ------------------------------------------------ pass-7 results endpoints
 
 VASPRUN_PDOS = """<?xml version="1.0" encoding="ISO-8859-1"?>

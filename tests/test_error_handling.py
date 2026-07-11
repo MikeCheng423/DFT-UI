@@ -45,6 +45,7 @@ OUTCAR_CONVERGED = """\
  vasp mock
   free  energy   TOTEN  =       -27.07313700 eV
   aborting loop because EDIFF is reached
+ General timing and accounting informations for this run:
 """
 
 OUTCAR_HIGH_FORCE = """\

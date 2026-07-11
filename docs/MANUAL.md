@@ -329,7 +329,7 @@ Each step runs in `jobs/<case>/NN_<type>/`.
 
 ### Convergence as a workflow step
 
-A workflow can start with a `converge` step — the human-readable
+A workflow can start with a `converge` step — the classic
 "convergence → optimisation → SCF → DOS" flow. It runs a short SCF scan (see
 §8), then **carries the chosen ENCUT / SIGMA / NELM / k-mesh forward as
 overrides for every later step**:
@@ -706,11 +706,11 @@ vasp-auto-ui              # opens http://127.0.0.1:8800/ (local only)
 vasp-auto-ui --port 9000  # different port
 ```
 
-A human-readable front end in the browser, four tabs sharing one case selector,
+A workflow-builder front end in the browser, four tabs sharing one case selector,
 with inline help everywhere (toggle with the **? help** button), a light/dark
 theme, and a first-run guide:
 
-- **Build** — a full interactive structure editor (human-readable, all open
+- **Build** — a full interactive structure editor (all open
   source). A **Build function** catalog at the top-left lists every builder
   grouped by purpose (Crystals, Surfaces & nano, Import, Interfaces, Defects &
   adsorption, Transition states, Refine) with a search box; pick one and only

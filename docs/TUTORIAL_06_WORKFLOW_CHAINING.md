@@ -1,9 +1,9 @@
-# Tutorial 06 — human-readable Workflow Chaining
+# Tutorial 06 — Workflow Chaining
 
 vasp_auto can run any ordered sequence of calculation types in a single
 command, automatically forwarding CONTCAR, CHGCAR, and WAVECAR between steps.
 This tutorial builds a full **converge → relax → scf → dos** pipeline for
-bulk silicon — the same order a GUI workflow builder would produce — and
+bulk silicon — the standard multi-step order — and
 shows all three ways to specify a workflow: CLI flag, per-case `workflow.yaml`,
 and project-wide `config.yaml`.
 
