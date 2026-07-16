@@ -278,9 +278,10 @@
       </div>
       <div class="card buildfn" id="fn-mpsearch" style="display:none">
         <h3>🗄 Materials Project <span style="text-transform:none">(database search)</span></h3>
-        <p class="sub">Search the Materials Project database for a DFT-relaxed prototype. Type a formula (<code>SnO2</code>), a chemical system (<code>Fe-O</code>), or a material ID (<code>mp-2657</code>), then pick a result to load into the editor. Results are ranked by stability (lowest energy above hull first). Needs an MP API key — set the <code>MP_API_KEY</code> environment variable or paste one below.</p>
+        <p class="sub">Search the Materials Project database for a DFT-relaxed prototype. Type a formula (<code>SnO2</code>), a chemical system (<code>Fe-O</code>), or a material ID (<code>mp-2657</code>), then pick a result to load into the editor. Results are ranked by stability (lowest energy above hull first). Needs an MP API key — paste it below and click Save once; it is stored on the server and used automatically afterwards.</p>
         <span class="inline wide"><label>search formula / chemsys / id</label><input id="mp-query" placeholder="SnO2  ·  Fe-O  ·  mp-2657" onkeydown="if(event.key==='Enter')mpSearch()"></span>
-        <span class="inline"><label>API key</label><input id="mp-key" placeholder="MP_API_KEY env or paste" style="width:130px" type="password" title="Leave blank to use the MP_API_KEY environment variable on the server"></span>
+        <span class="inline"><label>API key</label><input id="mp-key" placeholder="paste key" style="width:130px" type="password" title="Saved keys are stored on the server in ~/.config/.pmgrc.yaml and used automatically"></span>
+        <button class="act" onclick="mpKeySave()" title="Store the key on the server so you never have to paste it again">💾 Save key</button>
         <button class="act" onclick="mpSearch()">🔍 Search</button>
         <div id="mp-results" style="margin-top:10px"></div>
         <div id="mp-sub-wrap" style="display:none;margin-top:10px;border-top:1px solid #2a3a4a;padding-top:8px">
@@ -1040,6 +1041,7 @@ async function init() {
   // default to the configured/engine default if it's installable here, else the first (emt)
   if ([...mlSel.options].some(o => o.value === META.ml_model_default)) mlSel.value = META.ml_model_default;
   initAiProviders();
+  mpKeyStatus();
   $("c-sched").value = META.config.scheduler || "local";
   $("c-engine").value = META.config.engine || "vasp";
   if (META.config.qe_executable) $("c-qe-exe").placeholder = META.config.qe_executable;
@@ -2230,6 +2232,20 @@ function parseSubstitutions(text) {
     if (src && dst) map[src] = dst;
   });
   return map;
+}
+function mpKeyStatus() {
+  api("/api/mp_key", null, true).then(d => {
+    if (d.configured) $("mp-key").placeholder = "saved on server";
+  }).catch(() => {});
+}
+function mpKeySave() {
+  const key = $("mp-key").value.trim();
+  api("/api/mp_key", { api_key: key }).then(d => {
+    $("mp-key").value = "";
+    $("mp-key").placeholder = d.configured ? "saved on server" : "paste key";
+    banner(d.configured ? "API key saved — it will be used automatically from now on."
+                        : "Stored API key cleared.", "info");
+  });
 }
 function mpSearch() {
   const query = $("mp-query").value.trim();

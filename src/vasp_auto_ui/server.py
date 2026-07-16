@@ -1658,6 +1658,44 @@ def api_db_search(_query, body):
     return {"results": results, "db_source": db_source}
 
 
+_PMGRC_PATH = Path.home() / ".config" / ".pmgrc.yaml"
+
+
+def _read_pmgrc() -> dict:
+    import yaml
+
+    try:
+        loaded = yaml.safe_load(_PMGRC_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def api_mp_key_status(_query, _body):
+    """Report whether a Materials Project API key is available to the server."""
+    configured = bool(_read_pmgrc().get("PMG_MAPI_KEY") or os.environ.get("MP_API_KEY"))
+    return {"configured": configured}
+
+
+def api_mp_key_save(_query, body):
+    """Save (or clear) the MP API key in ~/.config/.pmgrc.yaml.
+
+    MPRester re-reads that file on every request, so the key takes effect
+    immediately — no restart — and persists for both the UI and the CLI.
+    An empty api_key clears the stored key.
+    """
+    import yaml
+
+    settings = _read_pmgrc()
+    if key := (body.get("api_key") or "").strip():
+        settings["PMG_MAPI_KEY"] = key
+    else:
+        settings.pop("PMG_MAPI_KEY", None)
+    _PMGRC_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _PMGRC_PATH.write_text(yaml.safe_dump(settings), encoding="utf-8")
+    return {"configured": "PMG_MAPI_KEY" in settings}
+
+
 def api_db_prototype(_query, body):
     """Fetch an MP structure as a prototype, with optional element substitution.
 
@@ -2581,6 +2619,7 @@ GET_ROUTES = {
     "/api/optics": api_optics,
     "/api/magmoms": api_magmoms,
     "/api/cache_size": api_cache_size,
+    "/api/mp_key": api_mp_key_status,
 }
 
 POST_ROUTES = {
@@ -2611,6 +2650,7 @@ POST_ROUTES = {
     "/api/mlenergy": api_mlenergy,
     "/api/databases": api_databases,
     "/api/db_search": api_db_search,
+    "/api/mp_key": api_mp_key_save,
     "/api/db_fetch": api_db_fetch,
     "/api/db_prototype": api_db_prototype,
     "/api/db_mlenergy": api_db_mlenergy,
