@@ -2513,14 +2513,25 @@ async function startRun(mode, consoleId) {
   activeConsole = consoleId || "console";
   $(activeConsole).textContent = "starting…";
 }
+function askResumeCpus() {
+  // Blank = reuse the previous run's rank count (read from its OUTCAR).
+  const v = prompt("CPU cores for the resume (leave blank to reuse the previous run's count):",
+                   ($("c-cpus") && $("c-cpus").value) || "");
+  if (v === null) return undefined; // cancelled
+  const cpus = v.trim();
+  if (cpus && !/^\d+$/.test(cpus)) { banner("CPU cores must be a whole number."); return undefined; }
+  return cpus || null;
+}
 async function startResume(consoleId) {
   if (!currentCase()) { banner("No working case yet — Resume picks up the latest job of a case that has already run."); return; }
+  const cpus = askResumeCpus();
+  if (cpus === undefined) return;
   // Resume the latest existing job directory in place from its newest CONTCAR,
   // reusing that job's own INCAR/KPOINTS/POTCAR (no new job number). Works on the
   // working machine — local, or the chosen remote, where it restarts in place.
   const data = await api("/api/resume", {
     target: currentCase(), machine: workingMachine(),
-    case_type: currentCaseType() || "single", cpus: $("c-cpus").value || null,
+    case_type: currentCaseType() || "single", cpus,
   });
   activeToken = data.token;
   activeConsole = consoleId || "console";
@@ -3351,7 +3362,8 @@ function bulkTerminate() {
   bulkAction("/api/terminate", "Terminated", "Stop {n} running job{s}?");
 }
 function bulkResume() {
-  const cpus = ($("c-cpus") && $("c-cpus").value) || null;
+  const cpus = askResumeCpus();
+  if (cpus === undefined) return;
   bulkAction("/api/resume_job", "Resumed", "Resume {n} job{s} in place from the newest CONTCAR?", { cpus });
 }
 async function remoteFetch(i) {

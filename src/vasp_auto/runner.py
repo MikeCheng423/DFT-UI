@@ -627,6 +627,16 @@ def run_vasp_remote(
     return return_code
 
 
+# Shell equivalent of workflow._previous_run_ranks: pull the MPI rank count the
+# previous run used from the header VASP prints in OUTCAR ("running on N total
+# cores" / "running N mpi-ranks"). Runs in the remote job dir; leaves $ranks
+# empty when there is no OUTCAR yet (mpirun then falls back to 1 below).
+_RESUME_RANKS_SH = (
+    "ranks=$(grep -h -m1 -aoE 'running +(on +)?[0-9]+ +(total cores|mpi-ranks|cores)' "
+    "OUTCAR 01/OUTCAR 2>/dev/null | grep -oE '[0-9]+' | head -1 || true)"
+)
+
+
 def resume_job_remote(
     remote: dict,
     remote_job_dir: str,
@@ -654,7 +664,6 @@ def resume_job_remote(
     target = _ssh_target(remote)
     ssh_opts = _ssh_options(remote)
     exe = _remote_vasp_exe(remote)
-    ranks = cpus if cpus is not None else 1
     env_setup = (remote.get("env_setup") or "").strip()
     machine = remote.get("name") or remote.get("host")
     remote_job_dir = remote_job_dir.rstrip("/")
@@ -675,7 +684,13 @@ def resume_job_remote(
     )
     parts.append("seed .")
     parts.append('for d in [0-9][0-9]; do [ -d "$d" ] && seed "$d"; done')
-    parts.append(f"mpirun -np {ranks} {shlex.quote(exe)} > run.log 2>&1")
+    if cpus is not None:
+        np_arg = str(cpus)
+    else:
+        # No explicit count: reuse the rank count of the previous run (OUTCAR).
+        parts.append(_RESUME_RANKS_SH)
+        np_arg = '"${ranks:-1}"'
+    parts.append(f"mpirun -np {np_arg} {shlex.quote(exe)} > run.log 2>&1")
     remote_script = "\n".join(parts)
 
     if on_progress is not None:
@@ -736,7 +751,6 @@ def resume_job_detached(
     target = _ssh_target(remote)
     ssh_opts = _ssh_options(remote)
     exe = _remote_vasp_exe(remote)
-    ranks = cpus if cpus is not None else 1
     env_setup = (remote.get("env_setup") or "").strip()
     machine = remote.get("name") or remote.get("host")
     remote_job_dir = remote_job_dir.rstrip("/")
@@ -754,6 +768,9 @@ def resume_job_detached(
         "remote mkdir control",
     )
 
+    # No explicit count: reuse the rank count of the previous run (OUTCAR).
+    np_arg = str(cpus) if cpus is not None else '"${ranks:-1}"'
+
     # run.sh: seed POSCAR<-CONTCAR (the job + each NEB image), then mpirun in the
     # job dir. The PID/rc files make it poll-able after the launcher disconnects.
     script = "\n".join([
@@ -768,7 +785,8 @@ def resume_job_detached(
         'cp -f "$1/CONTCAR" "$1/POSCAR"; fi; }',
         "seed .",
         'for d in [0-9][0-9]; do [ -d "$d" ] && seed "$d"; done',
-        f"mpirun -np {ranks} {shlex.quote(exe)} > run.log 2>&1",
+        *( [] if cpus is not None else [_RESUME_RANKS_SH] ),
+        f"mpirun -np {np_arg} {shlex.quote(exe)} > run.log 2>&1",
         f"echo $? > {shlex.quote(rc_f)}",
         "",
     ])

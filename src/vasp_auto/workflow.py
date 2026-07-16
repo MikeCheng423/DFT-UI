@@ -966,6 +966,28 @@ def run_one_case(
 # Sequence prefix on a numbered job folder, e.g. "0004_Fe" -> case name "Fe".
 _JOB_NUMBER_PREFIX = re.compile(r"^\d+_")
 
+# VASP prints its rank count near the top of OUTCAR:
+# v5 "running on    8 total cores", v6 "running   8 mpi-ranks, ...".
+_RUN_RANKS = re.compile(r"running\s+(?:on\s+)?(\d+)\s+(?:total cores|mpi-ranks|cores)")
+
+
+def _previous_run_ranks(job_dir: Path) -> int | None:
+    """MPI rank count the previous run in ``job_dir`` used, read from the header
+    VASP prints in OUTCAR (for NEB, the first image's OUTCAR). None if unknown."""
+    for name in ("OUTCAR", "01/OUTCAR"):
+        path = job_dir / name
+        if not path.is_file():
+            continue
+        try:
+            with open(path, encoding="utf-8", errors="ignore") as fh:
+                head = fh.read(8192)
+        except OSError:
+            continue
+        match = _RUN_RANKS.search(head)
+        if match:
+            return int(match.group(1))
+    return None
+
 
 def _seed_poscar_from_contcar(work_dir: Path) -> bool:
     """Advance POSCAR to the latest geometry VASP wrote (CONTCAR), in place.
@@ -1072,6 +1094,11 @@ def resume_job(
         seeded = _seed_poscar_from_contcar(job_dir)
         source = "CONTCAR" if seeded else "existing POSCAR (no CONTCAR yet)"
         print(f"Resume    : {case_name} ({job_dir.name}) — kept INCAR/KPOINTS/POTCAR; restart from {source}")
+
+    if cpus is None:
+        cpus = _previous_run_ranks(job_dir)
+        if cpus:
+            print(f"CPUs      : {cpus} (same as the previous run, from OUTCAR)")
 
     return_code = run_vasp(str(job_dir), str(vasp_executable), cpus=cpus, on_progress=on_progress)
     error_summary = report_vasp_errors(job_dir)
