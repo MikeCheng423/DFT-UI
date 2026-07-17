@@ -190,6 +190,19 @@ For **each** of the three cases:
 > - **Converge first.** Consider a `converge → relax` workflow (Workflow tab)
 >   so ENCUT/k-points are validated before the production relaxations.
 
+Two Calculate-tab conveniences for this part:
+
+- **Reuse an INCAR across the three cases.** Once one case's INCAR carries the
+  DFT+U / dipole settings above, switch to the next case and press **Load from
+  another work…** in the INCAR editor — pick the first case's folder (or its
+  finished job) and its INCAR is copied into the editor; *Save to case* applies
+  it.
+- **A relaxation stopped early?** (hit `NSW`, was terminated, or the machine
+  went down) — press **Resume**. It asks for the CPU count (blank = same as
+  before), then opens that job's INCAR as an editable spreadsheet so you can
+  raise `NSW` or adjust tags before it restarts in place from the newest
+  CONTCAR. The Results tab's checkboxes offer the same as a bulk action.
+
 Wait for all three to finish (the **Results** tab shows convergence status).
 
 ---

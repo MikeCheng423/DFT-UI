@@ -752,8 +752,18 @@ theme, and a first-run guide:
   shown as cards with plain-language descriptions; spin/magnetism options;
   k-point fields that adapt to the chosen mode; convergence testing
   (ENCUT/SIGMA/NELM/k-mesh) in a collapsible panel; an auto-fix-and-retry switch;
-  Preview/Prepare/Run/Parse buttons; an INCAR editor; and a live job console with
+  Preview/Prepare/Run/Parse buttons; an INCAR editor (load the case INCAR, the
+  template for the selected type, or **Load from another work…** — pick any
+  other case or finished job folder and its INCAR is copied into the editor,
+  then *Save to case* to use it); and a live job console with
   elapsed time and a stop (✕) button per job (logs under `ui_logs/`).
+  **Resume** restarts the case's latest job in place from its newest CONTCAR,
+  reusing the job's own KPOINTS/POTCAR: a prompt first asks for the CPU count
+  (blank = reuse the previous run's, read from its OUTCAR), then the job's
+  INCAR opens as an editable tag/value spreadsheet — change values, add or
+  remove tags (e.g. raise `NSW`), and *Save & resume*; cancel aborts the
+  restart. Works for local and remote jobs alike (the edited INCAR is shipped
+  back over SSH).
 - **Workflow** — one-click presets (Optimise → SCF → DOS …, including
   **Converge → Optimise → SCF → DOS**), reorderable steps, optional spin, a
   *Convergence step settings* panel (ENCUT/SIGMA/NELM/k-mesh) whose values a
@@ -771,7 +781,11 @@ theme, and a first-run guide:
   profile, Bader charges, absorption spectrum — the same maths as the CLI
   analysis commands). Standalone cards compute the charge-density
   difference Δρ and the three-job adsorption energy. Every chart exports
-  as PNG and every dataset as CSV.
+  as PNG and every dataset as CSV. Rows have checkboxes for bulk actions —
+  delete, terminate, or **resume** the selected jobs in place from their
+  newest CONTCAR; a bulk resume asks once for the CPU count, then shows each
+  job's INCAR in the same editable spreadsheet before that job restarts
+  (cancelling one skips just that job).
 
 Cross-platform notes (Linux / macOS / Windows) live in
 `docs/PORTABILITY.md`; on non-OpenMPI hosts set `VASP_AUTO_MPI=mpiexec`.

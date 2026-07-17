@@ -2013,6 +2013,8 @@ def api_resume(_query, body):
                 f"No job directory for '{case_name}' found on {machine} to resume "
                 "(run it there first)."
             )
+        if body.get("preview"):  # resolve only — the UI shows the INCAR editor first
+            return {"job_dir": job_dir, "machine": machine}
         args = ["--resume-job-dir", job_dir]
         if cpus:
             args += ["-n", str(cpus)]
@@ -2036,6 +2038,8 @@ def api_resume(_query, body):
         target, jobs_root, single_mode=(info["mode"] == "single"), job_mode="latest"
     )
     job_dir = str(case_info["job_dir"])
+    if body.get("preview"):
+        return {"job_dir": job_dir, "machine": "local"}
     args = ["--resume-job-dir", job_dir]
     if cpus:
         args += ["-n", str(cpus)]

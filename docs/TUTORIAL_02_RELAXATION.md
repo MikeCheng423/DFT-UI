@@ -92,6 +92,14 @@ What vasp_auto does internally:
 This is safe to repeat multiple times. Each pass continues from where the
 previous one stopped.
 
+> **Web UI equivalent.** In `vasp-auto-ui` the **Resume** button (Calculate
+> tab, or the bulk-action checkboxes in the Results tab) restarts the latest
+> job in place from its newest CONTCAR. It first asks for the CPU count
+> (leave blank to reuse the previous run's), then pops up the job's INCAR as
+> an editable tag/value spreadsheet — handy for raising `NSW` or loosening
+> `EDIFFG` before the restart. *Save & resume* applies the edits and
+> relaunches; cancel aborts.
+
 To also apply a known VASP error fix automatically (e.g. ZBRENT → POTIM
 reduction):
 
