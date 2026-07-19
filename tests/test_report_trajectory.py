@@ -144,6 +144,35 @@ def test_api_report(finished_job):
     assert (finished_job / "report.md").exists()
 
 
+def test_api_build_tss_contcar_and_remote(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    # A local job folder endpoint: the relaxed CONTCAR wins over POSCAR.
+    initial = tmp_path / "relaxed_job"
+    initial.mkdir()
+    (initial / "POSCAR").write_text("unrelaxed", encoding="utf-8")
+    (initial / "CONTCAR").write_text("relaxed", encoding="utf-8")
+
+    # A remote endpoint: fetched over SSH, CONTCAR tried first.
+    def fake_fetch(remote, path, local):
+        if not path.endswith("/CONTCAR"):
+            raise FileNotFoundError(path)
+        Path(local).write_text("remote relaxed", encoding="utf-8")
+    monkeypatch.setattr(ui_server, "_resolve_remote", lambda name: {"host": "x"})
+    monkeypatch.setattr(ui_server, "fetch_remote_file", fake_fetch)
+
+    out = tmp_path / "neb_out"
+    ui_server.api_build(None, {
+        "action": "tss",
+        "initial": str(initial),
+        "final": "/cluster/results/0005_COOH_OH",
+        "final_machine": "cluster",
+        "output": str(out),
+    })
+    assert (out / "initial" / "POSCAR").read_text() == "relaxed"
+    assert (out / "final" / "POSCAR").read_text() == "remote relaxed"
+
+
 def test_api_build_tss(tmp_path, scf_case, monkeypatch):
     out = tmp_path / "neb_out"
     result = ui_server.api_build(None, {

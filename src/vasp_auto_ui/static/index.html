@@ -355,9 +355,11 @@
       </div>
       <div class="card buildfn" id="fn-tss" style="display:none">
         <h3>🛣 Transition state (NEB) case</h3>
-        <p class="sub">Give initial and final structures (case folders or POSCAR files); images are interpolated when run with the <b>neb</b> type.</p>
+        <p class="sub">Give initial and final structures (case folders, finished job folders, or POSCAR files) — each can live on a remote machine; a folder's relaxed <b>CONTCAR</b> is preferred over its POSCAR. Images are interpolated when run with the <b>neb</b> type.</p>
         <span class="inline wide"><label>initial structure</label><input id="nb-init" placeholder="inputs/state_A"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('nb-init')" title="Browse for the initial-state case">📁</button></span>
+        <span class="inline"><label>on machine</label><select id="nb-init-machine" title="Machine the initial structure lives on"></select></span>
         <span class="inline wide"><label>final structure</label><input id="nb-final" placeholder="inputs/state_B"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('nb-final')" title="Browse for the final-state case">📁</button></span>
+        <span class="inline"><label>on machine</label><select id="nb-final-machine" title="Machine the final structure lives on"></select></span>
         <span class="inline"><label>case name</label><input id="nb-name" placeholder="A_to_B"></span>
         <br><button class="act" onclick="buildTss()">Create NEB case</button>
       </div>
@@ -2171,6 +2173,7 @@ function buildTss() {
     banner("A NEB case needs both an initial and a final structure."); return;
   }
   api("/api/build", { action: "tss", initial: $("nb-init").value, final: $("nb-final").value,
+    initial_machine: $("nb-init-machine").value, final_machine: $("nb-final-machine").value,
     output: $("nb-name").value || null,
     machine: workingMachine(), root: isRemoteWorking() ? defaultCasesRoot() : null }).then(built);
 }
@@ -2747,6 +2750,14 @@ function refreshWorkingMachineSelect() {
   sel.innerHTML = "<option value='local'>💻 Local — this computer</option>";
   for (const r of REMOTES) sel.add(new Option(`🖥 ${r.name} — ${r.host}`, r.name));
   sel.value = REMOTES.some(r => r.name === keep) ? keep : "local";
+  // The NEB card's per-endpoint machine dropdowns share the same option list.
+  for (const id of ["nb-init-machine", "nb-final-machine"]) {
+    const ep = $(id); if (!ep) continue;
+    const prev = ep.value;
+    ep.innerHTML = "<option value='local'>💻 local</option>";
+    for (const r of REMOTES) ep.add(new Option(`🖥 ${r.name}`, r.name));
+    ep.value = REMOTES.some(r => r.name === prev) ? prev : "local";
+  }
 }
 /* Populate the Workflow tab's "run on machine" dropdown. */
 function refreshWorkflowRemoteSelect() {
