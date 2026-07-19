@@ -104,6 +104,28 @@ def _local_core_counts() -> tuple[int, int]:
     return physical, logical
 
 
+_OPEN_MPI_CACHE: dict[str, bool] = {}
+
+
+def _is_open_mpi(launcher: str) -> bool:
+    """Whether the launcher really is Open MPI.
+
+    Intel MPI also ships a wrapper *named* mpirun, and its hydra mpiexec
+    aborts on Open MPI's --use-hwthread-cpus/--oversubscribe flags — so the
+    name alone is not enough; probe --version once and cache the answer."""
+    if Path(launcher).name != "mpirun":
+        return False
+    if launcher not in _OPEN_MPI_CACHE:
+        try:
+            probe = subprocess.run(
+                [launcher, "--version"], capture_output=True, text=True, timeout=10)
+            _OPEN_MPI_CACHE[launcher] = "Open MPI" in (probe.stdout + probe.stderr)
+        except (subprocess.TimeoutExpired, OSError):
+            # Probe failed: keep the historical assumption (mpirun = Open MPI).
+            _OPEN_MPI_CACHE[launcher] = True
+    return _OPEN_MPI_CACHE[launcher]
+
+
 def _mpi_command(launcher: str, mpi_ranks: int, exe: str, *exe_args: str):
     """Build the mpirun command, picking the right flag when ranks exceed slots.
 
@@ -123,7 +145,7 @@ def _mpi_command(launcher: str, mpi_ranks: int, exe: str, *exe_args: str):
     """
     physical, logical = _local_core_counts()
     pref = os.environ.get("VASP_AUTO_OVERSUBSCRIBE")
-    is_mpirun = Path(launcher).name == "mpirun"
+    is_mpirun = _is_open_mpi(launcher)
 
     cmd = [launcher, "-np", str(mpi_ranks)]
     warning = None
