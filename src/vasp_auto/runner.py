@@ -636,6 +636,17 @@ _RESUME_RANKS_SH = (
     "OUTCAR 01/OUTCAR 2>/dev/null | grep -oE '[0-9]+' | head -1 || true)"
 )
 
+# Shell equivalent of workflow._ranks_for_images: VASP requires the rank count
+# to be divisible by IMAGES (INCAR) — anything else aborts in M_divide /
+# MPI_Cart_sub. Round $ranks down to a multiple, minimum one rank per image.
+_NEB_RANKS_SH = (
+    "img=$(grep -aiE '^[[:space:]]*IMAGES[[:space:]]*=' INCAR 2>/dev/null "
+    "| grep -oE '[0-9]+' | head -1); "
+    'if [ -n "$img" ] && [ "$img" -gt 0 ]; then '
+    'if [ "${ranks:-0}" -lt "$img" ]; then ranks=$img; '
+    "else ranks=$(( ranks - ranks % img )); fi; fi"
+)
+
 
 def resume_job_remote(
     remote: dict,
@@ -684,13 +695,16 @@ def resume_job_remote(
     )
     parts.append("seed .")
     parts.append('for d in [0-9][0-9]; do [ -d "$d" ] && seed "$d"; done')
+    # Stale summary from the previous run: it would mark the job "finished" while
+    # the resume runs, and its parameters no longer match the (possibly edited) INCAR.
+    parts.append("rm -f job.log")
     if cpus is not None:
-        np_arg = str(cpus)
+        parts.append(f"ranks={int(cpus)}")
     else:
         # No explicit count: reuse the rank count of the previous run (OUTCAR).
         parts.append(_RESUME_RANKS_SH)
-        np_arg = '"${ranks:-1}"'
-    parts.append(f"mpirun -np {np_arg} {shlex.quote(exe)} > run.log 2>&1")
+    parts.append(_NEB_RANKS_SH)
+    parts.append(f'mpirun -np "${{ranks:-1}}" {shlex.quote(exe)} > run.log 2>&1')
     remote_script = "\n".join(parts)
 
     if on_progress is not None:
@@ -708,6 +722,12 @@ def resume_job_remote(
             fetch_remote_results(remote, remote_job_dir, str(local_job_dir), include_heavy=fetch_heavy)
         except (RuntimeError, OSError):
             pass
+        # The remote no longer carries a job.log (removed at resume start), so
+        # rebuild it here from the fetched files — with the resumed INCAR.
+        if (Path(local_job_dir) / "OUTCAR").exists():
+            from vasp_auto.job_log import write_job_log
+            write_job_log(Path(local_job_dir), Path(local_job_dir).name,
+                          return_code=return_code)
         marker = {
             "machine": machine,
             "host": remote.get("host"),
@@ -768,9 +788,6 @@ def resume_job_detached(
         "remote mkdir control",
     )
 
-    # No explicit count: reuse the rank count of the previous run (OUTCAR).
-    np_arg = str(cpus) if cpus is not None else '"${ranks:-1}"'
-
     # run.sh: seed POSCAR<-CONTCAR (the job + each NEB image), then mpirun in the
     # job dir. The PID/rc files make it poll-able after the launcher disconnects.
     script = "\n".join([
@@ -785,8 +802,11 @@ def resume_job_detached(
         'cp -f "$1/CONTCAR" "$1/POSCAR"; fi; }',
         "seed .",
         'for d in [0-9][0-9]; do [ -d "$d" ] && seed "$d"; done',
-        *( [] if cpus is not None else [_RESUME_RANKS_SH] ),
-        f"mpirun -np {np_arg} {shlex.quote(exe)} > run.log 2>&1",
+        "rm -f job.log",
+        # No explicit count: reuse the rank count of the previous run (OUTCAR).
+        f"ranks={int(cpus)}" if cpus is not None else _RESUME_RANKS_SH,
+        _NEB_RANKS_SH,
+        f'mpirun -np "${{ranks:-1}}" {shlex.quote(exe)} > run.log 2>&1',
         f"echo $? > {shlex.quote(rc_f)}",
         "",
     ])
@@ -818,6 +838,9 @@ def resume_job_detached(
         marker = {**result, "resumed_at": datetime.now().isoformat(timespec="seconds")}
         Path(local_job_dir).mkdir(parents=True, exist_ok=True)
         (Path(local_job_dir) / ".remote.json").write_text(json.dumps(marker, indent=2), encoding="utf-8")
+        # Same as the remote side: the stale summary must not mark the mirror
+        # "finished"; the fetch after the run rebuilds it from the resumed INCAR.
+        (Path(local_job_dir) / "job.log").unlink(missing_ok=True)
     return result
 
 

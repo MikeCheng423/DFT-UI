@@ -989,6 +989,29 @@ def _previous_run_ranks(job_dir: Path) -> int | None:
     return None
 
 
+def _ranks_for_images(job_dir: Path, cpus: int | None) -> int | None:
+    """Clamp an MPI rank count to what a NEB job can actually use.
+
+    VASP requires the rank count to be divisible by IMAGES (INCAR); anything
+    else aborts immediately in M_divide / MPI_Cart_sub. Rounds ``cpus`` down to
+    a multiple of IMAGES (minimum one rank per image). INCARs without an IMAGES
+    tag return ``cpus`` unchanged.
+    """
+    try:
+        text = (job_dir / "INCAR").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return cpus
+    match = re.search(r"^[ \t]*IMAGES[ \t]*=[ \t]*(\d+)", text, re.M | re.I)
+    if not match:
+        return cpus
+    images = int(match.group(1))
+    if images <= 0:
+        return cpus
+    if not cpus or cpus < images:
+        return images
+    return cpus - cpus % images
+
+
 def _seed_poscar_from_contcar(work_dir: Path) -> bool:
     """Advance POSCAR to the latest geometry VASP wrote (CONTCAR), in place.
 
@@ -1099,6 +1122,15 @@ def resume_job(
         cpus = _previous_run_ranks(job_dir)
         if cpus:
             print(f"CPUs      : {cpus} (same as the previous run, from OUTCAR)")
+    adjusted = _ranks_for_images(job_dir, cpus)
+    if adjusted != cpus:
+        print(f"CPUs      : {adjusted} (rounded to a multiple of IMAGES for NEB)")
+        cpus = adjusted
+
+    # Drop the stale summary: while the resume runs the job must not read
+    # "finished", and the rebuilt job.log below reflects the current (possibly
+    # edited) INCAR instead of the previous run's parameters.
+    (job_dir / "job.log").unlink(missing_ok=True)
 
     return_code = run_vasp(str(job_dir), str(vasp_executable), cpus=cpus, on_progress=on_progress)
     error_summary = report_vasp_errors(job_dir)
