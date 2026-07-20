@@ -40,3 +40,25 @@ def test_write_job_log_writes_file(finished_job):
 def test_write_job_log_never_raises(tmp_path):
     # An empty directory must not raise — a summary failure can't break a run.
     assert write_job_log(tmp_path) is not None
+
+
+def test_resume_rebuilds_job_log_from_edited_incar(finished_job, monkeypatch):
+    # A resumed job must clear the stale job.log while it runs and rebuild it
+    # afterwards from the INCAR actually used (which may have been edited).
+    from pathlib import Path
+
+    import vasp_auto.workflow as wf
+    from conftest import POSCAR_TEXT
+
+    for name, text in (("KPOINTS", "k\n"), ("POTCAR", "p\n"),
+                       ("POSCAR", POSCAR_TEXT), ("INCAR", "ENCUT = 520\n"),
+                       ("job.log", "stale ENCUT : 400")):
+        (finished_job / name).write_text(text, encoding="utf-8")
+
+    def fake_run_vasp(job_dir, exe, cpus=None, on_progress=None):
+        assert not (Path(job_dir) / "job.log").exists()  # cleared during the run
+        return 0
+
+    monkeypatch.setattr(wf, "run_vasp", fake_run_vasp)
+    wf.resume_job(finished_job, "vasp", force=True)
+    assert "520" in (finished_job / "job.log").read_text(encoding="utf-8")
