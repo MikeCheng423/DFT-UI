@@ -1461,6 +1461,19 @@ def api_optics(query, _body):
     return absorption_spectrum(job_dir / "vasprun.xml")
 
 
+def api_xrd(query, _body):
+    """Simulated powder XRD pattern from the job's CONTCAR (else POSCAR)."""
+    from vasp_auto.analysis import xrd_pattern
+
+    job_dir = _analysis_query_dir(query)
+    wavelength = (query.get("wavelength") or ["CuKa"])[0].strip() or "CuKa"
+    try:
+        wavelength = float(wavelength)
+    except ValueError:
+        pass
+    return xrd_pattern(job_dir, wavelength=wavelength)
+
+
 def api_bader(_query, body):
     """Run the Henkelman bader binary on a job's CHGCAR; like the CLI it
     writes bader_charges.csv next to it (downloadable)."""
@@ -2621,6 +2634,7 @@ GET_ROUTES = {
     "/api/dband": api_dband,
     "/api/workfunction": api_workfunction,
     "/api/optics": api_optics,
+    "/api/xrd": api_xrd,
     "/api/magmoms": api_magmoms,
     "/api/cache_size": api_cache_size,
     "/api/mp_key": api_mp_key_status,

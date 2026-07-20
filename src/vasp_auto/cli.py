@@ -861,6 +861,13 @@ def parse_args():
         "writes absorption.csv.",
     )
     parser.add_argument(
+        "--xrd",
+        default=None,
+        metavar="DIR",
+        help="Simulated powder XRD pattern (Cu Ka) of the relaxed structure "
+        "(CONTCAR, else POSCAR); writes xrd.csv.",
+    )
+    parser.add_argument(
         "--dos-export",
         default=None,
         metavar="DIR",
@@ -1423,7 +1430,7 @@ def _run_analysis(args, config) -> bool:
     requested = any(
         (args.adsorption_energy, args.thermo, args.work_function, args.d_band,
          args.chg_diff, args.bader, args.optics_parse, args.dos_export,
-         args.bands_export)
+         args.bands_export, args.xrd)
     )
     if not requested:
         return False
@@ -1571,6 +1578,20 @@ def _run_analysis(args, config) -> bool:
         print(f"Bands      : {len(bands['bands'][0])} bands x {len(bands['distances'])} k-points"
               + (f", {nspins} spins" if nspins > 1 else ""))
         _write_csv(job_dir / "bands.csv", header, rows)
+
+    if args.xrd:
+        job_dir = Path(args.xrd)
+        result = analysis.xrd_pattern(job_dir)
+        print(f"Structure  : {result['structure_file']}  "
+              f"(λ = {result['wavelength_A']:.4f} Å, Cu Ka)")
+        print(f"Peaks      : {len(result['two_theta_deg'])} in 10-90° 2θ")
+        rows = [
+            [t, i, d, f'"{hkl}"']
+            for t, i, d, hkl in zip(result["two_theta_deg"], result["intensity"],
+                                    result["d_spacing_A"], result["hkl"])
+        ]
+        _write_csv(job_dir / "xrd.csv",
+                   ["two_theta_deg", "intensity", "d_spacing_A", "hkl"], rows)
 
     if args.optics_parse:
         job_dir = Path(args.optics_parse)

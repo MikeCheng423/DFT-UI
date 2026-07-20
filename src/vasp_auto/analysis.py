@@ -1,5 +1,5 @@
 """Catalysis post-processing: adsorption energies, vibrational thermochemistry,
-d-band centers, work functions, optical absorption.
+d-band centers, work functions, optical absorption, simulated XRD patterns.
 
 Operates on finished job directories; runs no VASP itself. Pure Python.
 """
@@ -453,4 +453,47 @@ def absorption_spectrum(vasprun_path: Path) -> dict:
         "alpha_cm1": alpha,
         "real": dielectric["real"],
         "imag": dielectric["imag"],
+    }
+
+
+# --- X-ray diffraction ---------------------------------------------------------
+
+def xrd_pattern(
+    path: Path,
+    wavelength: str | float = "CuKa",
+    two_theta_range: tuple[float, float] = (10.0, 90.0),
+) -> dict:
+    """Simulated powder XRD pattern of a structure (Bragg-Brentano, pymatgen).
+
+    ``path`` is a structure file (POSCAR/CONTCAR/CIF/…) or a job directory —
+    a directory uses its CONTCAR when present, else POSCAR. ``wavelength`` is
+    a radiation name ("CuKa", "MoKa", …) or a wavelength in Å. Returns
+    {"two_theta_deg", "intensity", "hkl", "d_spacing_A", "wavelength_A",
+    "structure_file"} with intensities normalised to 100.
+    """
+    try:
+        from pymatgen.analysis.diffraction.xrd import XRDCalculator
+        from pymatgen.core import Structure
+    except ImportError as exc:
+        raise ImportError("pymatgen is required for XRD: pip install pymatgen") from exc
+
+    path = Path(path)
+    if path.is_dir():
+        contcar = path / "CONTCAR"
+        path = contcar if contcar.is_file() and contcar.stat().st_size else path / "POSCAR"
+
+    calculator = XRDCalculator(wavelength=wavelength)
+    pattern = calculator.get_pattern(
+        Structure.from_file(path), two_theta_range=two_theta_range
+    )
+    return {
+        "two_theta_deg": [float(x) for x in pattern.x],
+        "intensity": [float(y) for y in pattern.y],
+        "hkl": [
+            ", ".join("(" + " ".join(str(i) for i in h["hkl"]) + ")" for h in hkls)
+            for hkls in pattern.hkls
+        ],
+        "d_spacing_A": [float(d) for d in pattern.d_hkls],
+        "wavelength_A": float(calculator.wavelength),
+        "structure_file": path.name,
     }

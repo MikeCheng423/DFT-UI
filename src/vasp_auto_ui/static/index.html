@@ -518,6 +518,13 @@
         <h3>What do you want to calculate?</h3>
         <p class="sub">Each type fills in a tested INCAR template for you. If the case folder has its own INCAR, that one wins.</p>
         <div id="ctypes"></div>
+        <div id="nebendpoints" style="display:none">
+          <p class="sub">A NEB run needs a case with both endpoints. Pick them here (case folders or POSCAR files) — creating the case makes it the working case.</p>
+          <span class="inline wide"><label>initial structure</label><input id="cn-init" placeholder="inputs/state_A"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('cn-init')" title="Browse for the initial-state case">📁</button></span>
+          <span class="inline wide"><label>final structure</label><input id="cn-final" placeholder="inputs/state_B"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('cn-final')" title="Browse for the final-state case">📁</button></span>
+          <span class="inline"><label>case name</label><input id="cn-name" placeholder="A_to_B"></span>
+          <br><button class="act" onclick="buildTss('cn')">Create NEB case</button>
+        </div>
         <span class="inline" id="nebimgs" style="display:none"><label>NEB images</label><input id="c-neb" placeholder="5" title="Number of intermediate images between initial and final"></span>
       </div>
       <div class="card">
@@ -705,6 +712,7 @@
       <button class="ghost" onclick="toggleResTool('chgdiffcard')" title="Charge-density difference Δρ between a combined job and its fragments">Δρ Charge-density difference</button>
       <button class="ghost" onclick="toggleResTool('gdiagcard')" title="Free-energy diagram and overpotential (computational hydrogen electrode)">📊 Free-energy diagram</button>
       <button class="ghost" onclick="toggleResTool('magcard')" title="Per-atom magnetic moments from OUTCAR">🧲 Magnetic moments</button>
+      <button class="ghost" onclick="toggleResTool('nebcard')" title="Transition state: barriers and minimum energy path from an NEB job">🛣 Transition state</button>
     </div>
     <div style="margin-top:8px;font-size:12px;color:var(--dim)">
       remote-results cache: <span id="ana-cachesize">—</span>
@@ -712,15 +720,20 @@
     </div>
   </div>
   <div class="card" id="nebcard" style="display:none">
-    <h3>Minimum energy path — <span id="nebcase" style="text-transform:none"></span>
+    <h3>🛣 Transition state — <span id="nebcase" style="text-transform:none">pick an NEB job</span>
       <button class="ghost" onclick="exportCanvas('nebchart','neb_path.png')">⬇ PNG</button>
       <button class="ghost" onclick="exportNebCsv()">⬇ CSV</button>
       <button class="ghost" onclick="$('nebcard').style.display='none'">close</button></h3>
     <p class="sub">The reaction-coordinate (NEB) plot: energy of each image relative to the
       initial state. The peak is the transition state; <b>E<sub>a</sub></b> is the forward
       barrier and <b>ΔE</b> the reaction energy.</p>
-    <div id="nebstats" style="margin:4px 0;font-size:13px"></div>
-    <canvas id="nebchart" width="760" height="360"></canvas>
+    <span class="inline wide"><label>NEB job folder</label><input id="neb-dir" list="jobdirs"><button class="iconbtn" style="padding:3px 7px" onclick="slotPick('neb-dir')">📁</button><select id="neb-dir-m" class="slot-machine"></select></span>
+    <button class="act" onclick="computeNebProfile()">Read barriers</button>
+    <div id="nebbody" style="display:none">
+      <div id="nebstats" style="margin:4px 0;font-size:13px"></div>
+      <canvas id="nebchart" width="760" height="360"></canvas>
+      <div id="nebimages" style="display:flex;flex-wrap:wrap;gap:10px;margin-top:8px"></div>
+    </div>
   </div>
   <div class="card" id="doscard" style="display:none">
     <h3>Density of states — <span id="doscase" style="text-transform:none"></span>
@@ -787,8 +800,9 @@
       matching calculation type — pick the analysis that fits how the job was run:
       vibrational thermochemistry (ZPE/Gibbs, from a <code>freq</code> job),
       d-band centre (<code>dos</code> with LORBIT), work function (<code>workfunction</code>),
-      optical absorption (<code>optics</code>), or Bader atomic charges (<code>charge</code>).
-      Same maths as the CLI's <code>--thermo</code>/<code>--d-band</code>/<code>--work-function</code>/<code>--optics-parse</code>/<code>--bader</code>.</p>
+      optical absorption (<code>optics</code>), Bader atomic charges (<code>charge</code>),
+      or a simulated powder XRD pattern (any job with a relaxed structure).
+      Same maths as the CLI's <code>--thermo</code>/<code>--d-band</code>/<code>--work-function</code>/<code>--optics-parse</code>/<code>--bader</code>/<code>--xrd</code>.</p>
     <span class="inline wide"><label>job folder</label><input id="ana-dir" list="jobdirs" oninput="ANA_MACHINE=null"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('ana-dir')">📁</button></span>
     <br>
     <button class="ghost" onclick="anaThermo()" title="ZPE + thermal corrections from vibrational modes (calc type: freq)">🌡 ZPE / Gibbs</button>
@@ -800,6 +814,7 @@
     <button class="ghost" onclick="anaWorkfunction()" title="W = V_vacuum − E_Fermi from the LOCPOT planar average (calc type: workfunction)">⚡ Work function</button>
     <span class="inline"><label>axis</label><select id="ana-axis" style="width:50px"><option>a</option><option>b</option><option selected>c</option></select></span>
     <button class="ghost" onclick="anaOptics()" title="Absorption coefficient α(E) from the dielectric function (calc type: optics)">🌈 Absorption α(E)</button>
+    <button class="ghost" onclick="anaXrd()" title="Simulated powder XRD pattern (Cu Kα) from the relaxed structure (CONTCAR, else POSCAR)">💠 XRD pattern</button>
     <button class="ghost" onclick="anaBader()" title="Bader atomic charges — needs the Henkelman 'bader' binary on PATH and a CHGCAR (calc type: charge)">🧲 Bader charges</button>
     <pre class="console" id="ana-out" style="height:auto;max-height:260px;margin-top:8px">Pick a job folder, then choose an analysis.</pre>
     <canvas id="anachart" width="760" height="280" style="display:none"></canvas>
@@ -1080,10 +1095,17 @@ function renderCalcTypes() {
     `<div class="ctype${t === calcType ? " sel" : ""}" data-t="${t}" onclick="pickType('${t}')">
        <b>${t}</b><small>${META.calc_type_info[t] || ""}</small></div>`).join("");
 }
+/* The Calculate-tab endpoints block: shown when the neb type is picked but the
+   working case is not yet a TSS (initial/final) case. */
+function updateNebBlock() {
+  const el = $("nebendpoints");
+  if (el) el.style.display = (calcType === "neb" && currentCaseType() !== "tss") ? "block" : "none";
+}
 function pickType(t) {
   const changed = t !== calcType;
   calcType = t;
   renderCalcTypes();
+  updateNebBlock();
   if (t === "bands" && !$("k-mode").value) { $("k-mode").value = "line"; kModeChanged(); }
   if (changed) {
     syncIncarToType();
@@ -1129,6 +1151,7 @@ function setWork(path, type, machine) {
   updateWorkStatus();
   const isTss = currentCaseType() === "tss";
   $("nebimgs").style.display = isTss ? "inline-block" : "none";
+  updateNebBlock();
   // A case on a remote machine runs there in place — point the Calculate
   // "run on machine" selector at it so the UI matches what the server does.
   const rm = currentCaseMachine();
@@ -2166,12 +2189,13 @@ function importBrowse() {
     openPicker("i-path", { files: true });
   }
 }
-function buildTss() {
-  if (!$("nb-init").value.trim() || !$("nb-final").value.trim()) {
+function buildTss(prefix) {
+  const p = prefix || "nb";
+  if (!$(p + "-init").value.trim() || !$(p + "-final").value.trim()) {
     banner("A NEB case needs both an initial and a final structure."); return;
   }
-  api("/api/build", { action: "tss", initial: $("nb-init").value, final: $("nb-final").value,
-    output: $("nb-name").value || null,
+  api("/api/build", { action: "tss", initial: $(p + "-init").value, final: $(p + "-final").value,
+    output: $(p + "-name").value || null,
     machine: workingMachine(), root: isRemoteWorking() ? defaultCasesRoot() : null }).then(built);
 }
 function combineBody() {
@@ -2537,6 +2561,9 @@ async function doPreview() {
     p.INCAR + "\n--- KPOINTS ---\n" + p.KPOINTS;
 }
 async function startRun(mode, consoleId) {
+  if (calcType === "neb" && currentCaseType() !== "tss") {
+    banner("NEB needs a case with initial and final structures — create one in the block under the calculation types."); return;
+  }
   if (!(await ensureCase())) { banner("Nothing to run — build or import a structure in the Build tab first."); return; }
   if (calcType === "bands" && $("k-mode").value === "line" && !$("k-path").value) {
     banner("Band structures need a k-path — pick a preset (fcc, bcc, …) in the k-path field."); return;
@@ -3516,12 +3543,23 @@ function exportCanvas(id, name) {
 async function showNeb(i) {
   gotoAnalysis();
   const r = RESULTS[i];
-  let data;
-  try { data = await api("/api/neb?path=" + jobQS(r)); }
-  catch (e) { $("nebcard").style.display = "none"; return; }
-  LAST.neb = { name: r.case, data };
-  $("nebcase").textContent = r.case;
+  $("neb-dir").value = r.remote ? r.path : r.job_dir;
+  if ($("neb-dir-m")) $("neb-dir-m").value = r.remote ? r.machine : "local";
+  loadNebProfile(r.case, jobQS(r));
+}
+function computeNebProfile() {
+  const s = slotObj("neb-dir");
+  if (!s.path) { banner("Pick the NEB job folder."); return; }
+  const qs = encodeURIComponent(s.path)
+    + (s.machine !== "local" ? "&machine=" + encodeURIComponent(s.machine) : "");
+  loadNebProfile(s.path.replace(/\/+$/, "").split("/").pop() || s.path, qs);
+}
+async function loadNebProfile(name, qs) {
+  const data = await api("/api/neb?path=" + qs);   // api() banners the error
+  LAST.neb = { name, data };
+  $("nebcase").textContent = name;
   $("nebcard").style.display = "block";
+  $("nebbody").style.display = "block";
   const eV = x => (x >= 0 ? "+" : "") + x.toFixed(3);
   $("nebstats").innerHTML =
     `<span class="badge ok">E<sub>a</sub> (forward) = ${data.forward_barrier_eV.toFixed(3)} eV</span> ` +
@@ -3529,6 +3567,63 @@ async function showNeb(i) {
     `<span class="badge">ΔE = ${eV(data.delta_e_eV)} eV</span> ` +
     `<span class="badge dim">transition state: image ${data.ts_image} of ${data.n_images - 1}</span>`;
   drawNebProfile(data);
+  loadNebImages(qs);
+}
+/* One structure thumbnail per NEB image (side view, a–c plane), labelled with
+   the image number and its reaction coordinate; the transition state is
+   outlined red. Click a thumbnail to open that image in the 3D viewer. */
+async function loadNebImages(qs) {
+  const wrap = $("nebimages");
+  wrap.innerHTML = "";
+  let t;
+  try { t = await api("/api/trajectory?path=" + qs, null, true); }
+  catch (e) { return; }              // no structures — the profile alone is fine
+  if (t.kind !== "neb") return;
+  const d = LAST.neb.data;
+  LAST.neb.traj = t;
+  // frames and profile images both come from the numbered dirs, but an image
+  // can have a structure and no energy (or vice versa) — only label with the
+  // reaction coordinate when they line up 1:1
+  const aligned = t.frames.length === d.images.length;
+  // shared x–z bounds across all images so every thumbnail uses the same view
+  let x0 = 1/0, x1 = -1/0, z0 = 1/0, z1 = -1/0;
+  for (const f of t.frames) for (const p of f) {
+    x0 = Math.min(x0, p[0]); x1 = Math.max(x1, p[0]);
+    z0 = Math.min(z0, p[2]); z1 = Math.max(z1, p[2]);
+  }
+  const W = 170, H = 150, pad = 14;
+  const s = Math.min((W - 2*pad) / (x1 - x0 || 1), (H - 2*pad) / (z1 - z0 || 1));
+  t.frames.forEach((frame, i) => {
+    const isTs = aligned && i === d.ts_index;
+    const div = document.createElement("div");
+    div.style.cssText = "text-align:center;cursor:pointer";
+    div.title = "Open this image in the 3D viewer";
+    div.onclick = () => {
+      document.querySelector('nav button[data-tab="build"]').click();
+      loadTrajectory(LAST.neb.traj); stopAnim(); setFrame(i);
+    };
+    const cv = document.createElement("canvas");
+    cv.width = W; cv.height = H;
+    cv.style.cssText = `border:1.5px solid ${isTs ? "#ff6b6b" : "#3a424d"};border-radius:6px`;
+    const ctx = cv.getContext("2d");
+    chartBg(ctx, W, H);
+    // depth-sort along b so nearer atoms draw on top
+    frame.map((p, k) => [p, t.symbols[k]]).sort((a, b) => a[0][1] - b[0][1])
+      .forEach(([p, el]) => {
+        const X = pad + (p[0] - x0) * s + (W - 2*pad - (x1 - x0) * s) / 2;
+        const Y = H - pad - (p[2] - z0) * s - (H - 2*pad - (z1 - z0) * s) / 2;
+        ctx.beginPath(); ctx.arc(X, Y, (RADII[el] || 1.0) * s * 0.9 + 1.5, 0, 2*Math.PI);
+        ctx.fillStyle = colorOf(el); ctx.fill();
+        ctx.strokeStyle = "rgba(0,0,0,.35)"; ctx.stroke();
+      });
+    const lbl = document.createElement("div");
+    lbl.style.cssText = "font-size:12px;margin-top:2px" + (isTs ? ";color:#ff6b6b" : "");
+    lbl.textContent = aligned
+      ? `${d.images[i]} · x = ${d.reaction_coord[i].toFixed(2)}` + (isTs ? " · TS" : "")
+      : `image ${i}`;
+    div.append(cv, lbl);
+    wrap.appendChild(div);
+  });
 }
 function drawNebProfile(data) {
   const cv = $("nebchart"), ctx = cv.getContext("2d");
@@ -4046,6 +4141,23 @@ async function anaOptics() {
   ]);
   drawAnaChart(d.energies_eV, d.alpha_cm1, "photon energy (eV)", "α (cm⁻¹)", []);
 }
+async function anaXrd() {
+  const dir = anaDir();
+  const d = await api("/api/xrd?path=" + anaQS(dir));
+  const order = d.intensity.map((_, i) => i).sort((a, b) => d.intensity[b] - d.intensity[a]);
+  const lines = [
+    `structure    : ${d.structure_file}   λ = ${d.wavelength_A.toFixed(4)} Å`,
+    `peaks        : ${d.two_theta_deg.length} in 10–90° 2θ  (strongest first)`,
+    "   2θ (°)   I (%)   d (Å)   hkl",
+  ];
+  for (const i of order.slice(0, 12))
+    lines.push(`  ${d.two_theta_deg[i].toFixed(2).padStart(6)} ${d.intensity[i].toFixed(1).padStart(7)} ${d.d_spacing_A[i].toFixed(3).padStart(7)}   ${d.hkl[i]}`);
+  anaShow("xrd", dir.split("/").pop(), d, lines);
+  const xs = [], ys = [];
+  for (let i = 0; i < d.two_theta_deg.length; i++)
+    xs.push(d.two_theta_deg[i], d.two_theta_deg[i], d.two_theta_deg[i]), ys.push(0, d.intensity[i], 0);
+  drawAnaChart(xs, ys, "2θ (deg)", "intensity (%)", []);
+}
 async function anaBader() {
   const dir = anaDir();
   banner("Running the bader binary — can take a while on fine grids…", "info");
@@ -4075,6 +4187,9 @@ function exportAnaCsv() {
   else if (ANA.kind === "optics")
     downloadCSV(n + "_absorption.csv", ["energy_eV", "alpha_cm1", "eps_real", "eps_imag"],
       d.energies_eV.map((e, i) => [e, d.alpha_cm1[i], d.real[i], d.imag[i]]));
+  else if (ANA.kind === "xrd")
+    downloadCSV(n + "_xrd.csv", ["two_theta_deg", "intensity", "d_spacing_A", "hkl"],
+      d.two_theta_deg.map((t, i) => [t, d.intensity[i], d.d_spacing_A[i], '"' + d.hkl[i] + '"']));
   else if (ANA.kind === "bader")
     downloadCSV(n + "_bader.csv", ["index", "element", "electrons", "net_charge_e"],
       d.charges.map(c => [c.index, c.element, c.electrons, c.net_charge]));
