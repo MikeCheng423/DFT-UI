@@ -221,9 +221,9 @@
 
 <div class="card">
   <h3>Run an existing folder</h3>
-  <p class="sub">Point at a folder that already has ready-made inputs — one case (POSCAR/INCAR), or a project folder holding several case subfolders, each with its own POSCAR/INCAR (e.g. <code>inputs/00_refs</code>). Every case folder found gets run.</p>
-  <span class="inline wide"><label>folder</label><input id="proj-dir" placeholder="/home/vv/vasp_auto/inputs/00_refs"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('proj-dir')">📁</button></span>
-  <span class="inline"><label>machine</label><select id="proj-remote" onchange="projMachineChanged()" title="This computer (local) or a saved remote machine (managed in the Remote tab)."></select></span>
+  <p class="sub">Point at a folder that already has ready-made inputs — one case (POSCAR/INCAR), or a project folder holding several case subfolders, each with its own POSCAR/INCAR (e.g. <code>inputs/00_refs</code>). Every case folder found gets run. Pick the machine the folder lives on first — 📁 then browses that machine (local or a saved remote, over SSH).</p>
+  <span class="inline"><label>machine</label><select id="proj-remote" onchange="projMachineChanged()" title="This computer (local) or a saved remote machine (managed in the Remote tab). The folder browser and the run both happen on this machine."></select></span>
+  <span class="inline wide"><label>folder</label><input id="proj-dir" placeholder="/home/vv/vasp_auto/inputs/00_refs"><button class="iconbtn" style="padding:3px 7px" onclick="projBrowse()">📁</button></span>
   <span class="inline"><label>CPU cores (MPI ranks)</label><input id="proj-cpus" placeholder="1" title="Passed to mpirun -np"></span>
   <span class="inline"><label>cases in parallel</label><input id="proj-par" placeholder="1" title="Run up to N cases at once when the folder has several"></span>
   <span class="inline"><label>scheduler</label><select id="proj-sched" title="local runs mpirun here; slurm/pbs submit to a queue"><option>local</option><option>slurm</option><option>pbs</option></select></span>
@@ -1002,6 +1002,30 @@ ssh user@host 'echo ok'      # must print ok with no password</pre>
       <span style="flex:1"></span>
       <button class="act" onclick="incarModalDone(true)">▶ Save &amp; resume</button>
       <button class="ghost" onclick="incarModalDone(false)">cancel</button>
+    </div>
+  </div>
+</div>
+<!-- Per-step INCAR/KPOINTS editor (Workflow tab) -->
+<div id="wstepmodal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:60">
+  <div style="background:var(--panel);max-width:640px;margin:36px auto;border:1px solid var(--line);border-radius:10px;padding:14px 16px;max-height:88vh;display:flex;flex-direction:column">
+    <h3 id="wstep-title" style="margin:0 0 4px;font-size:14px">Step inputs</h3>
+    <p class="sub" style="margin:0 0 8px">Saved as <code>INCAR_&lt;type&gt;</code> / <code>KPOINTS_&lt;type&gt;</code> in the case — this step picks them up automatically. Overrides in <code>workflow.yaml</code> still layer on top.</p>
+    <div style="overflow:auto;flex:1;min-height:200px">
+      <details style="margin:0 0 8px" open>
+        <summary style="cursor:pointer">⚙ Guided settings — pick in plain language, no VASP tags</summary>
+        <div id="wstep-form"></div>
+        <button class="ghost" onclick="applyAllIncarSettings('wstep-form','wstep-incar')">Write all these settings into INCAR</button>
+      </details>
+      <label style="font-size:12px;color:var(--dim)">INCAR</label>
+      <textarea id="wstep-incar" rows="12" spellcheck="false" style="width:100%"></textarea>
+      <label style="font-size:12px;color:var(--dim)">k-mesh (blank = inherit the case / previous step)</label>
+      <input id="wstep-kpts" placeholder="4  or  3x3x1" title="One number N → NxNxN (bulk); a triplet hxkxl sets each axis (slabs: keep c at 1). Gamma-centred." style="width:100%">
+    </div>
+    <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
+      <button class="ghost" onclick="wstepLoadTemplate()" title="Reset the INCAR to the fresh template for this type">Reset to template</button>
+      <span style="flex:1"></span>
+      <button class="act" onclick="saveStepInputs()">Save</button>
+      <button class="ghost" onclick="closeWStep()">Cancel</button>
     </div>
   </div>
 </div>
@@ -3022,21 +3046,22 @@ async function saveIncar() {
 
 /* ---------- guided INCAR settings (from the option catalog) ---------- */
 let incarOptionsCache = {};                              // groups per calc type
-async function renderIncarForm() {
-  const type = calcType || "scf";
+async function renderIncarForm(type, formId, taId) {
+  type = type || calcType || "scf";
+  formId = formId || "incar-form"; taId = taId || "incar";
   let groups = incarOptionsCache[type];
   if (!groups) {
     try { groups = (await api("/api/incar_options?type=" + encodeURIComponent(type), null, true)).groups; }
     catch (e) {                                          // older server without the endpoint
-      $("incar-form").innerHTML = '<p class="sub">Restart vasp-auto-ui to enable guided settings.</p>';
+      $(formId).innerHTML = '<p class="sub">Restart vasp-auto-ui to enable guided settings.</p>';
       return;
     }
     incarOptionsCache[type] = groups;
   }
-  $("incar-form").innerHTML = Object.entries(groups).map(([group, fields]) => {
+  $(formId).innerHTML = Object.entries(groups).map(([group, fields]) => {
     const rows = fields.map(f => {
       const doc = f.doc ? ` <a href="${f.doc}" target="_blank" title="VASP wiki: ${f.tag}" style="color:var(--accent);text-decoration:none">?</a>` : "";
-      const on = `onchange="applyIncarSetting('${f.tag}', this.value)"`;
+      const on = `onchange="applyIncarSetting('${f.tag}', this.value, '${taId}')"`;
       let ctrl;
       if (f.kind === "choice") {
         const opts = f.options.map(o =>
@@ -3055,18 +3080,20 @@ async function renderIncarForm() {
       <legend style="padding:0 4px;color:var(--dim)">${group}</legend>${rows}</fieldset>`;
   }).join("");
 }
-async function applyIncarSetting(tag, value) {
-  const res = await api("/api/incar_apply", { text: $("incar").value, choices: { [tag]: value } });
-  $("incar").value = res.text;
-  incarTemplateText = null;                              // form edits are user content, not a pristine template
+async function applyIncarSetting(tag, value, taId) {
+  taId = taId || "incar";
+  const res = await api("/api/incar_apply", { text: $(taId).value, choices: { [tag]: value } });
+  $(taId).value = res.text;
+  if (taId === "incar") incarTemplateText = null;        // form edits are user content, not a pristine template
 }
-async function applyAllIncarSettings() {
+async function applyAllIncarSettings(formId, taId) {
+  formId = formId || "incar-form"; taId = taId || "incar";
   const choices = {};
-  document.querySelectorAll("#incar-form [data-tag]").forEach(el => { choices[el.dataset.tag] = el.value; });
-  const res = await api("/api/incar_apply", { text: $("incar").value, choices });
-  $("incar").value = res.text;
-  incarTemplateText = null;
-  banner("Guided settings written into the INCAR editor. Save to case to keep them.", "info");
+  document.querySelectorAll(`#${formId} [data-tag]`).forEach(el => { choices[el.dataset.tag] = el.value; });
+  const res = await api("/api/incar_apply", { text: $(taId).value, choices });
+  $(taId).value = res.text;
+  if (taId === "incar") incarTemplateText = null;
+  banner("Guided settings written into the INCAR editor. Save to keep them.", "info");
 }
 
 /* ---------- workflow ---------- */
@@ -3092,6 +3119,7 @@ function convergeSettings() {
   if ($("wc-reuse") && $("wc-reuse").checked) s.reuse_wavecar = true;
   return s;
 }
+let wYamlGenerated = "";                                 // last auto-generated yaml; if the box differs, the user hand-edited it
 function workflowYaml() {
   if (!wf.length) return "";
   const cs = convergeSettings();
@@ -3107,11 +3135,15 @@ function workflowYaml() {
 function renderSteps() {
   $("w-steps").innerHTML = wf.map((s, i) =>
     `<li><b>${s}</b> <small style="color:var(--dim)">${stepInfo(s)}</small>
+       <button class="ghost" onclick="editStep(${i})" title="Edit this step's INCAR / KPOINTS">✎</button>
        <button class="ghost" onclick="moveStep(${i},-1)" title="Move up">↑</button>
        <button class="ghost" onclick="moveStep(${i},1)" title="Move down">↓</button>
        <button class="ghost" onclick="wf.splice(${i},1);renderSteps()" title="Remove">×</button></li>`
   ).join("") || "<li style='color:var(--dim);list-style:none'>no steps yet — use a preset above</li>";
-  $("w-yaml").value = workflowYaml();
+  const gen = workflowYaml();
+  if (!$("w-yaml").value.trim() || $("w-yaml").value === wYamlGenerated)
+    $("w-yaml").value = gen;                              // mirror the builder until the box is hand-edited
+  wYamlGenerated = gen;
 }
 async function runWorkflow() {
   if (!(await ensureCase())) { banner("Nothing to run — build or import a structure in the Build tab first."); return; }
@@ -3121,16 +3153,18 @@ async function runWorkflow() {
     spin: $("w-spin").checked || null,
     cpus: ($("w-cpus") && $("w-cpus").value) || $("c-cpus").value || null,
     remote: machine !== "local" ? machine : null };
-  if (wf.includes("converge")) body.workflow_yaml = workflowYaml();
-  else body.workflow = wf.join(",");
+  // Always send YAML so per-step incar:/kpoints: overrides (and converge settings)
+  // survive; honour hand-edits to the advanced box, else regenerate from the builder.
+  const box = $("w-yaml").value;
+  body.workflow_yaml = (box.trim() && box !== wYamlGenerated) ? box : workflowYaml();
   const data = await api("/api/run", body);
   activeToken = data.token; activeConsole = "w-console";
   $("w-console").textContent = "starting…";
   const where = machine !== "local" ? ` on ${machine}` : "";
-  if (body.workflow_yaml)
-    banner(`Convergence workflow started${where} — wrote workflow.yaml; the chosen ENCUT/SIGMA/k-mesh carry into the later steps.`, "info");
-  else if (where)
-    banner(`Workflow shipped to ${machine}. Track it in the Results tab (machine: ${machine}).`, "info");
+  banner(wf.includes("converge")
+    ? `Convergence workflow started${where} — the chosen ENCUT/SIGMA/k-mesh carry into the later steps.`
+    : `Workflow started${where}. Track it in the Results tab${machine !== "local" ? ` (machine: ${machine})` : ""}.`,
+    "info");
 }
 async function saveWorkflowYaml() {
   if (!(await ensureCase())) { banner("No working case yet — build or import a structure in the Build tab first."); return; }
@@ -3138,19 +3172,75 @@ async function saveWorkflowYaml() {
   banner("workflow.yaml saved — the CLI will use it automatically for this case.", "info");
 }
 
+/* ---------- per-step INCAR/KPOINTS editor ---------- */
+let wstepType = null;
+async function editStep(i) {
+  if (!(await ensureCase())) { banner("Build or import a structure in the Build tab first."); return; }
+  const type = wf[i] === "converge" ? "scf" : wf[i];     // a converge step stages its INCAR as SCF
+  wstepType = type;
+  $("wstep-title").textContent = `Step ${i + 1}: ${wf[i]} — INCAR & KPOINTS`;
+  const dir = currentCase();
+  // Prefer an already-saved per-type INCAR, else start from the type's template.
+  const inc = await api(`/api/file?dir=${encodeURIComponent(dir)}&name=INCAR_${type}` + caseQS());
+  $("wstep-incar").value = inc.exists ? inc.text : (await api("/api/template?type=" + type)).text;
+  const kp = await api(`/api/file?dir=${encodeURIComponent(dir)}&name=KPOINTS_${type}` + caseQS());
+  $("wstep-kpts").value = kp.exists ? kpMeshFromText(kp.text) : "";
+  renderIncarForm(type, "wstep-form", "wstep-incar");
+  $("wstepmodal").style.display = "block";
+}
+async function wstepLoadTemplate() {
+  $("wstep-incar").value = (await api("/api/template?type=" + wstepType)).text;
+}
+async function saveStepInputs() {
+  const type = wstepType, dir = currentCase();
+  const mesh = $("wstep-kpts").value.trim();
+  let kptext = null;
+  if (mesh) { kptext = kpMeshText(mesh); if (kptext === null) return; }   // bad mesh — abort, nothing written
+  await api("/api/file", caseBody({ dir, name: "INCAR_" + type, text: $("wstep-incar").value }));
+  if (kptext) await api("/api/file", caseBody({ dir, name: "KPOINTS_" + type, text: kptext }));
+  closeWStep();
+  banner(`Saved INCAR_${type}${mesh ? " + KPOINTS_" + type : ""} — this ${type} step will use ${mesh ? "them" : "it"}.`, "info");
+}
+function closeWStep() { $("wstepmodal").style.display = "none"; }
+/* Canonical automatic-mesh KPOINTS, matching kpoints.mesh_kpoints_text. */
+function kpMeshText(spec) {
+  const p = spec.split(/[x\s,]+/).map(Number).filter(n => Number.isFinite(n) && n > 0);
+  const m = p.length === 1 ? [p[0], p[0], p[0]] : (p.length === 3 ? p : null);
+  if (!m) { banner("k-mesh needs one number (N→NxNxN) or three (hxkxl), e.g. 4 or 3x3x1."); return null; }
+  return `Automatic mesh\n0\nGamma\n${m[0]} ${m[1]} ${m[2]}\n0 0 0\n`;
+}
+function kpMeshFromText(text) {                            // 4th line holds "a b c"
+  const line = (text.split(/\r?\n/)[3] || "").trim();
+  return line ? line.split(/\s+/).join("x") : "";
+}
+
+/* Browse for the folder to run, on the machine picked above — local picker,
+   or the remote one over SSH (mirrors saveBrowse, folder mode). */
+function projBrowse() {
+  const m = $("proj-remote").value, r = REMOTES.find(x => x.name === m);
+  if (m && m !== "local") {
+    openPicker("proj-dir", { machine: m, root: (r && r.remote_root) || "", what: "a folder (or project folder) on that machine" });
+  } else {
+    openPicker("proj-dir");
+  }
+}
 /* Run a folder as-is, bypassing the working-case builder flow: the CLI's own
    target scan (target_utils.inspect_target) decides whether it's a single
-   case or a project of several case subfolders, and runs every one found. */
+   case or a project of several case subfolders, and runs every one found.
+   Picking a remote machine above means the folder already lives there (same
+   "machine" meaning as the Working case card) — the server scans it over SSH
+   (single case or project, same rules as inspect_target), fetches every case
+   found, and re-runs them there. A local folder just runs here. */
 async function runProjectFolder() {
   const target = $("proj-dir").value.trim();
   if (!target) { banner("Pick a folder first."); return; }
-  const remote = $("proj-remote").value !== "local" ? $("proj-remote").value : null;
+  const m = $("proj-remote").value;
   const data = await api("/api/run", {
     target, mode: "run",
     cpus: $("proj-cpus").value || null,
     parallel: $("proj-par").value || null,
     scheduler: $("proj-sched").value,
-    remote,
+    machine: m !== "local" ? m : null,
   });
   activeToken = data.token; activeConsole = "proj-console";
   $("proj-console").style.display = "block";

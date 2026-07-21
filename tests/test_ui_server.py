@@ -1,6 +1,8 @@
 import json
+import shutil
 import threading
 import urllib.request
+from pathlib import Path
 
 import pytest
 
@@ -151,6 +153,55 @@ def test_api_run_writes_workflow_yaml(tmp_path, monkeypatch):
     # The structured workflow lands in the case, and no --workflow string is passed.
     assert (case_dir / "workflow.yaml").read_text() == yaml_text
     assert "--workflow" not in captured["command"]
+
+
+def test_api_run_fetches_remote_project_folder(tmp_path, monkeypatch):
+    """'Run an existing folder' against a machine, pointed at a project folder
+    (several case subdirs on the remote, not a POSCAR directly under it) should
+    fetch every case found — not just look for a POSCAR at the given path."""
+    remote_root = tmp_path / "remote_project"
+    for name in ("caseA", "caseB"):
+        case_dir = remote_root / name
+        case_dir.mkdir(parents=True)
+        (case_dir / "POSCAR").write_text(f"{name}\n")
+
+    remote = {"name": "fake", "host": "h"}
+    monkeypatch.setattr(ui_server, "_resolve_remote", lambda name: remote)
+
+    def fake_list_cases(rmt, path):
+        cases = [{"name": d.name, "path": str(d), "type": "scf"}
+                  for d in sorted(Path(path).glob("*")) if (d / "POSCAR").is_file()]
+        return {"path": path, "cases": cases}
+
+    def fake_fetch(rmt, remote_path, local_path):
+        Path(local_path).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(remote_path, local_path)
+        return Path(local_path)
+
+    monkeypatch.setattr(ui_server, "list_remote_cases", fake_list_cases)
+    monkeypatch.setattr(ui_server, "fetch_remote_file", fake_fetch)
+
+    captured = {}
+
+    class FakeProc:
+        def poll(self):
+            return 0
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        return FakeProc()
+
+    monkeypatch.setattr(ui_server.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(ui_server, "_write_remote_config", lambda name: "irrelevant.json")
+
+    ui_server.api_run({}, {
+        "target": str(remote_root), "mode": "run", "machine": "fake",
+    })
+
+    # command = [python, -u, -m, vasp_auto.cli, <target>, ...] — target is positional.
+    target = Path(captured["command"][4])
+    assert (target / "caseA" / "POSCAR").is_file()
+    assert (target / "caseB" / "POSCAR").is_file()
 
 
 def test_working_machine_direct_roundtrip(tmp_path, monkeypatch, scf_case):

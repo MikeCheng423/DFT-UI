@@ -138,3 +138,85 @@ def test_offload_bundles_neb_endpoints(tmp_path, monkeypatch):
     assert "final/POSCAR" in captured["tree"]
     assert "POTCAR" in captured["tree"]
     assert "--neb-images" in captured["flags"] and "3" in captured["flags"]
+
+
+def test_offload_wait_for_slot_blocks_until_job_finishes(tmp_path, monkeypatch):
+    """A project run with more cases than --parallel needs each offloaded case to
+    hold its worker slot until the remote job actually finishes — otherwise every
+    case launches within moments of each other and the cap does nothing."""
+    import vasp_auto.runner as runner
+    import vasp_auto.potcar_finder as potcar_finder
+    from vasp_auto.cli import _run_detached_offload
+    from vasp_auto.job_manager import make_case_info
+
+    case = tmp_path / "case"
+    case.mkdir()
+    (case / "POSCAR").write_text("Au\n1.0\n10 0 0\n0 10 0\n0 0 10\nAu\n1\nCartesian\n0 0 0\n")
+
+    monkeypatch.setattr(runner, "submit_job_detached", lambda *a, **kw: {
+        "machine": "apl2", "remote_dir": "/r/case", "inputs_dir": "/r/in",
+        "control_dir": "/r/ctl", "pid": "123", "log": "/r/log",
+    })
+    monkeypatch.setattr(potcar_finder, "build_potcar",
+                        lambda **kw: Path(kw["output_path"]).write_text("POTCAR\n"))
+
+    polls = []
+
+    def fake_poll(remote, control_dir, pid):
+        polls.append((control_dir, pid))
+        return {"state": "running" if len(polls) < 3 else "completed", "return_code": None}
+
+    monkeypatch.setattr(runner, "poll_detached_job", fake_poll)
+    sleeps = []
+    monkeypatch.setattr("time.sleep", lambda s: sleeps.append(s))
+
+    args = _args(["inputs/case"])
+    args.cpus = 8
+    config = {"potcar_root": str(tmp_path / "pot"), "vasp_executable": "vasp_std"}
+    case_info = make_case_info(case, tmp_path / "jobs", single_mode=True)
+    remote = {"name": "apl2", "host": "h", "remote_root": "/r", "vasp_executable": "/v"}
+
+    case_info_out, rows = _run_detached_offload(
+        case, case_info, args, config, remote, None, None, "single", "case",
+        wait_for_slot=True,
+    )
+
+    # Polled until "completed" (3 calls: running, running, completed) and slept
+    # once per poll — the slot was held, not freed the moment submission returned.
+    assert len(polls) == 3
+    assert polls[0] == ("/r/ctl", "123")
+    assert len(sleeps) == 3
+    assert rows[0]["remote_dir"] == "/r/case"
+
+
+def test_offload_no_wait_when_slot_not_capped(tmp_path, monkeypatch):
+    """Without wait_for_slot (the default — a lone case, or a batch that already
+    fits under --parallel), offload still returns the moment submission is done."""
+    import vasp_auto.runner as runner
+    import vasp_auto.potcar_finder as potcar_finder
+    from vasp_auto.cli import _run_detached_offload
+    from vasp_auto.job_manager import make_case_info
+
+    case = tmp_path / "case"
+    case.mkdir()
+    (case / "POSCAR").write_text("Au\n1.0\n10 0 0\n0 10 0\n0 0 10\nAu\n1\nCartesian\n0 0 0\n")
+
+    monkeypatch.setattr(runner, "submit_job_detached", lambda *a, **kw: {
+        "machine": "apl2", "remote_dir": "/r/case", "inputs_dir": "/r/in",
+        "control_dir": "/r/ctl", "pid": "123", "log": "/r/log",
+    })
+    monkeypatch.setattr(potcar_finder, "build_potcar",
+                        lambda **kw: Path(kw["output_path"]).write_text("POTCAR\n"))
+
+    def fail_poll(*a, **kw):
+        raise AssertionError("poll_detached_job must not be called without wait_for_slot")
+
+    monkeypatch.setattr(runner, "poll_detached_job", fail_poll)
+
+    args = _args(["inputs/case"])
+    args.cpus = 8
+    config = {"potcar_root": str(tmp_path / "pot"), "vasp_executable": "vasp_std"}
+    case_info = make_case_info(case, tmp_path / "jobs", single_mode=True)
+    remote = {"name": "apl2", "host": "h", "remote_root": "/r", "vasp_executable": "/v"}
+
+    _run_detached_offload(case, case_info, args, config, remote, None, None, "single", "case")

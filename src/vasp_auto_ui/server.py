@@ -108,6 +108,15 @@ REMOTE_FIELDS = ("host", "user", "port", "ssh_key", "remote_root",
 
 EDITABLE_FILES = {"INCAR", "KPOINTS", "POSCAR", "workflow.yaml", "config.yaml"}
 
+
+def _editable(name: str) -> bool:
+    """Standard input files, plus the per-step INCAR_<type>/KPOINTS_<type> the
+    workflow editor writes. `isalnum` on the suffix blocks path traversal."""
+    if name in EDITABLE_FILES:
+        return True
+    base, sep, suffix = name.partition("_")
+    return bool(sep) and base in ("INCAR", "KPOINTS") and suffix.isalnum()
+
 JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
 
@@ -347,6 +356,37 @@ def _fetch_remote_case(marker: dict, dest: Path, names=None) -> Path:
     if missing:
         raise FileNotFoundError(f"Remote case {remote_dir} is missing {sorted(missing)}")
     return dest
+
+
+def _fetch_remote_target(remote_name: str, target: str, dest_root: Path) -> Path:
+    """Pull a case, or a whole project of cases, that already lives on a remote
+    machine into a local staging dir under dest_root — mirroring how
+    inspect_target tells single vs. project apart locally, but over SSH via
+    list_remote_cases. Returns the local path to hand to the CLI (one case dir,
+    or a project dir holding several fetched case subdirs)."""
+    remote = _resolve_remote(remote_name)
+    target = target.rstrip("/")
+    listing = list_remote_cases(remote, target)
+    cases = listing["cases"]
+    if not cases:
+        raise FileNotFoundError(
+            f"No VASP case found under {target} on {remote_name} "
+            "(needs POSCAR, or subfolders that do)."
+        )
+    if len(cases) == 1 and cases[0]["path"].rstrip("/") == target:
+        case = cases[0]
+        dest = dest_root / (case["name"] or "case")
+        dest.mkdir(parents=True)
+        marker = {"machine": remote_name, "remote_dir": case["path"], "type": case["type"]}
+        _fetch_remote_case(marker, dest)
+        return dest
+
+    project = dest_root / (Path(target).name or "project")
+    project.mkdir(parents=True)
+    for case in cases:
+        marker = {"machine": remote_name, "remote_dir": case["path"], "type": case["type"]}
+        _fetch_remote_case(marker, project / case["name"])
+    return project
 
 
 @contextmanager
@@ -1812,7 +1852,7 @@ def api_report(_query, body):
 
 def api_file_get(query, _body):
     name = query["name"][0]
-    if name not in EDITABLE_FILES:
+    if not _editable(name):
         raise ValueError(f"Not an editable file: {name}")
     dir_str = query["dir"][0]
     loc = _remote_loc(dir_str, query.get("machine", ["local"])[0])
@@ -1831,7 +1871,7 @@ def api_file_get(query, _body):
 
 def api_file_save(_query, body):
     name = body["name"]
-    if name not in EDITABLE_FILES:
+    if not _editable(name):
         raise ValueError(f"Not an editable file: {name}")
     loc = _remote_loc(body["dir"], body.get("machine"))
     if loc:
@@ -1937,10 +1977,17 @@ def api_run(_query, body):
     # subprocess, so it is left for the OS temp cleaner rather than removed here.)
     loc = _remote_loc(body["target"], body.get("machine"), body.get("case_type"))
     if loc:
-        staging = Path(tempfile.mkdtemp(prefix="vasp_auto_rc_")) / (loc.get("case_name") or "case")
-        staging.mkdir(parents=True)
-        _fetch_remote_case(loc, staging)
-        body = {**body, "target": str(staging), "remote": loc["machine"]}
+        staging_root = Path(tempfile.mkdtemp(prefix="vasp_auto_rc_"))
+        if _is_remote_machine(body.get("machine")):
+            # "Run an existing folder" pointed at a machine: the folder may be one
+            # case, or a project holding several — scan it over SSH the same way
+            # inspect_target does locally, and fetch every case found.
+            target = _fetch_remote_target(loc["machine"], loc["remote_dir"], staging_root)
+        else:
+            target = staging_root / (loc.get("case_name") or "case")
+            target.mkdir(parents=True)
+            _fetch_remote_case(loc, target)
+        body = {**body, "target": str(target), "remote": loc["machine"]}
 
     # A structured workflow (e.g. one with a convergence step that carries its
     # own scan settings) is written to the case's workflow.yaml, which the CLI

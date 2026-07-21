@@ -85,6 +85,21 @@ def test_run_workflow_step_kpoints_override(scf_case, potcar_library, tmp_path):
     assert "8 8 8" in kpoints
 
 
+def test_run_workflow_step_reads_per_type_files(scf_case, potcar_library, tmp_path):
+    # INCAR_<type>/KPOINTS_<type> saved in the case (the workflow editor) are the
+    # base for that step, no workflow.yaml overrides needed.
+    (scf_case / "KPOINTS_dos").write_text("Automatic mesh\n0\nGamma\n6 6 6\n0 0 0\n")
+    (scf_case / "INCAR_dos").write_text("ISMEAR = -5\nNEDOS = 3001\n")
+    case_info = make_case_info(scf_case, tmp_path / "jobs", single_mode=True)
+    config = {"vasp_executable": "fake_vasp", "potcar_root": str(potcar_library)}
+
+    run_workflow_case(case_info, "scf,dos", config, prepare_only=True)
+
+    step = Path(case_info["job_dir"]) / "02_dos"
+    assert "6 6 6" in (step / "KPOINTS").read_text()
+    assert "NEDOS = 3001" in (step / "INCAR").read_text()
+
+
 # ------------------------------------------------- convergence workflow step
 
 def test_parse_workflow_steps_accepts_converge():

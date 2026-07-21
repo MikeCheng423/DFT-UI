@@ -2223,15 +2223,23 @@ def _bundle_qe_pseudos(bundle: Path, case_name: str, config: dict, machine) -> l
 
 
 def _run_detached_offload(case_dir, case_info, args, config, remote, calc_type, kpoints_spec,
-                          mode, project_name, engine="vasp"):
+                          mode, project_name, engine="vasp", wait_for_slot=False):
     """Offload a full calculation to the remote engine (run_mode: ssh_detached).
 
     Prepares an inputs bundle (a single-case POSCAR, or a TSS/NEB case's
     initial/final endpoints, plus a pre-built POTCAR and any user INCAR/KPOINTS —
     or, for QE, the UPF pseudopotentials and any user pw.in) locally, ships it,
     and launches the remote vasp_auto detached so the local host can be powered
-    off. Returns (case_info, [row])."""
+    off. Returns (case_info, [row]).
+
+    Submission itself takes seconds no matter how long VASP runs, so a project
+    run with more cases than its --parallel cap needs wait_for_slot=True: it
+    polls this case's own job to completion before returning, so the
+    ThreadPoolExecutor driving the project only ever has `parallel` cases
+    actually running on the remote at once (otherwise every case would launch
+    back-to-back within moments of each other, ignoring the cap)."""
     import tempfile
+    import time
     from vasp_auto.potcar_finder import build_potcar
     from vasp_auto.runner import submit_job_detached
 
@@ -2297,7 +2305,20 @@ def _run_detached_offload(case_dir, case_info, args, config, remote, calc_type, 
         )
 
     print(f"Launched  : {machine} pid {submission['pid'] or '?'} -> {submission['remote_dir']}")
-    print("Fetch later from the Results tab (⬇) or with --parse-only after copying back.")
+    if wait_for_slot and submission.get("pid"):
+        # Hold this case's --parallel slot (the ThreadPoolExecutor worker that
+        # called us) until it actually finishes, instead of freeing it the moment
+        # submission returns — otherwise every case in the project would launch
+        # within moments of each other regardless of the cap.
+        from vasp_auto.runner import poll_detached_job
+        print(f"Waiting   : {case_name} holds a --parallel slot on {machine} until it finishes")
+        while True:
+            time.sleep(20)
+            status = poll_detached_job(remote, submission["control_dir"], submission["pid"])
+            if status["state"] != "running":
+                break
+    else:
+        print("Fetch later from the Results tab (⬇) or with --parse-only after copying back.")
     row = build_row(project_name, mode, case_info, status_override="remote")
     row["machine"] = machine
     row["remote_dir"] = submission["remote_dir"]
@@ -2306,7 +2327,8 @@ def _run_detached_offload(case_dir, case_info, args, config, remote, calc_type, 
     return case_info, [row]
 
 
-def _process_case(case_dir, args, base_config, mode, project_name, output_root, neb_images, calc_type, kpoints_spec):
+def _process_case(case_dir, args, base_config, mode, project_name, output_root, neb_images, calc_type, kpoints_spec,
+                  wait_for_remote_slot=False):
     """Handle one case end to end; returns (case_info, rows)."""
     config = merge_local_config(base_config, case_dir)
     engine, config = resolve_engine(args, config)
@@ -2387,7 +2409,7 @@ def _process_case(case_dir, args, base_config, mode, project_name, output_root, 
             raise ValueError("Offload (ssh_detached) supports VASP and QE, not --engine ase.")
         return _run_detached_offload(
             case_dir, case_info, args, config, remote, calc_type, kpoints_spec, mode, project_name,
-            engine=engine,
+            engine=engine, wait_for_slot=wait_for_remote_slot,
         )
 
     workflow_steps = None
@@ -2718,6 +2740,14 @@ def main():
         _write_excel_summary(excel_path, all_results)
         return
 
+    # A detached remote offload submits and returns in seconds regardless of how
+    # long VASP takes, so --parallel can't rely on ThreadPoolExecutor blocking a
+    # worker until its case finishes (that's what makes it throttle at all) —
+    # only make offload cases wait for their own completion when a cap is
+    # actually in effect (batch bigger than the cap); a lone case, or a batch
+    # that fits under the cap, still fires and forgets as before.
+    throttle_remote = args.parallel > 1 and len(case_dirs) > 1
+
     def process(case_dir):
         return _process_case(
             case_dir,
@@ -2729,6 +2759,7 @@ def main():
             neb_images=neb_images,
             calc_type=calc_type,
             kpoints_spec=kpoints_spec,
+            wait_for_remote_slot=throttle_remote,
         )
 
     if args.parallel > 1 and len(case_dirs) > 1:
