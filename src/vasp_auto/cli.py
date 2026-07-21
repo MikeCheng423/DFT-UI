@@ -2674,7 +2674,8 @@ def main():
     if not args.parse_only:
         _warn_if_unconfigured(config, engine)
     print(f"CPU       : {args.cpus if args.cpus else 'default'}")
-    print(f"NEB images: {neb_images}")
+    if "tss" in info["case_types"].values():
+        print(f"NEB images: {neb_images}")
     if calc_type:
         print(f"Calc type : {calc_type}")
     if kpoints_spec:

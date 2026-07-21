@@ -219,6 +219,18 @@
   <span id="wc-status" class="badge dim">No working structure yet — build or import one in the Build tab, then just run it.</span>
 </div>
 
+<div class="card">
+  <h3>Run an existing folder</h3>
+  <p class="sub">Point at a folder that already has ready-made inputs — one case (POSCAR/INCAR), or a project folder holding several case subfolders, each with its own POSCAR/INCAR (e.g. <code>inputs/00_refs</code>). Every case folder found gets run.</p>
+  <span class="inline wide"><label>folder</label><input id="proj-dir" placeholder="/home/vv/vasp_auto/inputs/00_refs"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('proj-dir')">📁</button></span>
+  <span class="inline"><label>machine</label><select id="proj-remote" onchange="projMachineChanged()" title="This computer (local) or a saved remote machine (managed in the Remote tab)."></select></span>
+  <span class="inline"><label>CPU cores (MPI ranks)</label><input id="proj-cpus" placeholder="1" title="Passed to mpirun -np"></span>
+  <span class="inline"><label>cases in parallel</label><input id="proj-par" placeholder="1" title="Run up to N cases at once when the folder has several"></span>
+  <span class="inline"><label>scheduler</label><select id="proj-sched" title="local runs mpirun here; slurm/pbs submit to a queue"><option>local</option><option>slurm</option><option>pbs</option></select></span>
+  <button class="act" onclick="runProjectFolder()">▶ Run all cases</button>
+  <pre class="console" id="proj-console" style="display:none;margin-top:8px"></pre>
+</div>
+
 <!-- ============================ BUILD ============================ -->
 <div class="tab active" id="tab-build">
   <div class="row">
@@ -728,6 +740,11 @@
       initial state. The peak is the transition state; <b>E<sub>a</sub></b> is the forward
       barrier and <b>ΔE</b> the reaction energy.</p>
     <span class="inline wide"><label>NEB job folder</label><input id="neb-dir" list="jobdirs"><button class="iconbtn" style="padding:3px 7px" onclick="slotPick('neb-dir')">📁</button><select id="neb-dir-m" class="slot-machine"></select></span>
+    <br><label class="sub" style="cursor:pointer"><input type="checkbox" id="neb-ends" onchange="$('neb-endrow').style.display=this.checked?'block':'none'"> add the endpoint images (00 / NN) — VASP never computes them, so give the relaxation runs their energies come from</label>
+    <div id="neb-endrow" style="display:none">
+      <span class="inline wide"><label>initial-state run</label><input id="neb-init" list="jobdirs"><button class="iconbtn" style="padding:3px 7px" onclick="slotPick('neb-init')">📁</button><select id="neb-init-m" class="slot-machine"></select></span>
+      <span class="inline wide"><label>final-state run</label><input id="neb-fin" list="jobdirs"><button class="iconbtn" style="padding:3px 7px" onclick="slotPick('neb-fin')">📁</button><select id="neb-fin-m" class="slot-machine"></select></span>
+    </div>
     <button class="act" onclick="computeNebProfile()">Read barriers</button>
     <div id="nebbody" style="display:none">
       <div id="nebstats" style="margin:4px 0;font-size:13px"></div>
@@ -2756,6 +2773,25 @@ async function loadRemotes() {
   refreshResultMachineSelect();
   refreshRunningMachineSelect();
   refreshWorkingMachineSelect();
+  refreshProjRemoteSelect();
+}
+/* Populate the "Run an existing folder" machine dropdown; mirrors refreshRemoteSelect. */
+function refreshProjRemoteSelect() {
+  const sel = $("proj-remote"); if (!sel) return;
+  const keep = sel.value;
+  sel.innerHTML = "<option value='local'>💻 Local — this computer</option>";
+  for (const r of REMOTES) {
+    const cores = r.cpus ? ` · ${r.cpus} cores` : "";
+    sel.add(new Option(`🖥 ${r.name} — ${r.host}${cores}`, r.name));
+  }
+  sel.value = REMOTES.some(r => r.name === keep) ? keep : "local";
+  projMachineChanged();
+}
+/* Pre-fill the CPU field from the chosen machine's default core count. */
+function projMachineChanged() {
+  const sel = $("proj-remote"), cpusEl = $("proj-cpus");
+  const def = sel.value !== "local" ? machineCpus(sel.value) : null;
+  cpusEl.placeholder = def ? String(def) : "1";
 }
 /* Populate the Running tab's machine dropdown: All + Local + each remote. */
 function refreshRunningMachineSelect() {
@@ -3100,6 +3136,25 @@ async function saveWorkflowYaml() {
   if (!(await ensureCase())) { banner("No working case yet — build or import a structure in the Build tab first."); return; }
   await api("/api/file", caseBody({ dir: currentCase(), name: "workflow.yaml", text: $("w-yaml").value }));
   banner("workflow.yaml saved — the CLI will use it automatically for this case.", "info");
+}
+
+/* Run a folder as-is, bypassing the working-case builder flow: the CLI's own
+   target scan (target_utils.inspect_target) decides whether it's a single
+   case or a project of several case subfolders, and runs every one found. */
+async function runProjectFolder() {
+  const target = $("proj-dir").value.trim();
+  if (!target) { banner("Pick a folder first."); return; }
+  const remote = $("proj-remote").value !== "local" ? $("proj-remote").value : null;
+  const data = await api("/api/run", {
+    target, mode: "run",
+    cpus: $("proj-cpus").value || null,
+    parallel: $("proj-par").value || null,
+    scheduler: $("proj-sched").value,
+    remote,
+  });
+  activeToken = data.token; activeConsole = "proj-console";
+  $("proj-console").style.display = "block";
+  $("proj-console").textContent = "starting…";
 }
 
 /* ---------- results ---------- */
@@ -3550,8 +3605,16 @@ async function showNeb(i) {
 function computeNebProfile() {
   const s = slotObj("neb-dir");
   if (!s.path) { banner("Pick the NEB job folder."); return; }
-  const qs = encodeURIComponent(s.path)
+  let qs = encodeURIComponent(s.path)
     + (s.machine !== "local" ? "&machine=" + encodeURIComponent(s.machine) : "");
+  if ($("neb-ends").checked) {
+    for (const [id, key] of [["neb-init", "einit"], ["neb-fin", "efinal"]]) {
+      const e = slotObj(id);
+      if (!e.path) { banner("Give both endpoint runs (or untick the endpoints box)."); return; }
+      qs += `&${key}=` + encodeURIComponent(e.path)
+          + (e.machine !== "local" ? `&${key}_m=` + encodeURIComponent(e.machine) : "");
+    }
+  }
   loadNebProfile(s.path.replace(/\/+$/, "").split("/").pop() || s.path, qs);
 }
 async function loadNebProfile(name, qs) {

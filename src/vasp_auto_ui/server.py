@@ -83,6 +83,7 @@ from vasp_auto.target_utils import get_case_type, inspect_target
 from vasp_auto.trajectory import job_trajectory, oszicar_energies
 from vasp_auto.workflow import (
     _read_pid as read_pid,
+    _neb_image_energy,
     build_row,
     job_engine,
     neb_energy_profile,
@@ -1123,9 +1124,28 @@ def api_trajectory(query, _body):
 
 
 def api_neb(query, _body):
-    """Energy profile (reaction-coordinate plot) for an NEB/TSS job."""
+    """Energy profile (reaction-coordinate plot) for an NEB/TSS job.
+
+    Optional ``einit``/``efinal`` (with ``einit_m``/``efinal_m`` machines) name
+    the endpoint relaxation runs; their energies fill in images 00/NN, which a
+    standard NEB run never computes."""
     job_dir = _analysis_query_dir(query)
-    profile = neb_energy_profile(job_dir)
+    endpoints = []
+    for key in ("einit", "efinal"):
+        path = (query.get(key, [""])[0] or "").strip()
+        if not path:
+            endpoints.append(None)
+            continue
+        run_dir = _analysis_dir(path, query.get(key + "_m", ["local"])[0])
+        if run_dir.is_file():
+            run_dir = run_dir.parent
+        energy = _neb_image_energy(run_dir)
+        if energy is None:
+            raise FileNotFoundError(
+                f"No energy (OUTCAR/OSZICAR/vasprun.xml) in the endpoint run: {path}")
+        endpoints.append(energy)
+    profile = neb_energy_profile(
+        job_dir, endpoint_energies=tuple(endpoints) if any(e is not None for e in endpoints) else None)
     if profile is None:
         raise FileNotFoundError(
             "No NEB energy profile — a TSS/NEB job needs at least two image "

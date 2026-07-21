@@ -551,9 +551,15 @@ def _build_neb_row(project_name, mode, case_info, status_override=None):
     }
 
 
-def neb_energy_profile(job_dir):
+def neb_energy_profile(job_dir, endpoint_energies=None):
     """Energy profile along an NEB/TSS path — the reaction-coordinate ("energy
     stage") plot usually shown in papers.
+
+    ``endpoint_energies`` is an optional ``(initial_eV, final_eV)`` pair used
+    for the first/last image directories when they have no energy files of
+    their own — a standard NEB run never computes the endpoints, so their
+    energies come from the endpoint relaxation runs. Either entry may be None.
+    An energy file already inside 00/NN wins over the provided value.
 
     Returns ``None`` when there are fewer than two images with energies, else a
     dict:
@@ -579,9 +585,17 @@ def neb_energy_profile(job_dir):
 
     from vasp_auto.trajectory import _frac_to_cart, _poscar_frame
 
+    fallback = {}
+    if endpoint_energies:
+        for image_dir, energy in zip((numeric[0], numeric[-1]), endpoint_energies):
+            if energy is not None:
+                fallback[image_dir.name] = float(energy)
+
     images, energies, carts = [], [], []
     for image_dir in numeric:
         energy = _neb_image_energy(image_dir)
+        if energy is None:
+            energy = fallback.get(image_dir.name)
         if energy is None:
             continue
         images.append(int(image_dir.name))
