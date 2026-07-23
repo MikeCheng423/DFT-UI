@@ -40,6 +40,7 @@ class IncarField:
 # Calculation-type groups a field belongs to (values match CalcType). A field
 # with applies_to=None is universal — shown for every calculation type.
 RELAXING = frozenset({"relax", "vcrelax"})   # ions/cell actually move
+FREQ = frozenset({"freq"})                   # finite-difference vibrational modes
 
 
 # --- SCF + Calculation slice ------------------------------------------------
@@ -178,6 +179,27 @@ FIELDS: list[IncarField] = [
             IncarOption("6 — f electrons", "6", "Use when correcting f orbitals"),
         ],
     ),
+    # --- Frequency fields (finite-difference vibrational modes; type "freq") --
+    # Without these a "freq" run is just a single point: VASP defaults IBRION=-1
+    # and never builds the Hessian. Freeze the slab (Selective dynamics) first.
+    IncarField(
+        tag="IBRION", label="Frequency method", group="Frequency", kind="choice",
+        default="5", doc=f"{WIKI}/IBRION", applies_to=FREQ,
+        options=[
+            IncarOption("Finite differences (no symmetry)", "5", "Displace every free atom; safest with Selective dynamics"),
+            IncarOption("Finite differences (use symmetry)", "6", "Fewer displacements when the structure is symmetric"),
+        ],
+    ),
+    IncarField(
+        tag="NFREE", label="Displacements per direction", group="Frequency", kind="number",
+        default="2", unit="2 = central differences (±step)", doc=f"{WIKI}/NFREE",
+        applies_to=FREQ,
+    ),
+    IncarField(
+        tag="POTIM", label="Displacement step", group="Frequency", kind="number",
+        default="0.015", unit="Ang (0.01–0.02 usual)", doc=f"{WIKI}/POTIM",
+        applies_to=FREQ,
+    ),
     # --- DOS-only fields (shown when the calculation type is "dos") ----------
     IncarField(
         tag="LORBIT", label="Orbital projection", group="DOS", kind="choice",
@@ -229,8 +251,11 @@ def demo():
     """Self-check: the catalog is well-formed enough to drive a form."""
     from vasp_auto.calc_types import CalcType
     valid_types = {t.value for t in CalcType}
-    tags = [f.tag for f in FIELDS]
-    assert len(tags) == len(set(tags)), "duplicate tag in catalog"
+    # Tags are unique *per calc-type view* (a type-specific tag like IBRION may
+    # appear once for relax and once for freq — never twice in one type's form).
+    for t in valid_types:
+        view_tags = [f.tag for f in fields_for(t)]
+        assert len(view_tags) == len(set(view_tags)), f"{t}: duplicate tag in {view_tags}"
     for f in FIELDS:
         assert f.kind in {"choice", "number", "bool"}, f"{f.tag}: bad kind {f.kind}"
         if f.applies_to is not None:
@@ -251,7 +276,11 @@ def demo():
     assert {"IBRION", "ISIF"} <= relax, relax
     dos = {f.tag for f in fields_for("dos")}
     assert "NEDOS" in dos and "IBRION" not in dos, dos
-    print(f"OK: {len(FIELDS)} fields; scf={len(scf)}, relax={len(relax)}, dos={len(dos)}")
+    # A freq run needs the finite-difference Hessian tags, not the relax ones.
+    freq = {f.tag for f in fields_for("freq")}
+    assert {"IBRION", "NFREE", "POTIM"} <= freq and "ISIF" not in freq, freq
+    print(f"OK: {len(FIELDS)} fields; scf={len(scf)}, relax={len(relax)}, "
+          f"dos={len(dos)}, freq={len(freq)}")
 
 
 if __name__ == "__main__":

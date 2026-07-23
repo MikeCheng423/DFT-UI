@@ -222,12 +222,12 @@
 <div class="card">
   <h3>Run an existing folder</h3>
   <p class="sub">Point at a folder that already has ready-made inputs — one case (POSCAR/INCAR), or a project folder holding several case subfolders, each with its own POSCAR/INCAR (e.g. <code>inputs/00_refs</code>). Every case folder found gets run. Pick the machine the folder lives on first — 📁 then browses that machine (local or a saved remote, over SSH).</p>
-  <span class="inline"><label>machine</label><select id="proj-remote" onchange="projMachineChanged()" title="This computer (local) or a saved remote machine (managed in the Remote tab). The folder browser and the run both happen on this machine."></select></span>
-  <span class="inline wide"><label>folder</label><input id="proj-dir" placeholder="/home/vv/vasp_auto/inputs/00_refs"><button class="iconbtn" style="padding:3px 7px" onclick="projBrowse()">📁</button></span>
+  <span class="inline"><label>machine</label><select id="proj-remote" onchange="projMachineChanged()" title="Select the machine that already contains the folder."></select></span>
+  <span class="inline wide"><label>folder</label><input id="proj-dir" placeholder="Select a machine first" oninput="projFolderChanged()" disabled><button id="proj-browse" class="iconbtn" style="padding:3px 7px" onclick="projBrowse()" title="Choose a folder on the selected machine" disabled>📁</button></span>
   <span class="inline"><label>CPU cores (MPI ranks)</label><input id="proj-cpus" placeholder="1" title="Passed to mpirun -np"></span>
   <span class="inline"><label>cases in parallel</label><input id="proj-par" placeholder="1" title="Run up to N cases at once when the folder has several"></span>
   <span class="inline"><label>scheduler</label><select id="proj-sched" title="local runs mpirun here; slurm/pbs submit to a queue"><option>local</option><option>slurm</option><option>pbs</option></select></span>
-  <button class="act" onclick="runProjectFolder()">▶ Run all cases</button>
+  <button class="act" id="proj-run" onclick="runProjectFolder()" disabled>▶ Run all cases</button>
   <pre class="console" id="proj-console" style="display:none;margin-top:8px"></pre>
 </div>
 
@@ -517,9 +517,9 @@
             <option value="qe">Quantum ESPRESSO (pw.x)</option>
             <option value="ase">ASE calculator (any code)</option>
           </select></span>
-        <span class="inline wide qe-only" style="display:none"><label>pw.x path (optional)</label><input id="c-qe-exe" placeholder="pw.x" title="Path to the Quantum ESPRESSO pw.x binary"></span>
+        <span class="inline wide qe-only" style="display:none"><label>QE pw.x path (optional)</label><input id="c-qe-exe" placeholder="pw.x" title="Path to pw.x; companion programs are resolved from the same bin directory"></span>
         <span class="inline wide qe-only" style="display:none"><label>pseudopotential dir (UPF)</label><input id="c-pseudo" placeholder="/path/to/pseudo" title="Directory of .UPF pseudopotentials (or set pseudo_dir in config.yaml)"></span>
-        <p class="sub qe-only" style="display:none">QE supports scf, relax, vc-relax, dos, bands. NEB/phonon/convergence scans are VASP-only for now.</p>
+        <p class="sub qe-only" style="display:none">QE calculations use pw.x and the companion programs installed beside it; numerical cutoff and smearing values use Rydberg.</p>
         <span class="inline ase-only" style="display:none"><label>ASE calculator</label>
           <select id="c-ase-calc" onchange="aseCalcChanged()" title="The ASE calculator class to attach. 'emt' needs no external code and runs anywhere."></select></span>
         <span class="inline wide ase-only" style="display:none"><label>calculation path / command</label><input id="c-ase-command" placeholder="e.g. pw.x   or   mpirun -np 4 pw.x" title="Run command or binary path for the calculator (sets ase_calc_params.command). Leave blank for in-process calculators like emt, gpaw, mace."></span>
@@ -2591,9 +2591,12 @@ async function doPreview() {
   const p = data.previews[0];
   activeConsole = "console";
   if (p.engine === "qe") {
+    const inputs = Object.keys(p).filter(k => k.endsWith(".in") && typeof p[k] === "string");
+    const inputText = inputs.map(k => `--- ${k} ---\n${p[k]}`).join("\n\n");
+    const stages = (p.stages || []).map(s => s.program).join(" -> ");
     $("console").textContent =
       `# Preview for ${p.case_name} (${p.calc_type}) — nothing was written\n` +
-      `# pseudopotentials: ${p.pseudos}\n\n--- pw.in ---\n` + p["pw.in"];
+      `# pseudopotentials: ${p.pseudos}\n# stages: ${stages}\n\n` + inputText;
     return;
   }
   $("console").textContent =
@@ -2787,6 +2790,7 @@ function runningLoop() {
 let REMOTES = [];
 let prevMachine = "local";   // last selection in the c-remote dropdown
 let localCpus = "";          // remembered CPU value for the local machine
+let projMachine = "";        // folder paths are valid only for the machine that chose them
 async function loadRemotes() {
   let data;
   try { data = await api("/api/remotes"); } catch (e) { return; }
@@ -2803,19 +2807,34 @@ async function loadRemotes() {
 function refreshProjRemoteSelect() {
   const sel = $("proj-remote"); if (!sel) return;
   const keep = sel.value;
-  sel.innerHTML = "<option value='local'>💻 Local — this computer</option>";
+  sel.innerHTML = "<option value=''>Select machine…</option>" +
+                  "<option value='local'>💻 Local — this computer</option>";
   for (const r of REMOTES) {
     const cores = r.cpus ? ` · ${r.cpus} cores` : "";
     sel.add(new Option(`🖥 ${r.name} — ${r.host}${cores}`, r.name));
   }
-  sel.value = REMOTES.some(r => r.name === keep) ? keep : "local";
+  const valid = keep === "local" || REMOTES.some(r => r.name === keep);
+  sel.value = valid ? keep : "";
   projMachineChanged();
 }
-/* Pre-fill the CPU field from the chosen machine's default core count. */
+/* A folder path belongs to one machine. Changing machines invalidates it. */
 function projMachineChanged() {
-  const sel = $("proj-remote"), cpusEl = $("proj-cpus");
-  const def = sel.value !== "local" ? machineCpus(sel.value) : null;
+  const sel = $("proj-remote"), cpusEl = $("proj-cpus"), folder = $("proj-dir");
+  const machine = sel.value;
+  if (projMachine && machine !== projMachine) folder.value = "";
+  projMachine = machine;
+  const ready = !!machine;
+  folder.disabled = !ready;
+  $("proj-browse").disabled = !ready;
+  folder.placeholder = ready
+    ? (machine === "local" ? "/path/to/local/folder" : "Folder on " + machine)
+    : "Select a machine first";
+  const def = machine && machine !== "local" ? machineCpus(machine) : null;
   cpusEl.placeholder = def ? String(def) : "1";
+  projFolderChanged();
+}
+function projFolderChanged() {
+  $("proj-run").disabled = !$("proj-remote").value || !$("proj-dir").value.trim();
 }
 /* Populate the Running tab's machine dropdown: All + Local + each remote. */
 function refreshRunningMachineSelect() {
@@ -3217,11 +3236,13 @@ function kpMeshFromText(text) {                            // 4th line holds "a 
 /* Browse for the folder to run, on the machine picked above — local picker,
    or the remote one over SSH (mirrors saveBrowse, folder mode). */
 function projBrowse() {
-  const m = $("proj-remote").value, r = REMOTES.find(x => x.name === m);
+  const m = $("proj-remote").value;
+  if (!m) { banner("Select a machine first."); return; }
+  const r = REMOTES.find(x => x.name === m);
   if (m && m !== "local") {
-    openPicker("proj-dir", { machine: m, root: (r && r.remote_root) || "", what: "a folder (or project folder) on that machine" });
+    openPicker("proj-dir", { machine: m, root: (r && r.remote_root) || "", what: "a folder (or project folder) on " + m, onpick: projFolderChanged });
   } else {
-    openPicker("proj-dir");
+    openPicker("proj-dir", { onpick: projFolderChanged });
   }
 }
 /* Run a folder as-is, bypassing the working-case builder flow: the CLI's own
@@ -3232,15 +3253,16 @@ function projBrowse() {
    (single case or project, same rules as inspect_target), fetches every case
    found, and re-runs them there. A local folder just runs here. */
 async function runProjectFolder() {
-  const target = $("proj-dir").value.trim();
-  if (!target) { banner("Pick a folder first."); return; }
   const m = $("proj-remote").value;
+  if (!m) { banner("Select a machine first."); return; }
+  const target = $("proj-dir").value.trim();
+  if (!target) { banner("Pick a folder on the selected machine."); return; }
   const data = await api("/api/run", {
-    target, mode: "run",
+    target, mode: "run", source: "existing_folder",
     cpus: $("proj-cpus").value || null,
     parallel: $("proj-par").value || null,
     scheduler: $("proj-sched").value,
-    machine: m !== "local" ? m : null,
+    machine: m,
   });
   activeToken = data.token; activeConsole = "proj-console";
   $("proj-console").style.display = "block";

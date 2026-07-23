@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shlex
@@ -44,7 +45,7 @@ DEFAULT_SLURM_QE_TEMPLATE = """#!/bin/bash
 #SBATCH --output=run.log
 {extra}
 cd "{job_dir}"
-mpirun -np {cpus} "{exe}" -in pw.in > pw.out
+{qe_commands}
 """
 
 DEFAULT_PBS_QE_TEMPLATE = """#!/bin/bash
@@ -54,7 +55,7 @@ DEFAULT_PBS_QE_TEMPLATE = """#!/bin/bash
 #PBS -j oe
 {extra}
 cd "{job_dir}"
-mpirun -np {cpus} "{exe}" -in pw.in > pw.out
+{qe_commands}
 """
 
 SCHEDULER_COMMANDS = {"slurm": "sbatch", "pbs": "qsub"}
@@ -221,7 +222,6 @@ def run_qe(job_dir: str, qe_executable: str, cpus: int | None = None, on_progres
     """
     job_dir = Path(job_dir)
     log_file = job_dir / "run.log"
-    pw_out = job_dir / "pw.out"
     exe = _resolve_executable(qe_executable)
 
     env = os.environ.copy()
@@ -232,23 +232,112 @@ def run_qe(job_dir: str, qe_executable: str, cpus: int | None = None, on_progres
     env["MKL_NUM_THREADS"] = "1"
 
     mpi_launcher = os.environ.get("VASP_AUTO_MPI", "mpirun")
-    cmd, warning = _mpi_command(mpi_launcher, mpi_ranks, exe, "-in", "pw.in")
+    stages = _load_qe_stages(job_dir)
+    completion_marker = job_dir / ".qe_complete"
+    completion_marker.unlink(missing_ok=True)
 
-    with open(pw_out, "w", encoding="utf-8") as out, open(log_file, "w", encoding="utf-8") as log:
-        if warning:
-            log.write(warning + "\n")
+    with open(log_file, "w", encoding="utf-8") as log:
+        for stage in stages:
+            program = _resolve_qe_program(exe, stage["program"])
+            if stage.get("mpi", True):
+                cmd, warning = _mpi_command(
+                    mpi_launcher, mpi_ranks, program, "-in", stage["input"]
+                )
+            else:
+                cmd, warning = [program], None
+            if warning:
+                log.write(warning + "\n")
+                if on_progress is not None:
+                    on_progress(warning)
+            label = f"[qe] {stage['program']} < {stage['input']}"
+            log.write(label + "\n")
             if on_progress is not None:
-                on_progress(warning)
-        process = subprocess.Popen(
-            cmd, cwd=job_dir, env=env,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                on_progress(label)
+            output_path = job_dir / stage["output"]
+            with open(job_dir / stage["input"], "r", encoding="utf-8") as inp, open(
+                output_path, "w", encoding="utf-8"
+            ) as out:
+                process = subprocess.Popen(
+                    cmd, cwd=job_dir, env=env, stdin=inp,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                )
+                for line in process.stdout:
+                    out.write(line)
+                    log.write(line)
+                    if on_progress is not None:
+                        on_progress(line.rstrip("\n"))
+                return_code = process.wait()
+            if return_code != 0:
+                return return_code
+            for src, dst in (stage.get("rename") or {}).items():
+                source = job_dir / src
+                if source.exists():
+                    source.replace(job_dir / dst)
+        completion_marker.write_text("complete\n", encoding="utf-8")
+        return 0
+
+
+def _load_qe_stages(job_dir: Path) -> list[dict]:
+    """Read the QE stage manifest, with the legacy single-pw.x fallback."""
+    manifest = Path(job_dir) / "qe_stages.json"
+    if not manifest.exists():
+        return [{"program": "pw.x", "input": "pw.in", "output": "pw.out", "mpi": True}]
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    stages = data.get("stages") if isinstance(data, dict) else None
+    if not isinstance(stages, list) or not stages:
+        raise ValueError(f"invalid or empty QE stage manifest: {manifest}")
+    for stage in stages:
+        if not isinstance(stage, dict) or not all(stage.get(k) for k in ("program", "input", "output")):
+            raise ValueError(f"invalid QE stage in {manifest}: {stage!r}")
+        if not (Path(job_dir) / stage["input"]).exists():
+            raise FileNotFoundError(f"QE stage input is missing: {Path(job_dir) / stage['input']}")
+    return stages
+
+
+def _resolve_qe_program(pw_executable: str, program: str) -> str:
+    """Resolve a QE companion beside pw.x, or from PATH for a bare pw.x."""
+    if program == "pw.x":
+        return pw_executable
+    pw_path = Path(pw_executable)
+    candidate = pw_path.with_name(program)
+    if pw_path.parent != Path(".") and candidate.exists():
+        return str(candidate)
+    resolved = shutil.which(program)
+    if resolved:
+        return resolved
+    raise FileNotFoundError(
+        f"Quantum ESPRESSO companion executable not found: {program}. "
+        f"Install the full QE suite beside {pw_executable}, or put {program} on PATH."
+    )
+
+
+def _qe_shell_commands(job_dir: Path, qe_executable: str, ranks: int,
+                       quote_program: bool = True) -> list[str]:
+    """Shell commands for the same manifest used by local QE execution."""
+    commands = ["rm -f .qe_complete", ": > run.log"]
+    qe_dir = str(Path(qe_executable).parent)
+    stages = _load_qe_stages(job_dir)
+    for stage in stages:
+        program = qe_executable if stage["program"] == "pw.x" else str(Path(qe_dir) / stage["program"])
+        quoted_program = ('"' + program.replace('"', '\\"') + '"'
+                          if quote_program else shlex.quote(program))
+        inp = shlex.quote(stage["input"])
+        out = shlex.quote(stage["output"])
+        if stage.get("mpi", True):
+            launch = f"mpirun -np {ranks} {quoted_program} -in {inp}"
+        else:
+            launch = f"{quoted_program} < {inp}"
+        commands.append(
+            f"echo {shlex.quote('[qe] ' + stage['program'] + ' < ' + stage['input'])} >> run.log"
         )
-        for line in process.stdout:
-            out.write(line)
-            log.write(line)
-            if on_progress is not None:
-                on_progress(line.rstrip("\n"))
-        return process.wait()
+        commands.append(f"{launch} > {out} 2>&1 || {{ rc=$?; cat {out} >> run.log; exit $rc; }}")
+        commands.append(f"cat {out} >> run.log")
+        for src, dst in (stage.get("rename") or {}).items():
+            commands.append(f"test ! -f {shlex.quote(src)} || mv -f {shlex.quote(src)} {shlex.quote(dst)}")
+    if len(stages) == 1 and stages[0]["output"] == "pw.out":
+        commands.append("cp -f pw.out run.log")
+    commands.append("printf 'complete\\n' > .qe_complete")
+    return commands
 
 
 def run_ase(job_dir: str, python_exe: str | None = None, cpus: int | None = None,
@@ -311,12 +400,15 @@ def write_submit_script(
     else:
         template = DEFAULT_SLURM_TEMPLATE if scheduler == "slurm" else DEFAULT_PBS_TEMPLATE
 
+    qe_commands = "\n".join(_qe_shell_commands(job_dir, vasp_executable, cpus or 1)) \
+        if engine == "qe" else ""
     script_text = template.format(
         job_name=job_dir.name,
         cpus=cpus if cpus is not None else 1,
         exe=vasp_executable,
         job_dir=run_dir if run_dir is not None else job_dir,
         extra="\n".join(options or []),
+        qe_commands=qe_commands,
     )
 
     script_path = job_dir / "submit.sh"
@@ -591,10 +683,7 @@ def run_vasp_remote(
     parts.append("ulimit -s unlimited 2>/dev/null || true")
     parts.append(f"cd {quoted_dir}")
     if engine == "qe":
-        # pw.x reads pw.in; keep pw.out (the parser's file) and run.log (the UI log
-        # viewer) identical, and preserve mpirun's exit code past the cp.
-        parts.append(f"mpirun -np {ranks} {shlex.quote(exe)} -in pw.in > pw.out 2>&1; "
-                     "rc=$?; cp -f pw.out run.log; exit $rc")
+        parts.extend(_qe_shell_commands(job_dir, exe, ranks, quote_program=False))
     else:
         parts.append(f"mpirun -np {ranks} {shlex.quote(exe)} > run.log 2>&1")
     remote_script = "\n".join(parts)
@@ -882,13 +971,17 @@ def submit_job_remote(
     template = job_template or remote.get("job_template")
 
     # Write the submit script with the remote run directory baked in.
+    scheduler_options = list(remote.get("scheduler_options") or [])
+    qe_env_setup = _remote_env_setup(remote, engine)
+    if engine == "qe" and qe_env_setup:
+        scheduler_options.append(qe_env_setup)
     write_submit_script(
         str(job_dir),
         str(exe),
         cpus=cpus,
         scheduler=scheduler,
         template_path=template,
-        options=remote.get("scheduler_options"),
+        options=scheduler_options,
         run_dir=remote_dir,
         engine=engine,
     )
@@ -992,10 +1085,16 @@ def build_engine_wheel(dest_dir: str | Path) -> Path:
         )
     dest = Path(dest_dir)
     dest.mkdir(parents=True, exist_ok=True)
-    _run_checked(
-        [sys.executable, "-m", "pip", "wheel", str(repo_root), "-w", str(dest), "--no-deps"],
-        "build wheel",
-    )
+    # setuptools uses <repo>/build even when wheels have separate destinations.
+    # Serialize builds so concurrent setup requests for multiple remotes do not
+    # delete or replace one another's intermediate files.
+    lock_path = Path(tempfile.gettempdir()) / "vasp_auto-wheel-build.lock"
+    with lock_path.open("a", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        _run_checked(
+            [sys.executable, "-m", "pip", "wheel", str(repo_root), "-w", str(dest), "--no-deps"],
+            "build wheel",
+        )
     wheels = sorted(dest.glob("vasp_auto-*.whl"))
     if not wheels:
         raise RuntimeError("wheel build produced no vasp_auto-*.whl")
@@ -1469,6 +1568,31 @@ def check_remote_connection(remote: dict) -> dict:
         ok = "yes" in res.stdout
         checks.append({"name": "qe_executable", "ok": ok,
                        "detail": f"{qe} found" if ok else f"{qe} not found or not executable"})
+        if ok and "/" in qe:
+            from vasp_auto.qe_tools import QE_COMPANION_PROGRAMS
+            qe_dir = str(Path(qe).parent)
+            names = " ".join(shlex.quote(name) for name in QE_COMPANION_PROGRAMS)
+            script = (
+                f"missing=''; for x in {names}; do test -x {shlex.quote(qe_dir)}/$x || "
+                "missing=\"$missing $x\"; done; "
+                "test -z \"$missing\" && echo yes || echo missing:$missing"
+            )
+            suite = remote_command(remote, script)
+            suite_ok = suite.stdout.strip() == "yes"
+            checks.append({"name": "qe_suite", "ok": suite_ok,
+                           "detail": "all companion programs found" if suite_ok
+                           else suite.stdout.strip()})
+
+    if remote.get("pseudo_dir"):
+        pseudo_dir = remote["pseudo_dir"]
+        res = remote_command(
+            remote, f"find {shlex.quote(pseudo_dir)} -maxdepth 1 -type f -iname '*.upf' -print -quit "
+                    "2>/dev/null | grep -q . && echo yes || echo no",
+        )
+        ok = "yes" in res.stdout
+        checks.append({"name": "qe_pseudos", "ok": ok,
+                       "detail": f"UPF files found in {pseudo_dir}" if ok
+                       else f"no UPF files found in {pseudo_dir}"})
 
     # ssh run mode launches mpirun directly; scheduler modes need their submit cmd.
     if remote_run_mode(remote) == "ssh":

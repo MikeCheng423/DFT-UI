@@ -6,6 +6,7 @@ Operates on finished job directories; runs no VASP itself. Pure Python.
 from __future__ import annotations
 
 import math
+import re
 from pathlib import Path
 
 from vasp_auto.chgcar import planar_average, read_volumetric
@@ -228,6 +229,17 @@ def parse_frequencies(outcar_path: Path) -> list[dict]:
         for line in f:
             # e.g. "   4 f  =   91.546624 THz   575.204660 2PiTHz 3053.668884 cm-1   378.617346 meV"
             #      "  12 f/i=    0.022552 THz     0.141698 2PiTHz    0.752259 cm-1     0.093268 meV"
+            if "freq (" in line and "[THz]" in line and "[cm-1]" in line:
+                # dynmat.x: freq ( 1) = -2.46 [THz] = -82.10 [cm-1]
+                try:
+                    index = int(line.split("(", 1)[1].split(")", 1)[0])
+                    thz = float(line.split("=", 1)[1].split("[THz]", 1)[0])
+                    cm1 = float(line.split("=", 2)[2].split("[cm-1]", 1)[0])
+                except (IndexError, ValueError):
+                    continue
+                modes.append({"index": index, "THz": thz, "cm1": cm1,
+                              "meV": abs(cm1) * 0.1239841984, "imaginary": cm1 < 0.0})
+                continue
             if "2PiTHz" not in line or "meV" not in line:
                 continue
             imaginary = "f/i" in line
@@ -285,11 +297,11 @@ def harmonic_thermochemistry(
 def thermo_from_job(job_dir: Path, temperature: float = DEFAULT_TEMPERATURE_K) -> dict:
     """Frequencies + thermochemistry of a finished freq job directory."""
     job_dir = Path(job_dir)
-    modes = parse_frequencies(job_dir / "OUTCAR")
+    source = job_dir / "dynmat.out" if (job_dir / "dynmat.out").exists() else job_dir / "OUTCAR"
+    modes = parse_frequencies(source)
     if not modes:
         raise ValueError(
-            f"No vibrational modes found in {job_dir}/OUTCAR — "
-            "run with --calc-type freq (IBRION=5) first."
+            f"No vibrational modes found in {source} — run with --calc-type freq first."
         )
     result = harmonic_thermochemistry(modes, temperature)
     result["modes"] = modes
@@ -373,6 +385,82 @@ def d_band_center(
     }
 
 
+def qe_d_band_center(
+    job_dir: Path,
+    atom_indices: list[int],
+    emax_eV: float | None = None,
+) -> dict:
+    """d-band moments from the atomic d projections written by projwfc.x."""
+    job_dir = Path(job_dir)
+    selected = set(atom_indices)
+    files = []
+    for path in job_dir.glob("*.pdos_atm#*_wfc#*(d)"):
+        match = re.search(r"pdos_atm#(\d+)\(", path.name)
+        if match and int(match.group(1)) in selected:
+            files.append(path)
+    if not files:
+        raise ValueError(
+            f"No selected d-projected QE DOS files in {job_dir}; run a dos job with projwfc.x."
+        )
+
+    energy_grid = None
+    density = None
+    for path in sorted(files):
+        rows = []
+        header = ""
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if line.lstrip().startswith("#"):
+                header += " " + line.lower()
+                continue
+            try:
+                values = [float(value) for value in line.split()]
+            except ValueError:
+                continue
+            if len(values) >= 2:
+                rows.append(values)
+        if not rows:
+            continue
+        energies = [row[0] for row in rows]
+        if energy_grid is None:
+            energy_grid = energies
+            density = [0.0] * len(energies)
+        elif len(energies) != len(energy_grid) or any(
+            abs(a - b) > 1e-7 for a, b in zip(energies, energy_grid)
+        ):
+            raise ValueError(f"QE projected-DOS energy grids differ in {job_dir}")
+
+        # projwfc.x writes E, LDOS for non-spin and E, LDOSup, LDOSdw for
+        # spin-polarized calculations. The remaining columns resolve m channels.
+        spin_columns = 2 if "ldosdw" in header or "ldosdown" in header else 1
+        for index, row in enumerate(rows):
+            density[index] += sum(row[1:1 + spin_columns])
+
+    if not energy_grid or density is None:
+        raise ValueError(f"No readable d-projected QE DOS data in {job_dir}")
+    efermi = _fermi_from_pw(job_dir / "pw.out") or 0.0
+    energies = [energy - efermi for energy in energy_grid]
+    norm = first = second = 0.0
+    for index in range(1, len(energies)):
+        if emax_eV is not None and energies[index] > emax_eV:
+            break
+        de = energies[index] - energies[index - 1]
+        rho = 0.5 * (density[index] + density[index - 1])
+        e_mid = 0.5 * (energies[index] + energies[index - 1])
+        norm += rho * de
+        first += e_mid * rho * de
+        second += e_mid * e_mid * rho * de
+    if norm <= 0.0:
+        raise ValueError("QE d-projected DOS integrates to zero over the selected window")
+    center = first / norm
+    return {
+        "d_band_center_eV": center,
+        "d_band_width_eV": math.sqrt(max(second / norm - center * center, 0.0)),
+        "atoms": list(atom_indices),
+        "efermi_eV": efermi,
+        "n_electrons_d": norm,
+    }
+
+
 # --- work function ------------------------------------------------------------
 
 def _fermi_from_outcar(outcar_path: Path) -> float | None:
@@ -389,6 +477,19 @@ def _fermi_from_outcar(outcar_path: Path) -> float | None:
     return fermi
 
 
+def _fermi_from_pw(pw_out: Path) -> float | None:
+    fermi = None
+    if not Path(pw_out).exists():
+        return None
+    for line in Path(pw_out).read_text(encoding="utf-8", errors="ignore").splitlines():
+        if "fermi energy is" in line.lower():
+            try:
+                fermi = float(line.lower().split("fermi energy is", 1)[1].split()[0])
+            except (IndexError, ValueError):
+                pass
+    return fermi
+
+
 def work_function(job_dir: Path, axis: int = 2) -> dict:
     """Work function W = V_vacuum − E_Fermi from a LOCPOT slab run.
 
@@ -399,6 +500,26 @@ def work_function(job_dir: Path, axis: int = 2) -> dict:
     'workfunction' calc type).
     """
     job_dir = Path(job_dir)
+    qe_profile = job_dir / "potential-average.dat"
+    if qe_profile.exists():
+        profile = []
+        positions = []
+        for line in qe_profile.read_text(encoding="utf-8", errors="ignore").splitlines():
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            try:
+                positions.append(float(parts[0]) * 0.529177210903)
+                profile.append(float(parts[1]) * 13.605693122994)
+            except ValueError:
+                continue
+        fermi = _fermi_from_pw(job_dir / "pw.out")
+        if not profile or fermi is None:
+            raise ValueError(f"Incomplete QE work-function output in {job_dir}")
+        vacuum = max(profile)
+        return {"work_function_eV": vacuum - fermi, "vacuum_level_eV": vacuum,
+                "fermi_eV": fermi, "axis": axis, "profile_eV": profile,
+                "positions_A": positions}
     locpot = job_dir / "LOCPOT"
     if not locpot.exists():
         raise FileNotFoundError(
@@ -435,7 +556,29 @@ def absorption_spectrum(vasprun_path: Path) -> dict:
     direction-averaged dielectric function. Returns {"energies_eV",
     "alpha_cm1", "real", "imag"}.
     """
-    dielectric = parse_dielectric(vasprun_path)
+    vasprun_path = Path(vasprun_path)
+    job_dir = vasprun_path if vasprun_path.is_dir() else vasprun_path.parent
+    epsr_path, epsi_path = job_dir / "epsr.dat", job_dir / "epsi.dat"
+    if epsr_path.exists() and epsi_path.exists():
+        def read_eps(path):
+            rows = []
+            for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                if line.lstrip().startswith("#"):
+                    continue
+                try:
+                    values = [float(value) for value in line.split()]
+                except ValueError:
+                    continue
+                if len(values) >= 4:
+                    rows.append((values[0], sum(values[1:4]) / 3.0))
+            return rows
+        real_rows, imag_rows = read_eps(epsr_path), read_eps(epsi_path)
+        count = min(len(real_rows), len(imag_rows))
+        dielectric = {"energies": [real_rows[i][0] for i in range(count)],
+                      "real": [real_rows[i][1] for i in range(count)],
+                      "imag": [imag_rows[i][1] for i in range(count)]} if count else None
+    else:
+        dielectric = parse_dielectric(vasprun_path)
     if dielectric is None:
         raise ValueError(
             f"No dielectric function in {vasprun_path} — run with --calc-type optics "

@@ -37,6 +37,13 @@ pseudo_map:                             # pick a specific UPF per element
 # qe_conv_thr: 1.0e-6 # SCF convergence threshold (Ry)
 # qe_degauss: 0.01    # smearing width (Ry)
 # qe_smearing: gaussian
+# qe_nbnd: 48         # empty-state count for DOS/optics when QE's default is insufficient
+# qe_ph_qpoint: "0.0 0.0 0.0"
+# qe_tr2_ph: 1.0e-14
+# qe_optics_wmax: 30.0
+# qe_optics_nw: 600
+# Postprocessing calc types also need the QE companion executables beside pw.x:
+# neb.x, ph.x, dynmat.x, dos.x, projwfc.x, bands.x, pp.x, average.x, epsilon.x.
 
 # Remote submission (used with `vasp-auto <target> --remote`).
 # All input files (INCAR, KPOINTS, POSCAR, POTCAR, submit.sh) are copied to the
@@ -51,6 +58,9 @@ pseudo_map:                             # pick a specific UPF per element
 #   ssh_options: ["-o", "StrictHostKeyChecking=no"]   # optional extra ssh flags
 #   remote_root: /scratch/myname/vasp_jobs   # required: base dir on the remote
 #   vasp_executable: /opt/vasp/bin/vasp_std  # required: VASP path ON the remote
+#   qe_executable: /opt/qe/bin/pw.x          # QE path ON the remote
+#   pseudo_dir: /opt/qe/pseudo               # remote UPF library
+#   qe_env_setup: "module load qe"           # QE-only module/library setup
 #   scheduler: slurm                   # slurm | pbs (default slurm)
 #   scheduler_options:                 # optional extra submit-script lines
 #     - "#SBATCH --partition=compute"

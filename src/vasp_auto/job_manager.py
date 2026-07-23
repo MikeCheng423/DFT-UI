@@ -485,12 +485,13 @@ def create_job_from_case(
         _safe_remove_contents(job_dir)
 
     if engine == "qe":
-        # Open-source path: write a Quantum ESPRESSO pw.in instead of
-        # INCAR/KPOINTS/POTCAR. NEB/TSS is VASP-only for now.
-        from vasp_auto.qe_tools import create_qe_job
+        # Open-source path: write Quantum ESPRESSO native inputs instead of
+        # INCAR/KPOINTS/POTCAR.
+        from vasp_auto.qe_tools import create_qe_job, create_qe_neb_job
         if calculation_type == "tss":
-            raise ValueError(
-                "Quantum ESPRESSO backend does not support TSS/NEB yet; use the VASP engine."
+            return create_qe_neb_job(
+                case_info, config or {}, neb_images=int(neb_images),
+                kpoints_spec=kpoints_spec, spin=spin, magmom_map=magmom_map,
             )
         return create_qe_job(
             case_info,
@@ -560,11 +561,29 @@ def preview_job_from_case(
     calculation_type = case_info.get("calculation_type") or get_case_type(case_dir)
 
     if engine == "qe":
-        from vasp_auto.qe_tools import preview_qe_job
+        from vasp_auto.qe_tools import preview_qe_job, build_neb_input, pseudo_files_for_struct
         if calculation_type == "tss":
-            raise ValueError(
-                "Quantum ESPRESSO backend does not support TSS/NEB yet; use the VASP engine."
+            from vasp_auto.structure import read_poscar
+            initial_path = case_dir / "initial" / "POSCAR"
+            final_path = case_dir / "final" / "POSCAR"
+            initial = read_poscar(initial_path)
+            final = read_poscar(final_path)
+            cfg = config or {}
+            pseudos = pseudo_files_for_struct(initial, cfg.get("pseudo_dir"), cfg.get("pseudo_map"))
+            from vasp_auto.qe_tools import _kpoints_card, _qe_params_from_config
+            text = build_neb_input(
+                initial, final, pseudos=pseudos,
+                kpoints_card=_kpoints_card(kpoints_spec, initial, initial_path, "scf"),
+                images=int(neb_images), qe_params=_qe_params_from_config(cfg),
+                spin=spin, magmom_map=magmom_map,
             )
+            return {
+                "case_name": case_info["case_name"], "calculation_type": "tss",
+                "calc_type": "neb", "engine": "qe", "job_dir": str(case_info["job_dir"]),
+                "POSCAR": str(initial_path), "neb.in": text,
+                "pseudos": ", ".join(f"{el}: {name}" for el, name in pseudos.items()),
+                "stages": [{"program": "neb.x", "input": "neb.in", "output": "neb.out", "mpi": True}],
+            }
         return preview_qe_job(
             case_info,
             config or {},

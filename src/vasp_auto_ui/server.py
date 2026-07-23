@@ -56,7 +56,8 @@ from vasp_auto.structure import (
 )
 from vasp_auto import py4vasp_tools
 from vasp_auto.parser import (
-    aggregate_pdos, parse_bands, parse_dos, parse_pdos, parse_qe_bands, parse_qe_dos,
+    aggregate_pdos, aggregate_qe_pdos, parse_bands, parse_dos, parse_pdos,
+    parse_qe_bands, parse_qe_dos,
 )
 from vasp_auto.report import build_job_report, write_job_report
 from vasp_auto.runner import (
@@ -132,6 +133,7 @@ def api_meta(_query, _body):
     from vasp_auto.ai_providers import DEFAULT_PROVIDER, provider_catalog
     from vasp_auto.ase_engine import ASE_CALCULATORS, ASE_SUPPORTED_CALC_TYPES
     from vasp_auto.ml_tools import ML_MODELS
+    from vasp_auto.qe_tools import QE_ALL_CALC_TYPES, QE_COMPANION_PROGRAMS
 
     config = _config()
     return {
@@ -143,6 +145,8 @@ def api_meta(_query, _body):
         "ai_provider_default": DEFAULT_PROVIDER,
         "ase_calculators": list(ASE_CALCULATORS),
         "ase_calc_types": list(ASE_SUPPORTED_CALC_TYPES),
+        "qe_calc_types": list(QE_ALL_CALC_TYPES),
+        "qe_companion_programs": list(QE_COMPANION_PROGRAMS),
         # UI default: the user's configured model if set, else 'emt' (always runs,
         # no download) — the gated UMA models would otherwise fail on first click.
         "ml_model_default": config.get("ml_model") or "emt",
@@ -1224,18 +1228,25 @@ def api_pdos(query, _body):
     resolved against the job POSCAR.
     """
     job_dir = _analysis_query_dir(query)
-    pdos = parse_pdos(job_dir / "vasprun.xml")
-    if pdos is None:
-        raise FileNotFoundError(
-            "No projected DOS in this job — run a 'dos' calculation (LORBIT=11 "
-            "is set by the dos template; vasprun.xml must contain a partial DOS)."
-        )
     struct = read_poscar(job_dir / "POSCAR")
     symbols = per_atom_symbols(struct)
     atoms = None
     selection = (query.get("atoms") or [""])[0].strip()
     if selection:
         atoms = parse_atom_selection(struct, selection)
+    if job_engine(job_dir) == "qe":
+        result = aggregate_qe_pdos(job_dir, symbols, atoms=atoms)
+        if result is None:
+            raise FileNotFoundError("No QE projected DOS in this job; run a dos calculation.")
+        result["selection"] = selection or None
+        result["natoms"] = len(symbols)
+        return result
+    pdos = parse_pdos(job_dir / "vasprun.xml")
+    if pdos is None:
+        raise FileNotFoundError(
+            "No projected DOS in this job — run a 'dos' calculation (LORBIT=11 "
+            "is set by the dos template; vasprun.xml must contain a partial DOS)."
+        )
     result = aggregate_pdos(pdos, symbols, atoms=atoms)
     result["selection"] = selection or None
     result["natoms"] = len(symbols)
@@ -1363,19 +1374,27 @@ def api_chgdiff(_query, body):
     jobs are captured (with their CHGCAR) into the cache and analyzed locally.
     """
     from vasp_auto.chgcar import charge_difference
+    from vasp_auto.qe_volumetric import cube_as_volumetric, cube_difference
 
     def chgcar_path(value):
-        resolved = _slot_dir(value, heavy=("CHGCAR",))
-        return resolved if resolved.is_file() else resolved / "CHGCAR"
+        resolved = _slot_dir(value, heavy=("CHGCAR", "charge-density.cube"))
+        if resolved.is_file():
+            return resolved
+        return (resolved / "charge-density.cube" if job_engine(resolved) == "qe"
+                else resolved / "CHGCAR")
 
     total = chgcar_path(body["total"])
     parts = [chgcar_path(p) for p in body.get("parts") or []
              if (p if isinstance(p, dict) else str(p).strip())]
     if not parts:
         raise ValueError("Charge difference needs at least one part to subtract")
-    output = total.parent / "CHGCAR_diff"
-    diff = charge_difference(total, parts, output)
-    payload = _volume_payload(diff, "CHGCAR_diff", 2, 0.5)
+    if total.suffix.lower() == ".cube":
+        output = total.parent / "charge-density-diff.cube"
+        diff = cube_as_volumetric(cube_difference(total, parts, output), total.parent / "POSCAR")
+    else:
+        output = total.parent / "CHGCAR_diff"
+        diff = charge_difference(total, parts, output)
+    payload = _volume_payload(diff, output.name, 2, 0.5)
     payload["path"] = str(output)
     return payload
 
@@ -1487,7 +1506,7 @@ def api_thermo(query, _body):
 
 def api_dband(query, _body):
     """d-band center/width of selected atoms from a finished dos job."""
-    from vasp_auto.analysis import d_band_center
+    from vasp_auto.analysis import d_band_center, qe_d_band_center
 
     job_dir = _analysis_query_dir(query)
     selection = (query.get("atoms") or [""])[0].strip()
@@ -1496,10 +1515,10 @@ def api_dband(query, _body):
     struct = read_poscar(job_dir / "POSCAR")
     atoms = parse_atom_selection(struct, selection)
     emax_text = (query.get("emax") or [""])[0].strip()
-    result = d_band_center(
-        job_dir / "vasprun.xml", atoms,
-        emax_eV=float(emax_text) if emax_text else None,
-    )
+    emax = float(emax_text) if emax_text else None
+    result = (qe_d_band_center(job_dir, atoms, emax_eV=emax)
+              if job_engine(job_dir) == "qe"
+              else d_band_center(job_dir / "vasprun.xml", atoms, emax_eV=emax))
     result["selection"] = selection
     return result
 
@@ -1518,7 +1537,8 @@ def api_optics(query, _body):
     from vasp_auto.analysis import absorption_spectrum
 
     job_dir = _analysis_query_dir(query)
-    return absorption_spectrum(job_dir / "vasprun.xml")
+    return absorption_spectrum(job_dir if job_engine(job_dir) == "qe"
+                               else job_dir / "vasprun.xml")
 
 
 def api_xrd(query, _body):
@@ -1542,7 +1562,7 @@ def api_bader(_query, body):
     from vasp_auto.chgcar import run_bader
 
     job_dir = _analysis_dir(str(body["path"]), body.get("machine"),
-                            heavy=("CHGCAR", "AECCAR0", "AECCAR2"))
+                            heavy=("CHGCAR", "AECCAR0", "AECCAR2", "charge-density.cube"))
     config = _config()
     result = run_bader(job_dir, config.get("bader_executable", "bader"))
     csv_path = job_dir / "bader_charges.csv"
@@ -1975,7 +1995,13 @@ def api_run(_query, body):
     # from, and force its machine as the run target so the calculation happens and
     # is stored on that machine. (The staging dir is read by the async CLI
     # subprocess, so it is left for the OS temp cleaner rather than removed here.)
-    loc = _remote_loc(body["target"], body.get("machine"), body.get("case_type"))
+    existing_folder = body.get("source") == "existing_folder"
+    if existing_folder and not body.get("machine"):
+        raise ValueError("Run an existing folder requires selecting its machine first.")
+    if existing_folder and body.get("machine") == "local":
+        loc = None
+    else:
+        loc = _remote_loc(body["target"], body.get("machine"), body.get("case_type"))
     if loc:
         staging_root = Path(tempfile.mkdtemp(prefix="vasp_auto_rc_"))
         if _is_remote_machine(body.get("machine")):

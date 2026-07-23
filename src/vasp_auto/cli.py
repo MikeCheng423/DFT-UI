@@ -1488,8 +1488,12 @@ def _run_analysis(args, config) -> bool:
         job_dir = Path(dir_text)
         struct = read_poscar(job_dir / "POSCAR")
         atoms = parse_atom_selection(struct, selection)
-        result = analysis.d_band_center(
-            job_dir / "vasprun.xml", atoms, emax_eV=args.d_band_emax
+        from vasp_auto.workflow import job_engine
+        result = (
+            analysis.qe_d_band_center(job_dir, atoms, emax_eV=args.d_band_emax)
+            if job_engine(job_dir) == "qe"
+            else analysis.d_band_center(job_dir / "vasprun.xml", atoms,
+                                        emax_eV=args.d_band_emax)
         )
         print(f"Atoms      : {len(atoms)} selected ({selection})")
         print(f"d-band center: {result['d_band_center_eV']:.4f} eV (vs E_F)")
@@ -1499,17 +1503,30 @@ def _run_analysis(args, config) -> bool:
         paths = []
         for item in args.chg_diff.split(","):
             p = Path(item.strip()).expanduser()
-            paths.append(p if p.is_file() else p / "CHGCAR")
+            if p.is_file():
+                paths.append(p)
+            elif (p / ".engine").exists() and (p / ".engine").read_text().strip() == "qe":
+                paths.append(p / "charge-density.cube")
+            else:
+                paths.append(p / "CHGCAR")
         if len(paths) < 2:
             raise ValueError(f'Use --chg-diff "TOTAL,PART1[,PART2...]", got: {args.chg_diff!r}')
-        output = paths[0].parent / "CHGCAR_diff"
-        charge_difference(paths[0], paths[1:], output)
+        is_qe_cube = paths[0].suffix.lower() == ".cube"
+        output = paths[0].parent / ("charge-density-diff.cube" if is_qe_cube else "CHGCAR_diff")
+        if is_qe_cube:
+            from vasp_auto.qe_volumetric import cube_difference
+            cube_difference(paths[0], paths[1:], output)
+        else:
+            charge_difference(paths[0], paths[1:], output)
         print(f"Wrote     : {output} (rho_total - sum of {len(paths) - 1} parts)")
 
     if args.bader:
         job_dir = Path(args.bader)
         result = run_bader(job_dir, config.get("bader_executable", "bader"))
-        reference = "AECCAR0+AECCAR2 reference" if result["used_aeccar_reference"] else "CHGCAR only (no AECCARs found)"
+        reference = result.get("reference") or (
+            "AECCAR0+AECCAR2 reference" if result["used_aeccar_reference"]
+            else "CHGCAR only (no AECCARs found)"
+        )
         print(f"Bader      : {reference}")
         rows = []
         for charge in result["charges"]:
@@ -1521,9 +1538,12 @@ def _run_analysis(args, config) -> bool:
         _write_csv(job_dir / "bader_charges.csv", ["index", "element", "electrons", "net_charge_e"], rows)
 
     if args.dos_export:
-        from vasp_auto.parser import aggregate_pdos, parse_dos, parse_pdos
+        from vasp_auto.parser import (
+            aggregate_pdos, aggregate_qe_pdos, parse_dos, parse_pdos, parse_qe_dos,
+        )
+        from vasp_auto.workflow import job_engine
         job_dir = Path(args.dos_export)
-        dos = parse_dos(job_dir / "vasprun.xml")
+        dos = parse_qe_dos(job_dir) if job_engine(job_dir) == "qe" else parse_dos(job_dir / "vasprun.xml")
         if dos is None:
             raise FileNotFoundError(
                 f"No DOS in {job_dir} — run a 'dos' calculation there first."
@@ -1536,13 +1556,16 @@ def _run_analysis(args, config) -> bool:
         print(f"E_Fermi    : {dos['efermi']:.4f} eV" if dos["efermi"] is not None else "E_Fermi    : ?")
         _write_csv(job_dir / "dos.csv", header, rows)
 
-        pdos = parse_pdos(job_dir / "vasprun.xml")
-        if pdos is not None:
-            struct = read_poscar(job_dir / "POSCAR")
-            symbols = []
-            for element, count in zip(struct["elements"], struct["counts"]):
-                symbols.extend([element] * count)
-            aggregated = aggregate_pdos(pdos, symbols)
+        struct = read_poscar(job_dir / "POSCAR")
+        symbols = []
+        for element, count in zip(struct["elements"], struct["counts"]):
+            symbols.extend([element] * count)
+        if job_engine(job_dir) == "qe":
+            aggregated = aggregate_qe_pdos(job_dir, symbols)
+        else:
+            pdos = parse_pdos(job_dir / "vasprun.xml")
+            aggregated = aggregate_pdos(pdos, symbols) if pdos is not None else None
+        if aggregated is not None:
             labels = [
                 f"{c['label'].replace(' ', '_')}" + (f"_spin{c['spin'] + 1}" if len(dos["total"]) > 1 else "")
                 for c in aggregated["curves"]
@@ -1554,9 +1577,11 @@ def _run_analysis(args, config) -> bool:
             _write_csv(job_dir / "pdos.csv", ["energy_eV"] + labels, rows)
 
     if args.bands_export:
-        from vasp_auto.parser import parse_bands
+        from vasp_auto.parser import parse_bands, parse_qe_bands
+        from vasp_auto.workflow import job_engine
         job_dir = Path(args.bands_export)
-        bands = parse_bands(job_dir / "vasprun.xml", job_dir / "KPOINTS")
+        bands = (parse_qe_bands(job_dir) if job_engine(job_dir) == "qe"
+                 else parse_bands(job_dir / "vasprun.xml", job_dir / "KPOINTS"))
         if bands is None:
             raise FileNotFoundError(
                 f"No eigenvalues in {job_dir} — run a 'bands' calculation there first."
@@ -1595,7 +1620,7 @@ def _run_analysis(args, config) -> bool:
 
     if args.optics_parse:
         job_dir = Path(args.optics_parse)
-        result = analysis.absorption_spectrum(job_dir / "vasprun.xml")
+        result = analysis.absorption_spectrum(job_dir)
         rows = [
             [energy, alpha, e1, e2]
             for energy, alpha, e1, e2 in zip(
@@ -2206,7 +2231,10 @@ def _bundle_qe_pseudos(bundle: Path, case_name: str, config: dict, machine) -> l
     from vasp_auto.qe_tools import pseudo_files_for_struct
     from vasp_auto.structure import read_poscar
 
-    struct = read_poscar(bundle / "POSCAR")
+    poscar = bundle / "POSCAR"
+    if not poscar.exists():
+        poscar = bundle / "initial" / "POSCAR"
+    struct = read_poscar(poscar)
     pseudos = pseudo_files_for_struct(struct, config.get("pseudo_dir"), config.get("pseudo_map"))
     pseudo_dir = config.get("pseudo_dir")
     (bundle / "pseudo").mkdir()
@@ -2223,7 +2251,7 @@ def _bundle_qe_pseudos(bundle: Path, case_name: str, config: dict, machine) -> l
 
 
 def _run_detached_offload(case_dir, case_info, args, config, remote, calc_type, kpoints_spec,
-                          mode, project_name, engine="vasp", wait_for_slot=False):
+                          mode, project_name, engine="vasp"):
     """Offload a full calculation to the remote engine (run_mode: ssh_detached).
 
     Prepares an inputs bundle (a single-case POSCAR, or a TSS/NEB case's
@@ -2232,14 +2260,13 @@ def _run_detached_offload(case_dir, case_info, args, config, remote, calc_type, 
     and launches the remote vasp_auto detached so the local host can be powered
     off. Returns (case_info, [row]).
 
-    Submission itself takes seconds no matter how long VASP runs, so a project
-    run with more cases than its --parallel cap needs wait_for_slot=True: it
-    polls this case's own job to completion before returning, so the
-    ThreadPoolExecutor driving the project only ever has `parallel` cases
-    actually running on the remote at once (otherwise every case would launch
-    back-to-back within moments of each other, ignoring the cap)."""
+    Fire-and-forget by design: submission takes seconds no matter how long VASP
+    runs, and we return as soon as every case is launched — so a whole project
+    folder gets submitted even if the local host then sleeps or the UI restarts.
+    ponytail: --parallel does NOT block the local driver to cap remote
+    concurrency (that abandoned the rest of the folder whenever the driver died
+    mid-run); cap on the remote's own scheduler if you need it."""
     import tempfile
-    import time
     from vasp_auto.potcar_finder import build_potcar
     from vasp_auto.runner import submit_job_detached
 
@@ -2305,20 +2332,7 @@ def _run_detached_offload(case_dir, case_info, args, config, remote, calc_type, 
         )
 
     print(f"Launched  : {machine} pid {submission['pid'] or '?'} -> {submission['remote_dir']}")
-    if wait_for_slot and submission.get("pid"):
-        # Hold this case's --parallel slot (the ThreadPoolExecutor worker that
-        # called us) until it actually finishes, instead of freeing it the moment
-        # submission returns — otherwise every case in the project would launch
-        # within moments of each other regardless of the cap.
-        from vasp_auto.runner import poll_detached_job
-        print(f"Waiting   : {case_name} holds a --parallel slot on {machine} until it finishes")
-        while True:
-            time.sleep(20)
-            status = poll_detached_job(remote, submission["control_dir"], submission["pid"])
-            if status["state"] != "running":
-                break
-    else:
-        print("Fetch later from the Results tab (⬇) or with --parse-only after copying back.")
+    print("Fetch later from the Results tab (⬇) or with --parse-only after copying back.")
     row = build_row(project_name, mode, case_info, status_override="remote")
     row["machine"] = machine
     row["remote_dir"] = submission["remote_dir"]
@@ -2327,8 +2341,7 @@ def _run_detached_offload(case_dir, case_info, args, config, remote, calc_type, 
     return case_info, [row]
 
 
-def _process_case(case_dir, args, base_config, mode, project_name, output_root, neb_images, calc_type, kpoints_spec,
-                  wait_for_remote_slot=False):
+def _process_case(case_dir, args, base_config, mode, project_name, output_root, neb_images, calc_type, kpoints_spec):
     """Handle one case end to end; returns (case_info, rows)."""
     config = merge_local_config(base_config, case_dir)
     engine, config = resolve_engine(args, config)
@@ -2379,9 +2392,8 @@ def _process_case(case_dir, args, base_config, mode, project_name, output_root, 
         )
         return case_info, [row]
 
-    if engine in ("qe", "ase"):
-        # Non-VASP engines have a narrower scope (scf/relax). The VASP-only
-        # features below are documented follow-ups.
+    if engine == "ase":
+        # Generic ASE calculators intentionally retain their narrower scope.
         if is_tss:
             raise ValueError(
                 f"{case_dir.name}: TSS/NEB is not supported by the {engine} engine yet; use --engine vasp."
@@ -2392,6 +2404,11 @@ def _process_case(case_dir, args, base_config, mode, project_name, output_root, 
             raise ValueError(f"Chained workflows are VASP-only; not yet available for --engine {engine}.")
         if args.solvation:
             raise ValueError(f"--solvation (VASPsol) is not available for --engine {engine}.")
+    if engine == "qe" and args.solvation:
+        raise ValueError(
+            "--solvation selects VASPsol and is not portable to QE. Configure a QE Environ "
+            "input explicitly in pw.in instead."
+        )
 
     magmom_map = parse_magmom_map(args.magmom) if args.magmom else config.get("magmom_map")
     if args.spin:
@@ -2409,7 +2426,7 @@ def _process_case(case_dir, args, base_config, mode, project_name, output_root, 
             raise ValueError("Offload (ssh_detached) supports VASP and QE, not --engine ase.")
         return _run_detached_offload(
             case_dir, case_info, args, config, remote, calc_type, kpoints_spec, mode, project_name,
-            engine=engine, wait_for_slot=wait_for_remote_slot,
+            engine=engine,
         )
 
     workflow_steps = None
@@ -2425,14 +2442,21 @@ def _process_case(case_dir, args, base_config, mode, project_name, output_root, 
             row = build_row(project_name, mode, case_info, status_override="dry-run")
             return case_info, [row]
         print(f"Workflow  : {', '.join(str(step['calc_type']) for step in workflow_steps)}")
-        rows = run_workflow_case(
-            case_info,
-            workflow_steps,
-            config,
-            cpus=args.cpus,
-            prepare_only=args.prepare,
-            remote=remote,
-        )
+        if engine == "qe":
+            from vasp_auto.qe_chain import run_qe_workflow_case
+            rows = run_qe_workflow_case(
+                case_info, workflow_steps, config, cpus=args.cpus,
+                prepare_only=args.prepare, remote=remote,
+            )
+        else:
+            rows = run_workflow_case(
+                case_info,
+                workflow_steps,
+                config,
+                cpus=args.cpus,
+                prepare_only=args.prepare,
+                remote=remote,
+            )
         for row in rows:
             row["project"] = project_name
         return case_info, rows
@@ -2495,22 +2519,33 @@ def _process_case(case_dir, args, base_config, mode, project_name, output_root, 
     if converge_requested:
         encut_values = parse_encut_values(args.converge_encut) if args.converge_encut else None
         sigma_values = parse_sigma_values(args.converge_sigma) if args.converge_sigma else None
-        result = converge_scf_case(
-            case_name=case_info["case_name"],
-            base_job_dir=case_info["job_dir"],
-            vasp_executable=config["vasp_executable"],
-            cpus=args.cpus,
-            nelm_values=parse_nelm_values(args.nelm_values),
-            kpoint_meshes=parse_kpoint_meshes(args.kpoints_values),
-            encut_values=encut_values,
-            sigma_values=sigma_values,
-            energy_tolerance=args.energy_tol,
-            sigma_tolerance=args.sigma_tol,
-            scan_nelm=args.converge_scf,
-            scan_kpoints=args.converge_scf,
-            reuse_wavecar=args.reuse_wavecar,
-            remote=remote,
-        )
+        if engine == "qe":
+            from vasp_auto.qe_convergence import converge_qe_case
+            result = converge_qe_case(
+                case_name=case_info["case_name"], base_job_dir=case_info["job_dir"],
+                qe_executable=config.get("qe_executable", "pw.x"), config=config,
+                cpus=args.cpus, kpoint_meshes=parse_kpoint_meshes(args.kpoints_values),
+                encut_values=encut_values, sigma_values=sigma_values,
+                energy_tolerance=args.energy_tol, sigma_tolerance=args.sigma_tol,
+                scan_kpoints=args.converge_scf, remote=remote,
+            )
+        else:
+            result = converge_scf_case(
+                case_name=case_info["case_name"],
+                base_job_dir=case_info["job_dir"],
+                vasp_executable=config["vasp_executable"],
+                cpus=args.cpus,
+                nelm_values=parse_nelm_values(args.nelm_values),
+                kpoint_meshes=parse_kpoint_meshes(args.kpoints_values),
+                encut_values=encut_values,
+                sigma_values=sigma_values,
+                energy_tolerance=args.energy_tol,
+                sigma_tolerance=args.sigma_tol,
+                scan_nelm=args.converge_scf,
+                scan_kpoints=args.converge_scf,
+                reuse_wavecar=args.reuse_wavecar,
+                remote=remote,
+            )
         row = build_row(project_name, mode, case_info, status_override="converged-scan")
         row.update(
             {
@@ -2526,8 +2561,8 @@ def _process_case(case_dir, args, base_config, mode, project_name, output_root, 
         if remote:
             row["machine"] = remote.get("name") or remote.get("host")
         print(
-            f"Selected  : ENCUT={result['selected_encut']}, "
-            f"SIGMA={result['selected_sigma']}, "
+            f"Selected  : {'ecutwfc (Ry)' if engine == 'qe' else 'ENCUT'}={result['selected_encut']}, "
+            f"{'degauss (Ry)' if engine == 'qe' else 'SIGMA'}={result['selected_sigma']}, "
             f"NELM={result['selected_nelm']}, KPOINTS={result['selected_kpoints']}"
         )
         print(f"Report    : {result['report_path']}")
@@ -2740,14 +2775,6 @@ def main():
         _write_excel_summary(excel_path, all_results)
         return
 
-    # A detached remote offload submits and returns in seconds regardless of how
-    # long VASP takes, so --parallel can't rely on ThreadPoolExecutor blocking a
-    # worker until its case finishes (that's what makes it throttle at all) —
-    # only make offload cases wait for their own completion when a cap is
-    # actually in effect (batch bigger than the cap); a lone case, or a batch
-    # that fits under the cap, still fires and forgets as before.
-    throttle_remote = args.parallel > 1 and len(case_dirs) > 1
-
     def process(case_dir):
         return _process_case(
             case_dir,
@@ -2759,7 +2786,6 @@ def main():
             neb_images=neb_images,
             calc_type=calc_type,
             kpoints_spec=kpoints_spec,
-            wait_for_remote_slot=throttle_remote,
         )
 
     if args.parallel > 1 and len(case_dirs) > 1:

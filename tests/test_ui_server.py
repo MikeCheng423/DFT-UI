@@ -144,6 +144,7 @@ def test_api_run_writes_workflow_yaml(tmp_path, monkeypatch):
         return FakeProc()
 
     monkeypatch.setattr(ui_server.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(ui_server, "UI_LOG_DIR", tmp_path / "logs")
 
     yaml_text = 'steps:\n  - calc_type: converge\n    encut: "400,450"\n  - calc_type: scf\n'
     result = ui_server.api_run({}, {
@@ -193,15 +194,53 @@ def test_api_run_fetches_remote_project_folder(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ui_server.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(ui_server, "_write_remote_config", lambda name: "irrelevant.json")
+    monkeypatch.setattr(ui_server, "UI_LOG_DIR", tmp_path / "logs")
 
     ui_server.api_run({}, {
-        "target": str(remote_root), "mode": "run", "machine": "fake",
+        "target": str(remote_root), "mode": "run", "source": "existing_folder",
+        "machine": "fake",
     })
 
     # command = [python, -u, -m, vasp_auto.cli, <target>, ...] — target is positional.
     target = Path(captured["command"][4])
     assert (target / "caseA" / "POSCAR").is_file()
     assert (target / "caseB" / "POSCAR").is_file()
+
+
+def test_existing_folder_requires_machine_and_honors_explicit_local(tmp_path, monkeypatch):
+    folder = tmp_path / "case"
+    folder.mkdir()
+    (folder / "POSCAR").write_text("dummy\n")
+
+    with pytest.raises(ValueError, match="selecting its machine"):
+        ui_server.api_run({}, {
+            "target": str(folder), "mode": "run", "source": "existing_folder",
+        })
+
+    monkeypatch.setattr(
+        ui_server, "_remote_case_marker",
+        lambda _path: (_ for _ in ()).throw(AssertionError("local choice was reinterpreted")),
+    )
+    captured = {}
+
+    def fake_spawn(args, target):
+        captured.update(args=args, target=target)
+        return {"token": "test"}
+
+    monkeypatch.setattr(ui_server, "_spawn_cli_job", fake_spawn)
+    result = ui_server.api_run({}, {
+        "target": str(folder), "mode": "run", "source": "existing_folder",
+        "machine": "local",
+    })
+    assert result["token"] == "test"
+    assert captured["target"] == str(folder)
+
+
+def test_existing_folder_ui_enforces_machine_then_folder():
+    html = (ui_server.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    assert html.index('id="proj-remote"') < html.index('id="proj-dir"')
+    assert 'id="proj-dir" placeholder="Select a machine first"' in html
+    assert 'source: "existing_folder"' in html
 
 
 def test_working_machine_direct_roundtrip(tmp_path, monkeypatch, scf_case):

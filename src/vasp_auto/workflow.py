@@ -365,13 +365,25 @@ def job_finished(job_dir) -> bool:
     ``ase_results.json`` (only written at the end).
     """
     job_dir = Path(job_dir)
+    if (job_dir / ".qe_complete").exists():
+        return True
     if (job_dir / "job.log").exists() or (job_dir / "ase_results.json").exists():
         return True
     outcar = job_dir / "OUTCAR"
     if outcar.exists() and _tail_has(outcar, "General timing"):
         return True
     pw = job_dir / "pw.out"
-    return pw.exists() and _tail_has(pw, "JOB DONE")
+    if pw.exists() and _tail_has(pw, "JOB DONE"):
+        return True
+    manifest = job_dir / "qe_stages.json"
+    if manifest.exists():
+        try:
+            stages = json.loads(manifest.read_text(encoding="utf-8")).get("stages", [])
+            output = job_dir / stages[-1]["output"]
+            return output.exists() and _tail_has(output, "JOB DONE")
+        except (ValueError, KeyError, IndexError, OSError, TypeError):
+            return False
+    return False
 
 
 def pid_alive(pid: int) -> bool:
@@ -694,6 +706,22 @@ def _build_qe_row(project_name, mode, case_info, status_override=None):
     """Summary row for a Quantum ESPRESSO job (pw.out), mirroring build_row."""
     job_dir = Path(case_info["job_dir"])
     pw_out = job_dir / "pw.out"
+    if case_info.get("calculation_type") == "tss":
+        from vasp_auto.parser import parse_qe_neb
+        profile = parse_qe_neb(job_dir) or {}
+        neb_out = job_dir / "neb.out"
+        row = {
+            "project": project_name, "case": case_info["case_name"], "engine": "qe",
+            "calculation_type": "tss", "job_dir": str(job_dir),
+            "status": status_override or terminal_status(job_dir, neb_out.exists()),
+            "converged": job_finished(job_dir),
+            "barrier_forward_eV": profile.get("barrier_forward_eV"),
+            "barrier_reverse_eV": profile.get("barrier_reverse_eV"),
+            "delta_eV": profile.get("delta_eV"),
+        }
+        if status_override is None:
+            _apply_remote_marker(row, job_dir)
+        return row
     summary = parse_pw_output(pw_out) or {}
 
     row = {
@@ -739,14 +767,13 @@ def _build_ase_row(project_name, mode, case_info, status_override=None):
 
 
 def build_row(project_name, mode, case_info, status_override=None):
-    if case_info.get("calculation_type") == "tss":
-        return _build_neb_row(project_name, mode, case_info, status_override=status_override)
-
     engine_name = job_engine(Path(case_info["job_dir"]))
     if engine_name == "qe":
         return _build_qe_row(project_name, mode, case_info, status_override=status_override)
     if engine_name == "ase":
         return _build_ase_row(project_name, mode, case_info, status_override=status_override)
+    if case_info.get("calculation_type") == "tss":
+        return _build_neb_row(project_name, mode, case_info, status_override=status_override)
 
     job_dir = Path(case_info["job_dir"])
     outcar = job_dir / "OUTCAR"
@@ -801,6 +828,8 @@ def should_retry_failed(case_info):
 
     engine_name = job_engine(job_dir)
     if engine_name == "qe":
+        if case_info.get("calculation_type") == "tss":
+            return not job_finished(job_dir)
         summary = parse_pw_output(job_dir / "pw.out")
         if not summary:
             return True
