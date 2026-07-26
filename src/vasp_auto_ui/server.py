@@ -105,7 +105,7 @@ REMOTES_FILE = REPO_ROOT / "remotes.json"
 # pre-fills from; the run still passes it through the usual -n argument.
 REMOTE_FIELDS = ("host", "user", "port", "ssh_key", "remote_root",
                  "vasp_executable", "scheduler", "run_mode", "env_setup", "cpus",
-                 "potcar_root", "qe_executable", "pseudo_dir", "qe_env_setup")
+                 "max_jobs", "potcar_root", "qe_executable", "pseudo_dir", "qe_env_setup")
 
 EDITABLE_FILES = {"INCAR", "KPOINTS", "POSCAR", "workflow.yaml", "config.yaml"}
 
@@ -2480,6 +2480,11 @@ def api_remote_save(_query, body):
             entry["cpus"] = max(1, int(entry["cpus"]))
         except (TypeError, ValueError):
             del entry["cpus"]
+    if "max_jobs" in entry:
+        try:
+            entry["max_jobs"] = max(1, int(entry["max_jobs"]))
+        except (TypeError, ValueError):
+            del entry["max_jobs"]
     if body.get("scheduler_options"):
         entry["scheduler_options"] = body["scheduler_options"]
     store = _load_remotes_store()
@@ -2549,7 +2554,7 @@ def api_remote_status(_query, body):
     else:
         if not marker.get("job_id"):
             raise ValueError("No remote job id recorded for this case.")
-        result = poll_remote_job(remote, marker["job_id"])
+        result = poll_remote_job(remote, marker["job_id"], marker.get("state_file"))
     result["machine"] = marker.get("machine") or marker.get("host")
     result["remote_dir"] = _resolve_remote_job_dir(job_dir, marker, remote)
     return result

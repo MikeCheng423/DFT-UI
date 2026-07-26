@@ -25,6 +25,7 @@ DEFAULT_SLURM_TEMPLATE = """#!/bin/bash
 #SBATCH --ntasks={cpus}
 #SBATCH --output=run.log
 {extra}
+{preamble}
 cd "{job_dir}"
 mpirun -np {cpus} "{exe}"
 """
@@ -35,6 +36,7 @@ DEFAULT_PBS_TEMPLATE = """#!/bin/bash
 #PBS -o run.log
 #PBS -j oe
 {extra}
+{preamble}
 cd "{job_dir}"
 mpirun -np {cpus} "{exe}"
 """
@@ -44,6 +46,7 @@ DEFAULT_SLURM_QE_TEMPLATE = """#!/bin/bash
 #SBATCH --ntasks={cpus}
 #SBATCH --output=run.log
 {extra}
+{preamble}
 cd "{job_dir}"
 {qe_commands}
 """
@@ -54,6 +57,7 @@ DEFAULT_PBS_QE_TEMPLATE = """#!/bin/bash
 #PBS -o run.log
 #PBS -j oe
 {extra}
+{preamble}
 cd "{job_dir}"
 {qe_commands}
 """
@@ -381,6 +385,7 @@ def write_submit_script(
     options: list[str] | None = None,
     run_dir: str | None = None,
     engine: str = "vasp",
+    preamble: list[str] | None = None,
 ) -> Path:
     """Write a scheduler submit script into the job directory.
 
@@ -402,14 +407,29 @@ def write_submit_script(
 
     qe_commands = "\n".join(_qe_shell_commands(job_dir, vasp_executable, cpus or 1)) \
         if engine == "qe" else ""
+    has_preamble_placeholder = "{preamble}" in template
+    preamble_text = "\n".join(preamble or [])
     script_text = template.format(
         job_name=job_dir.name,
         cpus=cpus if cpus is not None else 1,
         exe=vasp_executable,
         job_dir=run_dir if run_dir is not None else job_dir,
         extra="\n".join(options or []),
+        preamble=preamble_text,
         qe_commands=qe_commands,
     )
+    if preamble_text and not has_preamble_placeholder:
+        # Existing custom templates predate the {preamble} placeholder. Insert
+        # the gate after their shebang/header directives so the concurrency
+        # rule still applies without invalidating #SBATCH/#PBS directives.
+        lines = script_text.splitlines()
+        insert_at = 1 if lines and lines[0].startswith("#!") else 0
+        while insert_at < len(lines) and (
+            not lines[insert_at].strip() or lines[insert_at].lstrip().startswith("#")
+        ):
+            insert_at += 1
+        lines[insert_at:insert_at] = preamble_text.splitlines()
+        script_text = "\n".join(lines) + ("\n" if script_text.endswith("\n") else "")
 
     script_path = job_dir / "submit.sh"
     script_path.write_text(script_text, encoding="utf-8")
@@ -630,6 +650,57 @@ def remote_results_base(remote: dict) -> str:
     return f"{root}/results"
 
 
+def remote_concurrency_limit(remote: dict) -> int | None:
+    """Configured maximum number of simultaneous jobs on one remote machine.
+
+    A missing value means unlimited, preserving the behaviour of existing
+    remote configurations. Invalid values are also treated as unset; the UI
+    normalizes saved values, while hand-written config files remain forgiving.
+    """
+    value = remote.get("max_jobs")
+    if value in (None, ""):
+        return None
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _remote_slot_lines(remote: dict, state_file: str) -> list[str]:
+    """Bash prologue that waits until one of the remote's job slots is free.
+
+    ``flock`` locks are owned by the remote process and released by the kernel
+    even if a job crashes or is killed.  This makes the limit independent of
+    the submitting UI process and safe across separate CLI submissions.
+    """
+    limit = remote_concurrency_limit(remote)
+    if limit is None:
+        return []
+    root = (remote.get("remote_root") or "").rstrip("/")
+    slot_root = f"{root}/{ENGINE_SUBDIR}/job_slots"
+    return [
+        f"vasp_auto_slot_root={shlex.quote(slot_root)}",
+        f"vasp_auto_state_file={shlex.quote(state_file)}",
+        f"vasp_auto_slot_limit={limit}",
+        'mkdir -p "$vasp_auto_slot_root"',
+        'if ! command -v flock >/dev/null 2>&1; then '
+        'printf "%s\\n" "vasp_auto: max jobs requires flock on the remote" >&2; exit 69; fi',
+        'printf "%s\\n" pending > "$vasp_auto_state_file"',
+        'while :; do',
+        '  vasp_auto_slot_i=1',
+        '  while [ "$vasp_auto_slot_i" -le "$vasp_auto_slot_limit" ]; do',
+        '    exec 199>"$vasp_auto_slot_root/slot_${vasp_auto_slot_i}.lock"',
+        '    if flock -n 199; then vasp_auto_slot_acquired=1; break 2; fi',
+        '    exec 199>&-',
+        '    vasp_auto_slot_i=$((vasp_auto_slot_i + 1))',
+        '  done',
+        '  sleep 2',
+        'done',
+        'printf "%s\\n" running > "$vasp_auto_state_file"',
+    ]
+
+
 def run_vasp_remote(
     job_dir: str,
     remote: dict,
@@ -677,7 +748,8 @@ def run_vasp_remote(
 
     # One non-interactive shell: set up the toolchain, then launch mpirun. Its
     # output goes to run.log on the remote (fetched back below).
-    parts = ["unset DISPLAY"]
+    state_file = f"{remote_dir}/.vasp_auto_state"
+    parts = ["unset DISPLAY", *_remote_slot_lines(remote, state_file)]
     if env_setup:
         parts.append(f"{{ {env_setup} ; }} >/dev/null 2>&1 || true")
     parts.append("ulimit -s unlimited 2>/dev/null || true")
@@ -772,7 +844,8 @@ def resume_job_remote(
     # One non-interactive shell: set up the toolchain, advance POSCAR to the
     # newest CONTCAR (the job itself, plus each NEB image subdir, keeping the
     # previous POSCAR as POSCAR.bak), then launch mpirun in place.
-    parts = ["unset DISPLAY"]
+    state_file = f"{remote_job_dir}/.vasp_auto_state"
+    parts = ["unset DISPLAY", *_remote_slot_lines(remote, state_file)]
     if env_setup:
         parts.append(f"{{ {env_setup} ; }} >/dev/null 2>&1 || true")
     parts.append("ulimit -s unlimited 2>/dev/null || true")
@@ -870,6 +943,7 @@ def resume_job_detached(
     pid_f = f"{control_dir}/pid"
     rc_f = f"{control_dir}/rc"
     jobdir_f = f"{control_dir}/job_dir"
+    state_f = f"{control_dir}/state"
     env_line = env_setup if env_setup else "true"
 
     _run_checked(
@@ -883,6 +957,7 @@ def resume_job_detached(
         "#!/bin/bash",
         f"echo $$ > {shlex.quote(pid_f)}",
         f"echo {quoted_job} > {shlex.quote(jobdir_f)}",
+        *_remote_slot_lines(remote, state_f),
         f"{{ {env_line} ; }} >/dev/null 2>&1 || true",
         "ulimit -s unlimited 2>/dev/null || true",
         f"cd {quoted_job}",
@@ -919,6 +994,7 @@ def resume_job_detached(
         "host": remote.get("host"),
         "remote_dir": remote_job_dir,
         "control_dir": control_dir,
+        **({"state_file": state_f} if remote_concurrency_limit(remote) is not None else {}),
         "pid": pid,
         "scheduler": "ssh_detached",
         "mode": "ssh_detached",
@@ -975,6 +1051,8 @@ def submit_job_remote(
     qe_env_setup = _remote_env_setup(remote, engine)
     if engine == "qe" and qe_env_setup:
         scheduler_options.append(qe_env_setup)
+    state_file = f"{remote_dir}/.vasp_auto_state"
+    slot_preamble = _remote_slot_lines(remote, state_file)
     write_submit_script(
         str(job_dir),
         str(exe),
@@ -984,6 +1062,7 @@ def submit_job_remote(
         options=scheduler_options,
         run_dir=remote_dir,
         engine=engine,
+        preamble=slot_preamble,
     )
 
     ssh_opts = _ssh_options(remote)
@@ -1014,6 +1093,7 @@ def submit_job_remote(
         "machine": machine,
         "host": remote.get("host"),
         "remote_dir": remote_dir,
+        **({"state_file": state_file} if slot_preamble else {}),
         "submit_output": output,
     }
 
@@ -1269,9 +1349,11 @@ def submit_job_detached(
     rc_f = f"{control_dir}/rc"
     log_f = f"{control_dir}/run.log"
     jobdir_f = f"{control_dir}/job_dir"
+    state_f = f"{control_dir}/state"
     script = "\n".join([
         "#!/bin/bash",
         f"echo $$ > {shlex.quote(pid_f)}",
+        *_remote_slot_lines(remote, state_f),
         f"cd {shlex.quote(paths['root'])}",
         *([f"export VASP_AUTO_ROOT={shlex.quote(templates_root)}"] if templates_root else []),
         # The engine writes the real (numbered) job root here, so the submitting host
@@ -1303,6 +1385,7 @@ def submit_job_detached(
         "remote_dir": jobs_remote,
         "inputs_dir": inputs_remote,
         "control_dir": control_dir,
+        **({"state_file": state_f} if remote_concurrency_limit(remote) is not None else {}),
         "pid": pid,
         "log": log_f,
         "scheduler": "ssh_detached",
@@ -1323,8 +1406,10 @@ def poll_detached_job(remote: dict, control_dir: str, pid: str | None = None) ->
     target = _ssh_target(remote)
     ssh_opts = _ssh_options(remote)
     rc_f = f"{control_dir}/rc"
+    state_f = f"{control_dir}/state"
     cmd = (
         f"if [ -f {shlex.quote(rc_f)} ]; then echo DONE; cat {shlex.quote(rc_f)}; "
+        f"elif [ \"$(cat {shlex.quote(state_f)} 2>/dev/null)\" = pending ]; then echo PENDING; "
         f"elif [ -n {shlex.quote(pid or '')} ] && kill -0 {shlex.quote(pid or '0')} 2>/dev/null; "
         f"then echo RUNNING; else echo UNKNOWN; fi"
     )
@@ -1339,6 +1424,8 @@ def poll_detached_job(remote: dict, control_dir: str, pid: str | None = None) ->
                 "raw": res.stdout.strip()}
     if lines and lines[0] == "RUNNING":
         return {"state": "running", "return_code": None, "raw": res.stdout.strip()}
+    if lines and lines[0] == "PENDING":
+        return {"state": "pending", "return_code": None, "raw": res.stdout.strip()}
     return {"state": "unknown", "return_code": None, "raw": res.stdout.strip() or res.stderr.strip()}
 
 
@@ -1609,6 +1696,13 @@ def check_remote_connection(remote: dict) -> dict:
             checks.append({"name": scheduler, "ok": ok,
                            "detail": f"{submit_cmd} available" if ok else f"{submit_cmd} not on PATH"})
 
+    if remote_concurrency_limit(remote) is not None:
+        res = remote_command(remote, "command -v flock >/dev/null 2>&1 && echo yes || echo no")
+        ok = "yes" in res.stdout
+        checks.append({"name": "job limit", "ok": ok,
+                       "detail": (f"up to {remote_concurrency_limit(remote)} jobs at once"
+                                  if ok else "flock is required for the max-jobs setting")})
+
     # remote_root is allowed to be missing (created on submit); everything else must pass.
     overall = all(c["ok"] for c in checks if c["name"] != "remote_root")
     return {
@@ -1619,8 +1713,13 @@ def check_remote_connection(remote: dict) -> dict:
     }
 
 
-def poll_remote_job(remote: dict, job_id: str) -> dict:
-    """Query the remote scheduler for a job's status over SSH."""
+def poll_remote_job(remote: dict, job_id: str, state_file: str | None = None) -> dict:
+    """Query the remote scheduler for a job's status over SSH.
+
+    When a configured concurrency limit holds an already-allocated scheduler
+    job at the application gate, its state file takes precedence over the
+    scheduler's coarse ``running`` state and reports ``pending`` to the UI.
+    """
     scheduler = remote.get("scheduler", "slurm")
     if scheduler not in POLL_COMMANDS:
         return {"job_id": job_id, "scheduler": scheduler, "state": "unknown", "raw": ""}
@@ -1630,7 +1729,17 @@ def poll_remote_job(remote: dict, job_id: str) -> dict:
         res = remote_command(remote, command, timeout=30)
     except (subprocess.TimeoutExpired, OSError):
         return {"job_id": job_id, "scheduler": scheduler, "state": "unknown", "raw": ""}
-    return _parse_poll_output(scheduler, job_id, res.returncode, res.stdout, res.stderr)
+    result = _parse_poll_output(scheduler, job_id, res.returncode, res.stdout, res.stderr)
+    if state_file and result.get("state") == "running":
+        try:
+            gated = remote_command(
+                remote, f"cat {shlex.quote(state_file)} 2>/dev/null", timeout=15
+            ).stdout.strip()
+        except (subprocess.TimeoutExpired, OSError):
+            gated = ""
+        if gated == "pending":
+            result["state"] = "pending"
+    return result
 
 
 def fetch_remote_results(
@@ -1723,6 +1832,10 @@ def list_remote_jobs(remote: dict, root: str) -> list[dict]:
         'grep -q "General timing" "$d/OUTCAR" 2>/dev/null || '
         'grep -q "JOB DONE" "$d/pw.out" 2>/dev/null; } && g=1; '
         'k=0; [ -e "$d/.terminated" ] && k=1; '
+        # q: waiting at the per-machine concurrency gate. Scheduler jobs place
+        # their state in the job dir; detached jobs are visible via their local
+        # marker/status endpoint until the remote engine allocates this dir.
+        'q=0; [ "$(cat "$d/.vasp_auto_state" 2>/dev/null)" = pending ] && q=1; '
         # p: a .pid is recorded; a: the job is actually alive right now — its
         # recorded PID exists, or some live process has its cwd inside the dir
         # (real liveness, not just "output file exists"). pd: PID for display.
@@ -1742,7 +1855,7 @@ def list_remote_jobs(remote: dict, root: str) -> list[dict]:
         '-e "aborting loop because EDIFF is reached" "$d/OUTCAR" 2>/dev/null && c=1; '
         "e=$(awk '$4==\"E0=\"{x=$5} END{print x}' \"$d/OSZICAR\" 2>/dev/null); "
         '[ -n "$e" ] || e=-; '
-        'printf "%s\\t%s%s%s%s%s%s%s\\t%s%s\\t%s\\t%s\\t%s\\n" "$n" "$o" "$v" "$z" "$g" "$k" "$p" "$a" "$y" "$c" "$e" "$pd" "$d"; }; '
+        'printf "%s\\t%s%s%s%s%s%s%s%s\\t%s%s\\t%s\\t%s\\t%s\\n" "$n" "$o" "$v" "$z" "$g" "$k" "$p" "$a" "$q" "$y" "$c" "$e" "$pd" "$d"; }; '
         'for d in "$r"/*/; do d=${d%/}; [ -d "$d" ] || continue; '
         'if isjob "$d"; then emit "$d"; else '
         'for s in "$d"/*/; do s=${s%/}; [ -d "$s" ] || continue; '
@@ -1760,16 +1873,18 @@ def list_remote_jobs(remote: dict, root: str) -> list[dict]:
         if len(parts) != 6:
             continue
         mt, flags, type_conv, energy, pid, path = parts
-        flags = (flags + "0000000")[:7]
+        flags = (flags + "00000000")[:8]
         has_out, has_vr, has_osz = flags[0] == "1", flags[1] == "1", flags[2] == "1"
         has_log, killed = flags[3] == "1", flags[4] == "1"
         has_pid, alive = flags[5] == "1", flags[6] == "1"
+        pending = flags[7] == "1"
         type_conv = (type_conv + "s0")[:2]
         rel = path[len(root):].lstrip("/") if path.startswith(root) else path
         # Same rule as _local_job_rows: terminated > finished > actually alive
         # (live PID or a process working in the dir) > output-without-a-process
         # = stalled. A created file alone never counts as "running".
         status = ("terminated" if killed else "done" if has_log
+                  else "pending" if pending
                   else "running" if alive
                   else "stalled" if (has_pid or has_osz or has_out)
                   else "prepared")
@@ -1926,7 +2041,7 @@ def list_running_jobs(config: dict, running_only: bool = True,
     if running_only:
         # "stalled" = had a PID that has since died without finishing; surface it
         # too so a job that silently crashed doesn't just vanish from the board.
-        jobs = [j for j in jobs if j.get("status") in ("running", "stalled")]
+        jobs = [j for j in jobs if j.get("status") in ("pending", "running", "stalled")]
     jobs.sort(key=lambda j: j.get("modified_ts", 0), reverse=True)
     return {"jobs": jobs, "errors": errors}
 

@@ -597,7 +597,7 @@
         <p class="sub">Only needed for fine-tuning — templates cover the common cases. A saved case INCAR overrides the template.</p>
         <button class="ghost" onclick="loadIncar(false)">Load case INCAR</button>
         <button class="ghost" onclick="loadIncar(true)">Load template for selected type</button>
-        <button class="ghost" onclick="openPicker(null,{what:'the case or job folder to copy the INCAR from',onchoose:incarFromOther})" title="Copy the INCAR of another case or finished job into the editor">Load from another work…</button>
+        <button class="ghost" onclick="openPicker(null,{what:'the case or job folder to copy the INCAR from',chooseMachine:true,onchoose:incarFromOther})" title="Copy the INCAR of another local or remote case/job into the editor">Load from another work…</button>
         <button class="act" onclick="saveIncar()">Save to case</button>
         <details id="incar-guided" style="margin:8px 0" ontoggle="if(this.open)renderIncarForm()">
           <summary style="cursor:pointer">⚙ Guided settings — pick in plain language, no VASP tags</summary>
@@ -935,6 +935,7 @@ ssh user@host 'echo ok'      # must print ok with no password</pre>
           </select></span>
         <span class="inline wide"><label>env setup (optional)</label><input id="rm-env" placeholder="source /opt/intel/oneapi/setvars.sh" title="Shell command sourced before mpirun so MKL/MPI libraries are on the path in a non-interactive SSH session. Leave blank if the remote login shell already sets these."></span>
         <span class="inline"><label>default cores</label><input id="rm-cpus" placeholder="e.g. 32" style="width:90px" title="Optional default MPI rank count. Pre-fills the CPU cores field in the Calculate tab when you pick this machine."></span>
+        <span class="inline"><label>max jobs at once</label><input id="rm-maxjobs" type="number" min="1" step="1" placeholder="unlimited" style="width:90px" title="Maximum calculations allowed to run at the same time on this machine. Extra submissions stay pending and start automatically when a slot opens."></span>
         <div style="margin-top:10px">
           <button class="ghost" onclick="testRemote()" title="Check SSH + that the work dir, VASP and scheduler are reachable">🔌 Test connection</button>
           <button class="act" onclick="saveRemote()">💾 Save machine</button>
@@ -1032,6 +1033,9 @@ ssh user@host 'echo ok'      # must print ok with no password</pre>
 <div id="pickermodal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:50">
   <div style="background:var(--panel);max-width:640px;margin:50px auto;border:1px solid var(--line);border-radius:10px;padding:14px 16px;max-height:75vh;display:flex;flex-direction:column">
     <h3 style="margin:0 0 8px;font-size:14px">📁 Choose <span id="pickerwhat">a folder</span></h3>
+    <div id="pickermachinebox" style="display:none;margin-bottom:8px">
+      <span class="inline"><label>machine</label><select id="pickermachine" onchange="pickerMachineChanged()"></select></span>
+    </div>
     <div id="pickerroots" style="margin-bottom:6px"></div>
     <input id="pickerpath" style="width:100%" title="Type a path and press Enter" onkeydown="if(event.key==='Enter')pickerGo(this.value)">
     <div id="pickerlist" style="overflow:auto;flex:1;min-height:200px;margin:8px 0;border:1px solid var(--line);border-radius:6px"></div>
@@ -2914,10 +2918,11 @@ function renderRemotes() {
     const ro = r.source === "config";
     const where = `${r.user ? r.user + "@" : ""}${r.host}${r.port ? ":" + r.port : ""}`;
     const cores = r.cpus ? ` · ${r.cpus} cores` : "";
+    const maxJobs = r.max_jobs ? ` · max ${r.max_jobs} job${r.max_jobs === 1 ? "" : "s"} at once` : "";
     return `<div class="card" style="margin:6px 0;padding:10px">
       <b>🖥 ${r.name}</b> <span class="badge ${ro ? "dim" : "ok"}">${ro ? "config.yaml" : "editable"}</span>
       <div style="font-size:12px;color:var(--dim);margin:4px 0">
-        ${where} · ${runModeLabel(runModeOf(r))}${cores}<br>
+        ${where} · ${runModeLabel(runModeOf(r))}${cores}${maxJobs}<br>
         work dir: ${r.remote_root || "—"}<br>VASP: ${r.vasp_executable || "—"}${r.qe_executable ? `<br>QE: ${r.qe_executable}` : ""}</div>
       <button class="ghost" style="padding:2px 8px" onclick="testRemoteByName('${r.name}')">🔌 Test</button>
       ${runModeOf(r) === "ssh_detached" ? `<button class="ghost" style="padding:2px 8px" title="One-time: install the vasp_auto engine in a venv on this machine so offload jobs can run with the laptop off" onclick="setupRemote('${r.name}')">⚙ Set up offload engine</button>` : ""}
@@ -2954,10 +2959,11 @@ function remoteForm() {
     scheduler: (runmode === "slurm" || runmode === "pbs") ? runmode : "slurm",
     env_setup: $("rm-env").value.trim(),
     cpus: $("rm-cpus").value.trim(),
+    max_jobs: $("rm-maxjobs").value.trim(),
   };
 }
 function resetRemoteForm() {
-  for (const id of ["rm-name", "rm-host", "rm-user", "rm-port", "rm-key", "rm-root", "rm-exe", "rm-potcar", "rm-qe-exe", "rm-pseudo", "rm-qe-env", "rm-env", "rm-cpus"]) $(id).value = "";
+  for (const id of ["rm-name", "rm-host", "rm-user", "rm-port", "rm-key", "rm-root", "rm-exe", "rm-potcar", "rm-qe-exe", "rm-pseudo", "rm-qe-env", "rm-env", "rm-cpus", "rm-maxjobs"]) $(id).value = "";
   $("rm-runmode").value = "ssh";
   $("rm-formtitle").textContent = "Add a machine";
   $("rm-testout").innerHTML = "";
@@ -2974,6 +2980,7 @@ function editRemote(name) {
   $("rm-qe-env").value = r.qe_env_setup || "";
   $("rm-env").value = r.env_setup || "";
   $("rm-cpus").value = r.cpus || "";
+  $("rm-maxjobs").value = r.max_jobs || "";
   $("rm-formtitle").textContent = "Edit " + r.name;
   $("tab-remote").scrollIntoView({ behavior: "smooth" });
 }
@@ -3048,13 +3055,15 @@ async function syncIncarToType() {
   await loadIncar(true);                               // untouched template — follow the new type
   banner("INCAR editor refreshed with the " + calcType + " template.", "info");
 }
-async function incarFromOther(dir) {
+async function incarFromOther(dir, machine = "local") {
   // Copy another case's / job's INCAR into the editor (💾 Save to case applies it).
-  const data = await api(`/api/file?name=INCAR&dir=${encodeURIComponent(dir)}`);
+  const data = await api(`/api/file?name=INCAR&dir=${encodeURIComponent(dir)}` +
+    (machine !== "local" ? `&machine=${encodeURIComponent(machine)}` : ""));
   if (!data.exists) { banner("No INCAR in that folder — pick a case or job folder that has one."); return; }
   $("incar").value = data.text;
   incarTemplateText = null;
-  banner(`INCAR loaded from ${dir} — review it, then “Save to case” to use it.`, "info");
+  const source = machine === "local" ? dir : `${machine}:${dir}`;
+  banner(`INCAR loaded from ${source} — review it, then “Save to case” to use it.`, "info");
 }
 async function saveIncar() {
   if (!currentCase()) { banner("No working case yet — build or import a structure in the Build tab and 💾 Save it."); return; }
@@ -3395,9 +3404,10 @@ function closeAnalysisCards() {
 function resStatusBadge(v) {
   const cls = v === "done" ? "ok"
             : (v === "terminated" || v === "stalled") ? "no"
-            : (v === "running") ? "warn"
+            : (v === "running" || v === "pending") ? "warn"
             : (v === "remote" || v === "submitted") ? "warn" : "dim";
   const title = v === "running" ? "process is alive (PID checked) and still calculating"
+              : v === "pending" ? "waiting for an available remote job slot"
               : v === "stalled" ? "the recorded PID is gone — crashed or killed outside the app, never finished"
               : v === "terminated" ? "stopped with the Terminate/✕ button" : "";
   return `<span class="badge ${cls}"${title ? ` title="${title}"` : ""}>${esc(v || "—")}</span>`;
@@ -4543,14 +4553,33 @@ let PICKER_LAST = null;  // last browsed folder — picking related paths in a r
 function openPicker(targetId, opts = {}) {
   PICKER = { target: targetId, files: !!opts.files, onpick: opts.onpick || null,
              onchoose: opts.onchoose || null,
+             chooseMachine: !!opts.chooseMachine,
              machine: opts.machine || null, root: opts.root || null };
   $("pickerwhat").textContent = PICKER.files ? "a file" : (opts.what || "a folder");
   $("pickerchoose").style.display = PICKER.files ? "none" : "inline-block";
+  $("pickermachinebox").style.display = PICKER.chooseMachine ? "block" : "none";
+  if (PICKER.chooseMachine) {
+    const sel = $("pickermachine");
+    sel.innerHTML = "<option value='local'>💻 Local — this computer</option>";
+    for (const r of REMOTES) sel.add(new Option(`🖥 ${r.name} — ${r.host}`, r.name));
+    sel.value = PICKER.machine && REMOTES.some(r => r.name === PICKER.machine)
+      ? PICKER.machine : "local";
+    PICKER.machine = sel.value;
+    const remote = REMOTES.find(r => r.name === PICKER.machine);
+    PICKER.root = remote ? (remote.remote_root || "") : null;
+  }
   $("pickermodal").style.display = "block";
   const current = (targetId && $(targetId).value.trim()) || opts.start || "";
   const start = current && current.startsWith("/") ? current
               : (PICKER.machine ? (PICKER.root || "") : PICKER_LAST);
   pickerGo(start);
+}
+function pickerMachineChanged() {
+  const machine = $("pickermachine").value || "local";
+  PICKER.machine = machine;
+  const remote = REMOTES.find(r => r.name === machine);
+  PICKER.root = remote ? (remote.remote_root || "") : null;
+  pickerGo(remote ? PICKER.root : (PICKER_LAST || ""));
 }
 function closePicker() { $("pickermodal").style.display = "none"; }
 $("pickermodal").onclick = e => { if (e.target === $("pickermodal")) closePicker(); };
@@ -4603,7 +4632,7 @@ function pickerNav(i) {
 function pickerChoose() {
   const chosen = $("pickerpath").value;
   closePicker();
-  if (PICKER.onchoose) { PICKER.onchoose(chosen); return; }
+  if (PICKER.onchoose) { PICKER.onchoose(chosen, PICKER.machine || "local"); return; }
   $(PICKER.target).value = chosen;
   $(PICKER.target).dispatchEvent(new Event("input"));  // run the field's oninput
   if (PICKER.onpick) PICKER.onpick();
