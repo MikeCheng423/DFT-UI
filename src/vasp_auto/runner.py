@@ -122,10 +122,12 @@ def _is_open_mpi(launcher: str) -> bool:
         return False
     if launcher not in _OPEN_MPI_CACHE:
         try:
-            probe = subprocess.run(
-                [launcher, "--version"], capture_output=True, text=True, timeout=10)
-            _OPEN_MPI_CACHE[launcher] = "Open MPI" in (probe.stdout + probe.stderr)
-        except (subprocess.TimeoutExpired, OSError):
+            process = subprocess.Popen(
+                [launcher, "--version"], stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True)
+            stdout, _ = process.communicate(timeout=10)
+            _OPEN_MPI_CACHE[launcher] = "Open MPI" in stdout
+        except (subprocess.TimeoutExpired, OSError, AttributeError):
             # Probe failed: keep the historical assumption (mpirun = Open MPI).
             _OPEN_MPI_CACHE[launcher] = True
     return _OPEN_MPI_CACHE[launcher]
