@@ -303,6 +303,7 @@ def test_run_qe_executes_manifest_and_marks_completion(tmp_path, monkeypatch):
         return Process()
 
     monkeypatch.setattr("vasp_auto.runner.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("vasp_auto.runner._is_open_mpi", lambda launcher: True)
     assert run_qe(str(job), str(binary / "pw.x"), cpus=2) == 0
     assert [command[-3] for command in commands] == [str(binary / "pw.x"), str(binary / "ph.x")]
     assert (job / ".qe_complete").exists()

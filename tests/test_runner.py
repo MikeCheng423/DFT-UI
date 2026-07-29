@@ -33,9 +33,22 @@ from vasp_auto.runner import (
 
 # ---------------------------------------------------------------- mpi command / oversubscribe
 
-def _cores(monkeypatch, physical, logical):
+def _cores(monkeypatch, physical, logical, open_mpi=True):
     """Pin the detected (physical, logical) core counts for a test."""
     monkeypatch.setattr("vasp_auto.runner._local_core_counts", lambda: (physical, logical))
+    monkeypatch.setattr(
+        "vasp_auto.runner._is_open_mpi",
+        lambda launcher: open_mpi and Path(launcher).name == "mpirun")
+
+
+def test_mpi_command_intel_mpirun_gets_no_openmpi_flags(monkeypatch):
+    """Intel MPI's wrapper is also named mpirun but its hydra mpiexec aborts on
+    Open MPI's slot flags — over-committed ranks must warn without adding them."""
+    monkeypatch.delenv("VASP_AUTO_OVERSUBSCRIBE", raising=False)
+    _cores(monkeypatch, 8, 16, open_mpi=False)
+    cmd, warning = _mpi_command("mpirun", 16, "vasp_std")
+    assert cmd == ["mpirun", "-np", "16", "vasp_std"]
+    assert warning and "hardware threads" in warning
 
 
 def test_mpi_command_within_cores(monkeypatch):

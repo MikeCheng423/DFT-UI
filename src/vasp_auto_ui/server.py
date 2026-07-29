@@ -604,6 +604,36 @@ def _output_dir(body, default: Path) -> Path:
     return default
 
 
+def _endpoint_structure_bytes(source_text: str, machine, endpoint: str) -> bytes:
+    """A NEB endpoint structure, local or on a named remote machine.
+
+    A directory source prefers the relaxed CONTCAR over POSCAR, so a finished
+    relax job can be given directly as an endpoint."""
+    if machine and machine != "local":
+        remote = _resolve_remote(machine)
+        base = str(source_text).rstrip("/")
+        with tempfile.TemporaryDirectory(prefix="vasp_auto_rc_") as tmp:
+            local = Path(tmp) / "POSCAR"
+            # The path may be a case/job folder or the structure file itself.
+            for candidate in (f"{base}/CONTCAR", f"{base}/POSCAR", base):
+                try:
+                    fetch_remote_file(remote, candidate, local)
+                except Exception:
+                    continue
+                if local.exists() and local.stat().st_size:
+                    return local.read_bytes()
+            raise FileNotFoundError(
+                f"No CONTCAR or POSCAR for the {endpoint} state on {machine}: {source_text}")
+    source = Path(source_text).expanduser().resolve()
+    if source.is_file():
+        return source.read_bytes()
+    for name in ("CONTCAR", "POSCAR"):
+        candidate = source / name
+        if candidate.exists() and candidate.stat().st_size:
+            return candidate.read_bytes()
+    raise FileNotFoundError(f"No CONTCAR or POSCAR for the {endpoint} state: {source}")
+
+
 def api_build(_query, body):
     action = body["action"]
     inputs = REPO_ROOT / "inputs"
@@ -760,13 +790,11 @@ def api_build(_query, body):
     elif action == "tss":
         case_dir = _output_dir(body, inputs / (body.get("output") or "neb_case"))
         for endpoint, source_text in (("initial", body["initial"]), ("final", body["final"])):
-            source = Path(source_text).expanduser().resolve()
-            poscar_src = source if source.is_file() else source / "POSCAR"
-            if not poscar_src.exists():
-                raise FileNotFoundError(f"No POSCAR for the {endpoint} state: {source}")
+            machine = body.get(f"{endpoint}_machine") or body.get("machine")
+            data = _endpoint_structure_bytes(str(source_text), machine, endpoint)
             target = case_dir / endpoint / "POSCAR"
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(poscar_src.read_bytes())
+            target.write_bytes(data)
         case_dir = case_dir.resolve()
         return _finalize_built_case(
             {"case": str(case_dir), "poscar": str(case_dir / "initial" / "POSCAR")},
