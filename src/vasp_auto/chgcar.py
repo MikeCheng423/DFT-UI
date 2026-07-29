@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import re
 from pathlib import Path
 
 
@@ -276,6 +277,8 @@ def run_bader(job_dir: Path, bader_executable: str = "bader") -> dict:
     binary on PATH (https://theory.cm.utexas.edu/henkelman/code/bader/).
     """
     job_dir = Path(job_dir)
+    if (job_dir / ".engine").exists() and (job_dir / ".engine").read_text().strip() == "qe":
+        return _run_qe_bader(job_dir, bader_executable)
     chgcar = job_dir / "CHGCAR"
     if not chgcar.exists():
         raise FileNotFoundError(f"Bader analysis needs a CHGCAR in {job_dir}")
@@ -303,7 +306,85 @@ def run_bader(job_dir: Path, bader_executable: str = "bader") -> dict:
     return {
         "acf_path": job_dir / "ACF.dat",
         "used_aeccar_reference": used_reference,
+        "reference": "AECCAR0+AECCAR2" if used_reference else "CHGCAR",
         "charges": bader_net_charges(job_dir),
+    }
+
+
+def _upf_zval(path: Path) -> float:
+    """Read the valence-electron count from XML or legacy UPF headers."""
+    text = Path(path).read_text(encoding="utf-8", errors="ignore")
+    patterns = (
+        r"\bz_valence\s*=\s*['\"]?([0-9.+\-Ee]+)",
+        r"\bZ[ _-]*valence\s*[:=]?\s*([0-9.+\-Ee]+)",
+        r"^\s*([0-9.+\-Ee]+)\s+Z\s+valence",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE | re.MULTILINE)
+        if match:
+            return float(match.group(1))
+    raise ValueError(f"No z_valence found in QE pseudopotential {path}")
+
+
+def _qe_species_pseudos(job_dir: Path) -> dict[str, Path]:
+    """Return element-to-UPF paths from the pw.x ATOMIC_SPECIES card."""
+    lines = (job_dir / "pw.in").read_text(encoding="utf-8", errors="ignore").splitlines()
+    mapping = {}
+    in_species = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.upper().startswith("ATOMIC_SPECIES"):
+            in_species = True
+            continue
+        if not in_species:
+            continue
+        if not stripped or stripped.startswith(("ATOMIC_POSITIONS", "K_POINTS", "CELL_PARAMETERS", "CONSTRAINTS")):
+            break
+        parts = stripped.split()
+        if len(parts) >= 3:
+            pseudo = Path(parts[2])
+            candidates = [job_dir / "pseudo" / pseudo.name, job_dir / pseudo]
+            found = next((path for path in candidates if path.exists()), None)
+            if found is None:
+                raise FileNotFoundError(f"QE pseudopotential for {parts[0]} not found in {job_dir}")
+            mapping[parts[0]] = found
+    if not mapping:
+        raise ValueError(f"No ATOMIC_SPECIES card found in {job_dir / 'pw.in'}")
+    return mapping
+
+
+def _run_qe_bader(job_dir: Path, bader_executable: str) -> dict:
+    """Run Bader on the QE pp.x valence-density cube."""
+    cube = job_dir / "charge-density.cube"
+    if not cube.exists():
+        raise FileNotFoundError(f"QE Bader analysis needs charge-density.cube in {job_dir}")
+    if shutil.which(bader_executable) is None:
+        raise FileNotFoundError(
+            f"'{bader_executable}' not found on PATH. Install the Henkelman group bader binary."
+        )
+    completed = subprocess.run(
+        [bader_executable, cube.name], cwd=job_dir, capture_output=True, text=True
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f"bader failed in {job_dir}:\n{completed.stdout}\n{completed.stderr}")
+
+    from vasp_auto.structure import per_atom_symbols, read_poscar
+
+    symbols = per_atom_symbols(read_poscar(job_dir / "POSCAR"))
+    rows = parse_acf(job_dir / "ACF.dat")
+    if len(rows) != len(symbols):
+        raise ValueError(f"ACF.dat has {len(rows)} atoms but POSCAR has {len(symbols)} in {job_dir}")
+    pseudo_by_element = _qe_species_pseudos(job_dir)
+    zvals = {element: _upf_zval(path) for element, path in pseudo_by_element.items()}
+    charges = [
+        {**row, "element": element, "net_charge": zvals[element] - row["electrons"]}
+        for row, element in zip(rows, symbols)
+    ]
+    return {
+        "acf_path": job_dir / "ACF.dat",
+        "used_aeccar_reference": False,
+        "reference": "QE valence charge-density.cube",
+        "charges": charges,
     }
 
 

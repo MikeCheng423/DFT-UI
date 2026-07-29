@@ -219,6 +219,30 @@ def test_neb_energy_profile(tmp_path):
     assert profile["reaction_coord"] == sorted(profile["reaction_coord"])
 
 
+def test_neb_energy_profile_endpoint_energies(tmp_path):
+    # Standard NEB: endpoints 00/04 have POSCARs but no energy files.
+    job_dir = tmp_path / "neb"
+    for i, e in enumerate([-10.0, -9.4, -8.9, -9.5, -10.2]):
+        _write_neb_image(job_dir / f"{i:02d}", e, x=i * 0.5)
+    for name in ("00", "04"):
+        (job_dir / name / "OUTCAR").unlink()
+
+    profile = neb_energy_profile(job_dir)
+    assert profile["images"] == [1, 2, 3]  # endpoints dropped without energies
+
+    profile = neb_energy_profile(job_dir, endpoint_energies=(-11.0, -11.5))
+    assert profile["images"] == [0, 1, 2, 3, 4]
+    assert profile["energies_eV"][0] == -11.0
+    assert profile["energies_eV"][-1] == -11.5
+    assert abs(profile["forward_barrier_eV"] - 2.1) < 1e-6  # -8.9 - (-11.0)
+
+    # one-sided pair works, and an existing energy file wins over the value
+    profile = neb_energy_profile(job_dir, endpoint_energies=(None, -11.5))
+    assert profile["images"] == [1, 2, 3, 4]
+    profile = neb_energy_profile(job_dir, endpoint_energies=(-11.0, None))
+    assert profile["energies_eV"][0] == -11.0
+
+
 def test_neb_energy_profile_needs_two_images(tmp_path):
     job_dir = tmp_path / "neb"
     _write_neb_image(job_dir / "00", -10.0, x=0.0)

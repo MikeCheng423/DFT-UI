@@ -861,6 +861,13 @@ def parse_args():
         "writes absorption.csv.",
     )
     parser.add_argument(
+        "--xrd",
+        default=None,
+        metavar="DIR",
+        help="Simulated powder XRD pattern (Cu Ka) of the relaxed structure "
+        "(CONTCAR, else POSCAR); writes xrd.csv.",
+    )
+    parser.add_argument(
         "--dos-export",
         default=None,
         metavar="DIR",
@@ -1423,7 +1430,7 @@ def _run_analysis(args, config) -> bool:
     requested = any(
         (args.adsorption_energy, args.thermo, args.work_function, args.d_band,
          args.chg_diff, args.bader, args.optics_parse, args.dos_export,
-         args.bands_export)
+         args.bands_export, args.xrd)
     )
     if not requested:
         return False
@@ -1481,8 +1488,12 @@ def _run_analysis(args, config) -> bool:
         job_dir = Path(dir_text)
         struct = read_poscar(job_dir / "POSCAR")
         atoms = parse_atom_selection(struct, selection)
-        result = analysis.d_band_center(
-            job_dir / "vasprun.xml", atoms, emax_eV=args.d_band_emax
+        from vasp_auto.workflow import job_engine
+        result = (
+            analysis.qe_d_band_center(job_dir, atoms, emax_eV=args.d_band_emax)
+            if job_engine(job_dir) == "qe"
+            else analysis.d_band_center(job_dir / "vasprun.xml", atoms,
+                                        emax_eV=args.d_band_emax)
         )
         print(f"Atoms      : {len(atoms)} selected ({selection})")
         print(f"d-band center: {result['d_band_center_eV']:.4f} eV (vs E_F)")
@@ -1492,17 +1503,30 @@ def _run_analysis(args, config) -> bool:
         paths = []
         for item in args.chg_diff.split(","):
             p = Path(item.strip()).expanduser()
-            paths.append(p if p.is_file() else p / "CHGCAR")
+            if p.is_file():
+                paths.append(p)
+            elif (p / ".engine").exists() and (p / ".engine").read_text().strip() == "qe":
+                paths.append(p / "charge-density.cube")
+            else:
+                paths.append(p / "CHGCAR")
         if len(paths) < 2:
             raise ValueError(f'Use --chg-diff "TOTAL,PART1[,PART2...]", got: {args.chg_diff!r}')
-        output = paths[0].parent / "CHGCAR_diff"
-        charge_difference(paths[0], paths[1:], output)
+        is_qe_cube = paths[0].suffix.lower() == ".cube"
+        output = paths[0].parent / ("charge-density-diff.cube" if is_qe_cube else "CHGCAR_diff")
+        if is_qe_cube:
+            from vasp_auto.qe_volumetric import cube_difference
+            cube_difference(paths[0], paths[1:], output)
+        else:
+            charge_difference(paths[0], paths[1:], output)
         print(f"Wrote     : {output} (rho_total - sum of {len(paths) - 1} parts)")
 
     if args.bader:
         job_dir = Path(args.bader)
         result = run_bader(job_dir, config.get("bader_executable", "bader"))
-        reference = "AECCAR0+AECCAR2 reference" if result["used_aeccar_reference"] else "CHGCAR only (no AECCARs found)"
+        reference = result.get("reference") or (
+            "AECCAR0+AECCAR2 reference" if result["used_aeccar_reference"]
+            else "CHGCAR only (no AECCARs found)"
+        )
         print(f"Bader      : {reference}")
         rows = []
         for charge in result["charges"]:
@@ -1514,9 +1538,12 @@ def _run_analysis(args, config) -> bool:
         _write_csv(job_dir / "bader_charges.csv", ["index", "element", "electrons", "net_charge_e"], rows)
 
     if args.dos_export:
-        from vasp_auto.parser import aggregate_pdos, parse_dos, parse_pdos
+        from vasp_auto.parser import (
+            aggregate_pdos, aggregate_qe_pdos, parse_dos, parse_pdos, parse_qe_dos,
+        )
+        from vasp_auto.workflow import job_engine
         job_dir = Path(args.dos_export)
-        dos = parse_dos(job_dir / "vasprun.xml")
+        dos = parse_qe_dos(job_dir) if job_engine(job_dir) == "qe" else parse_dos(job_dir / "vasprun.xml")
         if dos is None:
             raise FileNotFoundError(
                 f"No DOS in {job_dir} — run a 'dos' calculation there first."
@@ -1529,13 +1556,16 @@ def _run_analysis(args, config) -> bool:
         print(f"E_Fermi    : {dos['efermi']:.4f} eV" if dos["efermi"] is not None else "E_Fermi    : ?")
         _write_csv(job_dir / "dos.csv", header, rows)
 
-        pdos = parse_pdos(job_dir / "vasprun.xml")
-        if pdos is not None:
-            struct = read_poscar(job_dir / "POSCAR")
-            symbols = []
-            for element, count in zip(struct["elements"], struct["counts"]):
-                symbols.extend([element] * count)
-            aggregated = aggregate_pdos(pdos, symbols)
+        struct = read_poscar(job_dir / "POSCAR")
+        symbols = []
+        for element, count in zip(struct["elements"], struct["counts"]):
+            symbols.extend([element] * count)
+        if job_engine(job_dir) == "qe":
+            aggregated = aggregate_qe_pdos(job_dir, symbols)
+        else:
+            pdos = parse_pdos(job_dir / "vasprun.xml")
+            aggregated = aggregate_pdos(pdos, symbols) if pdos is not None else None
+        if aggregated is not None:
             labels = [
                 f"{c['label'].replace(' ', '_')}" + (f"_spin{c['spin'] + 1}" if len(dos["total"]) > 1 else "")
                 for c in aggregated["curves"]
@@ -1547,9 +1577,11 @@ def _run_analysis(args, config) -> bool:
             _write_csv(job_dir / "pdos.csv", ["energy_eV"] + labels, rows)
 
     if args.bands_export:
-        from vasp_auto.parser import parse_bands
+        from vasp_auto.parser import parse_bands, parse_qe_bands
+        from vasp_auto.workflow import job_engine
         job_dir = Path(args.bands_export)
-        bands = parse_bands(job_dir / "vasprun.xml", job_dir / "KPOINTS")
+        bands = (parse_qe_bands(job_dir) if job_engine(job_dir) == "qe"
+                 else parse_bands(job_dir / "vasprun.xml", job_dir / "KPOINTS"))
         if bands is None:
             raise FileNotFoundError(
                 f"No eigenvalues in {job_dir} — run a 'bands' calculation there first."
@@ -1572,9 +1604,23 @@ def _run_analysis(args, config) -> bool:
               + (f", {nspins} spins" if nspins > 1 else ""))
         _write_csv(job_dir / "bands.csv", header, rows)
 
+    if args.xrd:
+        job_dir = Path(args.xrd)
+        result = analysis.xrd_pattern(job_dir)
+        print(f"Structure  : {result['structure_file']}  "
+              f"(λ = {result['wavelength_A']:.4f} Å, Cu Ka)")
+        print(f"Peaks      : {len(result['two_theta_deg'])} in 10-90° 2θ")
+        rows = [
+            [t, i, d, f'"{hkl}"']
+            for t, i, d, hkl in zip(result["two_theta_deg"], result["intensity"],
+                                    result["d_spacing_A"], result["hkl"])
+        ]
+        _write_csv(job_dir / "xrd.csv",
+                   ["two_theta_deg", "intensity", "d_spacing_A", "hkl"], rows)
+
     if args.optics_parse:
         job_dir = Path(args.optics_parse)
-        result = analysis.absorption_spectrum(job_dir / "vasprun.xml")
+        result = analysis.absorption_spectrum(job_dir)
         rows = [
             [energy, alpha, e1, e2]
             for energy, alpha, e1, e2 in zip(
@@ -2185,7 +2231,10 @@ def _bundle_qe_pseudos(bundle: Path, case_name: str, config: dict, machine) -> l
     from vasp_auto.qe_tools import pseudo_files_for_struct
     from vasp_auto.structure import read_poscar
 
-    struct = read_poscar(bundle / "POSCAR")
+    poscar = bundle / "POSCAR"
+    if not poscar.exists():
+        poscar = bundle / "initial" / "POSCAR"
+    struct = read_poscar(poscar)
     pseudos = pseudo_files_for_struct(struct, config.get("pseudo_dir"), config.get("pseudo_map"))
     pseudo_dir = config.get("pseudo_dir")
     (bundle / "pseudo").mkdir()
@@ -2209,7 +2258,14 @@ def _run_detached_offload(case_dir, case_info, args, config, remote, calc_type, 
     initial/final endpoints, plus a pre-built POTCAR and any user INCAR/KPOINTS —
     or, for QE, the UPF pseudopotentials and any user pw.in) locally, ships it,
     and launches the remote vasp_auto detached so the local host can be powered
-    off. Returns (case_info, [row])."""
+    off. Returns (case_info, [row]).
+
+    Fire-and-forget by design: submission takes seconds no matter how long VASP
+    runs, and we return as soon as every case is launched — so a whole project
+    folder gets submitted even if the local host then sleeps or the UI restarts.
+    ponytail: --parallel does NOT block the local driver to cap remote
+    concurrency (that abandoned the rest of the folder whenever the driver died
+    mid-run); cap on the remote's own scheduler if you need it."""
     import tempfile
     from vasp_auto.potcar_finder import build_potcar
     from vasp_auto.runner import submit_job_detached
@@ -2336,9 +2392,8 @@ def _process_case(case_dir, args, base_config, mode, project_name, output_root, 
         )
         return case_info, [row]
 
-    if engine in ("qe", "ase"):
-        # Non-VASP engines have a narrower scope (scf/relax). The VASP-only
-        # features below are documented follow-ups.
+    if engine == "ase":
+        # Generic ASE calculators intentionally retain their narrower scope.
         if is_tss:
             raise ValueError(
                 f"{case_dir.name}: TSS/NEB is not supported by the {engine} engine yet; use --engine vasp."
@@ -2349,6 +2404,11 @@ def _process_case(case_dir, args, base_config, mode, project_name, output_root, 
             raise ValueError(f"Chained workflows are VASP-only; not yet available for --engine {engine}.")
         if args.solvation:
             raise ValueError(f"--solvation (VASPsol) is not available for --engine {engine}.")
+    if engine == "qe" and args.solvation:
+        raise ValueError(
+            "--solvation selects VASPsol and is not portable to QE. Configure a QE Environ "
+            "input explicitly in pw.in instead."
+        )
 
     magmom_map = parse_magmom_map(args.magmom) if args.magmom else config.get("magmom_map")
     if args.spin:
@@ -2382,14 +2442,21 @@ def _process_case(case_dir, args, base_config, mode, project_name, output_root, 
             row = build_row(project_name, mode, case_info, status_override="dry-run")
             return case_info, [row]
         print(f"Workflow  : {', '.join(str(step['calc_type']) for step in workflow_steps)}")
-        rows = run_workflow_case(
-            case_info,
-            workflow_steps,
-            config,
-            cpus=args.cpus,
-            prepare_only=args.prepare,
-            remote=remote,
-        )
+        if engine == "qe":
+            from vasp_auto.qe_chain import run_qe_workflow_case
+            rows = run_qe_workflow_case(
+                case_info, workflow_steps, config, cpus=args.cpus,
+                prepare_only=args.prepare, remote=remote,
+            )
+        else:
+            rows = run_workflow_case(
+                case_info,
+                workflow_steps,
+                config,
+                cpus=args.cpus,
+                prepare_only=args.prepare,
+                remote=remote,
+            )
         for row in rows:
             row["project"] = project_name
         return case_info, rows
@@ -2452,22 +2519,33 @@ def _process_case(case_dir, args, base_config, mode, project_name, output_root, 
     if converge_requested:
         encut_values = parse_encut_values(args.converge_encut) if args.converge_encut else None
         sigma_values = parse_sigma_values(args.converge_sigma) if args.converge_sigma else None
-        result = converge_scf_case(
-            case_name=case_info["case_name"],
-            base_job_dir=case_info["job_dir"],
-            vasp_executable=config["vasp_executable"],
-            cpus=args.cpus,
-            nelm_values=parse_nelm_values(args.nelm_values),
-            kpoint_meshes=parse_kpoint_meshes(args.kpoints_values),
-            encut_values=encut_values,
-            sigma_values=sigma_values,
-            energy_tolerance=args.energy_tol,
-            sigma_tolerance=args.sigma_tol,
-            scan_nelm=args.converge_scf,
-            scan_kpoints=args.converge_scf,
-            reuse_wavecar=args.reuse_wavecar,
-            remote=remote,
-        )
+        if engine == "qe":
+            from vasp_auto.qe_convergence import converge_qe_case
+            result = converge_qe_case(
+                case_name=case_info["case_name"], base_job_dir=case_info["job_dir"],
+                qe_executable=config.get("qe_executable", "pw.x"), config=config,
+                cpus=args.cpus, kpoint_meshes=parse_kpoint_meshes(args.kpoints_values),
+                encut_values=encut_values, sigma_values=sigma_values,
+                energy_tolerance=args.energy_tol, sigma_tolerance=args.sigma_tol,
+                scan_kpoints=args.converge_scf, remote=remote,
+            )
+        else:
+            result = converge_scf_case(
+                case_name=case_info["case_name"],
+                base_job_dir=case_info["job_dir"],
+                vasp_executable=config["vasp_executable"],
+                cpus=args.cpus,
+                nelm_values=parse_nelm_values(args.nelm_values),
+                kpoint_meshes=parse_kpoint_meshes(args.kpoints_values),
+                encut_values=encut_values,
+                sigma_values=sigma_values,
+                energy_tolerance=args.energy_tol,
+                sigma_tolerance=args.sigma_tol,
+                scan_nelm=args.converge_scf,
+                scan_kpoints=args.converge_scf,
+                reuse_wavecar=args.reuse_wavecar,
+                remote=remote,
+            )
         row = build_row(project_name, mode, case_info, status_override="converged-scan")
         row.update(
             {
@@ -2483,8 +2561,8 @@ def _process_case(case_dir, args, base_config, mode, project_name, output_root, 
         if remote:
             row["machine"] = remote.get("name") or remote.get("host")
         print(
-            f"Selected  : ENCUT={result['selected_encut']}, "
-            f"SIGMA={result['selected_sigma']}, "
+            f"Selected  : {'ecutwfc (Ry)' if engine == 'qe' else 'ENCUT'}={result['selected_encut']}, "
+            f"{'degauss (Ry)' if engine == 'qe' else 'SIGMA'}={result['selected_sigma']}, "
             f"NELM={result['selected_nelm']}, KPOINTS={result['selected_kpoints']}"
         )
         print(f"Report    : {result['report_path']}")
@@ -2653,7 +2731,8 @@ def main():
     if not args.parse_only:
         _warn_if_unconfigured(config, engine)
     print(f"CPU       : {args.cpus if args.cpus else 'default'}")
-    print(f"NEB images: {neb_images}")
+    if "tss" in info["case_types"].values():
+        print(f"NEB images: {neb_images}")
     if calc_type:
         print(f"Calc type : {calc_type}")
     if kpoints_spec:

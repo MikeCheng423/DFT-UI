@@ -56,7 +56,8 @@ from vasp_auto.structure import (
 )
 from vasp_auto import py4vasp_tools
 from vasp_auto.parser import (
-    aggregate_pdos, parse_bands, parse_dos, parse_pdos, parse_qe_bands, parse_qe_dos,
+    aggregate_pdos, aggregate_qe_pdos, parse_bands, parse_dos, parse_pdos,
+    parse_qe_bands, parse_qe_dos,
 )
 from vasp_auto.report import build_job_report, write_job_report
 from vasp_auto.runner import (
@@ -83,6 +84,7 @@ from vasp_auto.target_utils import get_case_type, inspect_target
 from vasp_auto.trajectory import job_trajectory, oszicar_energies
 from vasp_auto.workflow import (
     _read_pid as read_pid,
+    _neb_image_energy,
     build_row,
     job_engine,
     neb_energy_profile,
@@ -103,9 +105,18 @@ REMOTES_FILE = REPO_ROOT / "remotes.json"
 # pre-fills from; the run still passes it through the usual -n argument.
 REMOTE_FIELDS = ("host", "user", "port", "ssh_key", "remote_root",
                  "vasp_executable", "scheduler", "run_mode", "env_setup", "cpus",
-                 "potcar_root", "qe_executable", "pseudo_dir", "qe_env_setup")
+                 "max_jobs", "potcar_root", "qe_executable", "pseudo_dir", "qe_env_setup")
 
 EDITABLE_FILES = {"INCAR", "KPOINTS", "POSCAR", "workflow.yaml", "config.yaml"}
+
+
+def _editable(name: str) -> bool:
+    """Standard input files, plus the per-step INCAR_<type>/KPOINTS_<type> the
+    workflow editor writes. `isalnum` on the suffix blocks path traversal."""
+    if name in EDITABLE_FILES:
+        return True
+    base, sep, suffix = name.partition("_")
+    return bool(sep) and base in ("INCAR", "KPOINTS") and suffix.isalnum()
 
 JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
@@ -122,6 +133,7 @@ def api_meta(_query, _body):
     from vasp_auto.ai_providers import DEFAULT_PROVIDER, provider_catalog
     from vasp_auto.ase_engine import ASE_CALCULATORS, ASE_SUPPORTED_CALC_TYPES
     from vasp_auto.ml_tools import ML_MODELS
+    from vasp_auto.qe_tools import QE_ALL_CALC_TYPES, QE_COMPANION_PROGRAMS
 
     config = _config()
     return {
@@ -133,6 +145,8 @@ def api_meta(_query, _body):
         "ai_provider_default": DEFAULT_PROVIDER,
         "ase_calculators": list(ASE_CALCULATORS),
         "ase_calc_types": list(ASE_SUPPORTED_CALC_TYPES),
+        "qe_calc_types": list(QE_ALL_CALC_TYPES),
+        "qe_companion_programs": list(QE_COMPANION_PROGRAMS),
         # UI default: the user's configured model if set, else 'emt' (always runs,
         # no download) — the gated UMA models would otherwise fail on first click.
         "ml_model_default": config.get("ml_model") or "emt",
@@ -346,6 +360,37 @@ def _fetch_remote_case(marker: dict, dest: Path, names=None) -> Path:
     if missing:
         raise FileNotFoundError(f"Remote case {remote_dir} is missing {sorted(missing)}")
     return dest
+
+
+def _fetch_remote_target(remote_name: str, target: str, dest_root: Path) -> Path:
+    """Pull a case, or a whole project of cases, that already lives on a remote
+    machine into a local staging dir under dest_root — mirroring how
+    inspect_target tells single vs. project apart locally, but over SSH via
+    list_remote_cases. Returns the local path to hand to the CLI (one case dir,
+    or a project dir holding several fetched case subdirs)."""
+    remote = _resolve_remote(remote_name)
+    target = target.rstrip("/")
+    listing = list_remote_cases(remote, target)
+    cases = listing["cases"]
+    if not cases:
+        raise FileNotFoundError(
+            f"No VASP case found under {target} on {remote_name} "
+            "(needs POSCAR, or subfolders that do)."
+        )
+    if len(cases) == 1 and cases[0]["path"].rstrip("/") == target:
+        case = cases[0]
+        dest = dest_root / (case["name"] or "case")
+        dest.mkdir(parents=True)
+        marker = {"machine": remote_name, "remote_dir": case["path"], "type": case["type"]}
+        _fetch_remote_case(marker, dest)
+        return dest
+
+    project = dest_root / (Path(target).name or "project")
+    project.mkdir(parents=True)
+    for case in cases:
+        marker = {"machine": remote_name, "remote_dir": case["path"], "type": case["type"]}
+        _fetch_remote_case(marker, project / case["name"])
+    return project
 
 
 @contextmanager
@@ -1151,9 +1196,28 @@ def api_trajectory(query, _body):
 
 
 def api_neb(query, _body):
-    """Energy profile (reaction-coordinate plot) for an NEB/TSS job."""
+    """Energy profile (reaction-coordinate plot) for an NEB/TSS job.
+
+    Optional ``einit``/``efinal`` (with ``einit_m``/``efinal_m`` machines) name
+    the endpoint relaxation runs; their energies fill in images 00/NN, which a
+    standard NEB run never computes."""
     job_dir = _analysis_query_dir(query)
-    profile = neb_energy_profile(job_dir)
+    endpoints = []
+    for key in ("einit", "efinal"):
+        path = (query.get(key, [""])[0] or "").strip()
+        if not path:
+            endpoints.append(None)
+            continue
+        run_dir = _analysis_dir(path, query.get(key + "_m", ["local"])[0])
+        if run_dir.is_file():
+            run_dir = run_dir.parent
+        energy = _neb_image_energy(run_dir)
+        if energy is None:
+            raise FileNotFoundError(
+                f"No energy (OUTCAR/OSZICAR/vasprun.xml) in the endpoint run: {path}")
+        endpoints.append(energy)
+    profile = neb_energy_profile(
+        job_dir, endpoint_energies=tuple(endpoints) if any(e is not None for e in endpoints) else None)
     if profile is None:
         raise FileNotFoundError(
             "No NEB energy profile — a TSS/NEB job needs at least two image "
@@ -1192,18 +1256,25 @@ def api_pdos(query, _body):
     resolved against the job POSCAR.
     """
     job_dir = _analysis_query_dir(query)
-    pdos = parse_pdos(job_dir / "vasprun.xml")
-    if pdos is None:
-        raise FileNotFoundError(
-            "No projected DOS in this job — run a 'dos' calculation (LORBIT=11 "
-            "is set by the dos template; vasprun.xml must contain a partial DOS)."
-        )
     struct = read_poscar(job_dir / "POSCAR")
     symbols = per_atom_symbols(struct)
     atoms = None
     selection = (query.get("atoms") or [""])[0].strip()
     if selection:
         atoms = parse_atom_selection(struct, selection)
+    if job_engine(job_dir) == "qe":
+        result = aggregate_qe_pdos(job_dir, symbols, atoms=atoms)
+        if result is None:
+            raise FileNotFoundError("No QE projected DOS in this job; run a dos calculation.")
+        result["selection"] = selection or None
+        result["natoms"] = len(symbols)
+        return result
+    pdos = parse_pdos(job_dir / "vasprun.xml")
+    if pdos is None:
+        raise FileNotFoundError(
+            "No projected DOS in this job — run a 'dos' calculation (LORBIT=11 "
+            "is set by the dos template; vasprun.xml must contain a partial DOS)."
+        )
     result = aggregate_pdos(pdos, symbols, atoms=atoms)
     result["selection"] = selection or None
     result["natoms"] = len(symbols)
@@ -1331,19 +1402,27 @@ def api_chgdiff(_query, body):
     jobs are captured (with their CHGCAR) into the cache and analyzed locally.
     """
     from vasp_auto.chgcar import charge_difference
+    from vasp_auto.qe_volumetric import cube_as_volumetric, cube_difference
 
     def chgcar_path(value):
-        resolved = _slot_dir(value, heavy=("CHGCAR",))
-        return resolved if resolved.is_file() else resolved / "CHGCAR"
+        resolved = _slot_dir(value, heavy=("CHGCAR", "charge-density.cube"))
+        if resolved.is_file():
+            return resolved
+        return (resolved / "charge-density.cube" if job_engine(resolved) == "qe"
+                else resolved / "CHGCAR")
 
     total = chgcar_path(body["total"])
     parts = [chgcar_path(p) for p in body.get("parts") or []
              if (p if isinstance(p, dict) else str(p).strip())]
     if not parts:
         raise ValueError("Charge difference needs at least one part to subtract")
-    output = total.parent / "CHGCAR_diff"
-    diff = charge_difference(total, parts, output)
-    payload = _volume_payload(diff, "CHGCAR_diff", 2, 0.5)
+    if total.suffix.lower() == ".cube":
+        output = total.parent / "charge-density-diff.cube"
+        diff = cube_as_volumetric(cube_difference(total, parts, output), total.parent / "POSCAR")
+    else:
+        output = total.parent / "CHGCAR_diff"
+        diff = charge_difference(total, parts, output)
+    payload = _volume_payload(diff, output.name, 2, 0.5)
     payload["path"] = str(output)
     return payload
 
@@ -1455,7 +1534,7 @@ def api_thermo(query, _body):
 
 def api_dband(query, _body):
     """d-band center/width of selected atoms from a finished dos job."""
-    from vasp_auto.analysis import d_band_center
+    from vasp_auto.analysis import d_band_center, qe_d_band_center
 
     job_dir = _analysis_query_dir(query)
     selection = (query.get("atoms") or [""])[0].strip()
@@ -1464,10 +1543,10 @@ def api_dband(query, _body):
     struct = read_poscar(job_dir / "POSCAR")
     atoms = parse_atom_selection(struct, selection)
     emax_text = (query.get("emax") or [""])[0].strip()
-    result = d_band_center(
-        job_dir / "vasprun.xml", atoms,
-        emax_eV=float(emax_text) if emax_text else None,
-    )
+    emax = float(emax_text) if emax_text else None
+    result = (qe_d_band_center(job_dir, atoms, emax_eV=emax)
+              if job_engine(job_dir) == "qe"
+              else d_band_center(job_dir / "vasprun.xml", atoms, emax_eV=emax))
     result["selection"] = selection
     return result
 
@@ -1486,7 +1565,21 @@ def api_optics(query, _body):
     from vasp_auto.analysis import absorption_spectrum
 
     job_dir = _analysis_query_dir(query)
-    return absorption_spectrum(job_dir / "vasprun.xml")
+    return absorption_spectrum(job_dir if job_engine(job_dir) == "qe"
+                               else job_dir / "vasprun.xml")
+
+
+def api_xrd(query, _body):
+    """Simulated powder XRD pattern from the job's CONTCAR (else POSCAR)."""
+    from vasp_auto.analysis import xrd_pattern
+
+    job_dir = _analysis_query_dir(query)
+    wavelength = (query.get("wavelength") or ["CuKa"])[0].strip() or "CuKa"
+    try:
+        wavelength = float(wavelength)
+    except ValueError:
+        pass
+    return xrd_pattern(job_dir, wavelength=wavelength)
 
 
 def api_bader(_query, body):
@@ -1497,7 +1590,7 @@ def api_bader(_query, body):
     from vasp_auto.chgcar import run_bader
 
     job_dir = _analysis_dir(str(body["path"]), body.get("machine"),
-                            heavy=("CHGCAR", "AECCAR0", "AECCAR2"))
+                            heavy=("CHGCAR", "AECCAR0", "AECCAR2", "charge-density.cube"))
     config = _config()
     result = run_bader(job_dir, config.get("bader_executable", "bader"))
     csv_path = job_dir / "bader_charges.csv"
@@ -1807,7 +1900,7 @@ def api_report(_query, body):
 
 def api_file_get(query, _body):
     name = query["name"][0]
-    if name not in EDITABLE_FILES:
+    if not _editable(name):
         raise ValueError(f"Not an editable file: {name}")
     dir_str = query["dir"][0]
     loc = _remote_loc(dir_str, query.get("machine", ["local"])[0])
@@ -1826,7 +1919,7 @@ def api_file_get(query, _body):
 
 def api_file_save(_query, body):
     name = body["name"]
-    if name not in EDITABLE_FILES:
+    if not _editable(name):
         raise ValueError(f"Not an editable file: {name}")
     loc = _remote_loc(body["dir"], body.get("machine"))
     if loc:
@@ -1930,12 +2023,25 @@ def api_run(_query, body):
     # from, and force its machine as the run target so the calculation happens and
     # is stored on that machine. (The staging dir is read by the async CLI
     # subprocess, so it is left for the OS temp cleaner rather than removed here.)
-    loc = _remote_loc(body["target"], body.get("machine"), body.get("case_type"))
+    existing_folder = body.get("source") == "existing_folder"
+    if existing_folder and not body.get("machine"):
+        raise ValueError("Run an existing folder requires selecting its machine first.")
+    if existing_folder and body.get("machine") == "local":
+        loc = None
+    else:
+        loc = _remote_loc(body["target"], body.get("machine"), body.get("case_type"))
     if loc:
-        staging = Path(tempfile.mkdtemp(prefix="vasp_auto_rc_")) / (loc.get("case_name") or "case")
-        staging.mkdir(parents=True)
-        _fetch_remote_case(loc, staging)
-        body = {**body, "target": str(staging), "remote": loc["machine"]}
+        staging_root = Path(tempfile.mkdtemp(prefix="vasp_auto_rc_"))
+        if _is_remote_machine(body.get("machine")):
+            # "Run an existing folder" pointed at a machine: the folder may be one
+            # case, or a project holding several — scan it over SSH the same way
+            # inspect_target does locally, and fetch every case found.
+            target = _fetch_remote_target(loc["machine"], loc["remote_dir"], staging_root)
+        else:
+            target = staging_root / (loc.get("case_name") or "case")
+            target.mkdir(parents=True)
+            _fetch_remote_case(loc, target)
+        body = {**body, "target": str(target), "remote": loc["machine"]}
 
     # A structured workflow (e.g. one with a convergence step that carries its
     # own scan settings) is written to the case's workflow.yaml, which the CLI
@@ -2402,6 +2508,11 @@ def api_remote_save(_query, body):
             entry["cpus"] = max(1, int(entry["cpus"]))
         except (TypeError, ValueError):
             del entry["cpus"]
+    if "max_jobs" in entry:
+        try:
+            entry["max_jobs"] = max(1, int(entry["max_jobs"]))
+        except (TypeError, ValueError):
+            del entry["max_jobs"]
     if body.get("scheduler_options"):
         entry["scheduler_options"] = body["scheduler_options"]
     store = _load_remotes_store()
@@ -2471,7 +2582,7 @@ def api_remote_status(_query, body):
     else:
         if not marker.get("job_id"):
             raise ValueError("No remote job id recorded for this case.")
-        result = poll_remote_job(remote, marker["job_id"])
+        result = poll_remote_job(remote, marker["job_id"], marker.get("state_file"))
     result["machine"] = marker.get("machine") or marker.get("host")
     result["remote_dir"] = _resolve_remote_job_dir(job_dir, marker, remote)
     return result
@@ -2649,6 +2760,7 @@ GET_ROUTES = {
     "/api/dband": api_dband,
     "/api/workfunction": api_workfunction,
     "/api/optics": api_optics,
+    "/api/xrd": api_xrd,
     "/api/magmoms": api_magmoms,
     "/api/cache_size": api_cache_size,
     "/api/mp_key": api_mp_key_status,

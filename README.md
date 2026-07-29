@@ -10,8 +10,8 @@ vasp-auto is built around a **two-machine model**:
 
 - **Control machine** (your laptop/workstation) — the web UI, structure builders,
   results/Excel parsing, and SSH orchestration. Install the full stack here.
-- **Remote compute node** (an HPC login/compute node) — a *lean engine* that only
-  needs to run VASP. Install just the engine here; no UI, no heavy dependencies.
+- **Remote compute node** (an HPC login/compute node) — a *lean engine* that runs
+  VASP or Quantum ESPRESSO. Install just the engine here; no UI or heavy dependencies.
 
 The two installs are separated by pip *extras* so each machine pulls only what it
 needs. See **[docs/INSTALL.md](docs/INSTALL.md)** for the full matrix.
@@ -86,7 +86,25 @@ against a real structure straight after install — put your own cases under
 vasp-auto example/Si --prepare              # build INCAR/KPOINTS/POTCAR + job dir
 vasp-auto example/Si -n 8 --background      # run on 8 cores, return immediately
 vasp-auto example/Si --remote mycluster     # prepare + submit to a remote queue
+
+# Quantum ESPRESSO uses the same commands and job layout
+vasp-auto example/Si --engine qe --prepare
+vasp-auto example/Si --engine qe --calc-type phonon --remote mycluster
 ```
+
+### Quantum ESPRESSO feature parity
+
+The QE backend supports SCF, relax, variable-cell relax, MD, HSE06, DOS/PDOS,
+bands, charge density, phonons/frequencies, optics, work functions, and NEB.
+Multi-stage calculations invoke QE's native companion programs (`dos.x`,
+`projwfc.x`, `bands.x`, `ph.x`, `dynmat.x`, `epsilon.x`, `pp.x`, `average.x`,
+and `neb.x`). Chained workflows, cutoff/smearing/k-point convergence, CLI/UI
+analysis, direct SSH, scheduler submission, and detached offload are engine-aware.
+
+QE numerical settings retain QE units and meaning: `ecutwfc` and `degauss` are
+Rydberg values and are not converted from VASP `ENCUT` or `SIGMA`. Configure a
+consistent UPF library; mixing pseudopotential families or exchange-correlation
+functionals invalidates comparisons even when a calculation runs successfully.
 
 A simple SCF case only needs a `POSCAR`; missing `INCAR`, `KPOINTS`, and `POTCAR`
 are generated during `--prepare`. Background runs print a log path under

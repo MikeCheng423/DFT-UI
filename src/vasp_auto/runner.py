@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shlex
@@ -24,6 +25,7 @@ DEFAULT_SLURM_TEMPLATE = """#!/bin/bash
 #SBATCH --ntasks={cpus}
 #SBATCH --output=run.log
 {extra}
+{preamble}
 cd "{job_dir}"
 mpirun -np {cpus} "{exe}"
 """
@@ -34,6 +36,7 @@ DEFAULT_PBS_TEMPLATE = """#!/bin/bash
 #PBS -o run.log
 #PBS -j oe
 {extra}
+{preamble}
 cd "{job_dir}"
 mpirun -np {cpus} "{exe}"
 """
@@ -43,8 +46,9 @@ DEFAULT_SLURM_QE_TEMPLATE = """#!/bin/bash
 #SBATCH --ntasks={cpus}
 #SBATCH --output=run.log
 {extra}
+{preamble}
 cd "{job_dir}"
-mpirun -np {cpus} "{exe}" -in pw.in > pw.out
+{qe_commands}
 """
 
 DEFAULT_PBS_QE_TEMPLATE = """#!/bin/bash
@@ -53,8 +57,9 @@ DEFAULT_PBS_QE_TEMPLATE = """#!/bin/bash
 #PBS -o run.log
 #PBS -j oe
 {extra}
+{preamble}
 cd "{job_dir}"
-mpirun -np {cpus} "{exe}" -in pw.in > pw.out
+{qe_commands}
 """
 
 SCHEDULER_COMMANDS = {"slurm": "sbatch", "pbs": "qsub"}
@@ -243,7 +248,6 @@ def run_qe(job_dir: str, qe_executable: str, cpus: int | None = None, on_progres
     """
     job_dir = Path(job_dir)
     log_file = job_dir / "run.log"
-    pw_out = job_dir / "pw.out"
     exe = _resolve_executable(qe_executable)
 
     env = os.environ.copy()
@@ -254,23 +258,112 @@ def run_qe(job_dir: str, qe_executable: str, cpus: int | None = None, on_progres
     env["MKL_NUM_THREADS"] = "1"
 
     mpi_launcher = os.environ.get("VASP_AUTO_MPI", "mpirun")
-    cmd, warning = _mpi_command(mpi_launcher, mpi_ranks, exe, "-in", "pw.in")
+    stages = _load_qe_stages(job_dir)
+    completion_marker = job_dir / ".qe_complete"
+    completion_marker.unlink(missing_ok=True)
 
-    with open(pw_out, "w", encoding="utf-8") as out, open(log_file, "w", encoding="utf-8") as log:
-        if warning:
-            log.write(warning + "\n")
+    with open(log_file, "w", encoding="utf-8") as log:
+        for stage in stages:
+            program = _resolve_qe_program(exe, stage["program"])
+            if stage.get("mpi", True):
+                cmd, warning = _mpi_command(
+                    mpi_launcher, mpi_ranks, program, "-in", stage["input"]
+                )
+            else:
+                cmd, warning = [program], None
+            if warning:
+                log.write(warning + "\n")
+                if on_progress is not None:
+                    on_progress(warning)
+            label = f"[qe] {stage['program']} < {stage['input']}"
+            log.write(label + "\n")
             if on_progress is not None:
-                on_progress(warning)
-        process = subprocess.Popen(
-            cmd, cwd=job_dir, env=env,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                on_progress(label)
+            output_path = job_dir / stage["output"]
+            with open(job_dir / stage["input"], "r", encoding="utf-8") as inp, open(
+                output_path, "w", encoding="utf-8"
+            ) as out:
+                process = subprocess.Popen(
+                    cmd, cwd=job_dir, env=env, stdin=inp,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                )
+                for line in process.stdout:
+                    out.write(line)
+                    log.write(line)
+                    if on_progress is not None:
+                        on_progress(line.rstrip("\n"))
+                return_code = process.wait()
+            if return_code != 0:
+                return return_code
+            for src, dst in (stage.get("rename") or {}).items():
+                source = job_dir / src
+                if source.exists():
+                    source.replace(job_dir / dst)
+        completion_marker.write_text("complete\n", encoding="utf-8")
+        return 0
+
+
+def _load_qe_stages(job_dir: Path) -> list[dict]:
+    """Read the QE stage manifest, with the legacy single-pw.x fallback."""
+    manifest = Path(job_dir) / "qe_stages.json"
+    if not manifest.exists():
+        return [{"program": "pw.x", "input": "pw.in", "output": "pw.out", "mpi": True}]
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    stages = data.get("stages") if isinstance(data, dict) else None
+    if not isinstance(stages, list) or not stages:
+        raise ValueError(f"invalid or empty QE stage manifest: {manifest}")
+    for stage in stages:
+        if not isinstance(stage, dict) or not all(stage.get(k) for k in ("program", "input", "output")):
+            raise ValueError(f"invalid QE stage in {manifest}: {stage!r}")
+        if not (Path(job_dir) / stage["input"]).exists():
+            raise FileNotFoundError(f"QE stage input is missing: {Path(job_dir) / stage['input']}")
+    return stages
+
+
+def _resolve_qe_program(pw_executable: str, program: str) -> str:
+    """Resolve a QE companion beside pw.x, or from PATH for a bare pw.x."""
+    if program == "pw.x":
+        return pw_executable
+    pw_path = Path(pw_executable)
+    candidate = pw_path.with_name(program)
+    if pw_path.parent != Path(".") and candidate.exists():
+        return str(candidate)
+    resolved = shutil.which(program)
+    if resolved:
+        return resolved
+    raise FileNotFoundError(
+        f"Quantum ESPRESSO companion executable not found: {program}. "
+        f"Install the full QE suite beside {pw_executable}, or put {program} on PATH."
+    )
+
+
+def _qe_shell_commands(job_dir: Path, qe_executable: str, ranks: int,
+                       quote_program: bool = True) -> list[str]:
+    """Shell commands for the same manifest used by local QE execution."""
+    commands = ["rm -f .qe_complete", ": > run.log"]
+    qe_dir = str(Path(qe_executable).parent)
+    stages = _load_qe_stages(job_dir)
+    for stage in stages:
+        program = qe_executable if stage["program"] == "pw.x" else str(Path(qe_dir) / stage["program"])
+        quoted_program = ('"' + program.replace('"', '\\"') + '"'
+                          if quote_program else shlex.quote(program))
+        inp = shlex.quote(stage["input"])
+        out = shlex.quote(stage["output"])
+        if stage.get("mpi", True):
+            launch = f"mpirun -np {ranks} {quoted_program} -in {inp}"
+        else:
+            launch = f"{quoted_program} < {inp}"
+        commands.append(
+            f"echo {shlex.quote('[qe] ' + stage['program'] + ' < ' + stage['input'])} >> run.log"
         )
-        for line in process.stdout:
-            out.write(line)
-            log.write(line)
-            if on_progress is not None:
-                on_progress(line.rstrip("\n"))
-        return process.wait()
+        commands.append(f"{launch} > {out} 2>&1 || {{ rc=$?; cat {out} >> run.log; exit $rc; }}")
+        commands.append(f"cat {out} >> run.log")
+        for src, dst in (stage.get("rename") or {}).items():
+            commands.append(f"test ! -f {shlex.quote(src)} || mv -f {shlex.quote(src)} {shlex.quote(dst)}")
+    if len(stages) == 1 and stages[0]["output"] == "pw.out":
+        commands.append("cp -f pw.out run.log")
+    commands.append("printf 'complete\\n' > .qe_complete")
+    return commands
 
 
 def run_ase(job_dir: str, python_exe: str | None = None, cpus: int | None = None,
@@ -314,6 +407,7 @@ def write_submit_script(
     options: list[str] | None = None,
     run_dir: str | None = None,
     engine: str = "vasp",
+    preamble: list[str] | None = None,
 ) -> Path:
     """Write a scheduler submit script into the job directory.
 
@@ -333,13 +427,31 @@ def write_submit_script(
     else:
         template = DEFAULT_SLURM_TEMPLATE if scheduler == "slurm" else DEFAULT_PBS_TEMPLATE
 
+    qe_commands = "\n".join(_qe_shell_commands(job_dir, vasp_executable, cpus or 1)) \
+        if engine == "qe" else ""
+    has_preamble_placeholder = "{preamble}" in template
+    preamble_text = "\n".join(preamble or [])
     script_text = template.format(
         job_name=job_dir.name,
         cpus=cpus if cpus is not None else 1,
         exe=vasp_executable,
         job_dir=run_dir if run_dir is not None else job_dir,
         extra="\n".join(options or []),
+        preamble=preamble_text,
+        qe_commands=qe_commands,
     )
+    if preamble_text and not has_preamble_placeholder:
+        # Existing custom templates predate the {preamble} placeholder. Insert
+        # the gate after their shebang/header directives so the concurrency
+        # rule still applies without invalidating #SBATCH/#PBS directives.
+        lines = script_text.splitlines()
+        insert_at = 1 if lines and lines[0].startswith("#!") else 0
+        while insert_at < len(lines) and (
+            not lines[insert_at].strip() or lines[insert_at].lstrip().startswith("#")
+        ):
+            insert_at += 1
+        lines[insert_at:insert_at] = preamble_text.splitlines()
+        script_text = "\n".join(lines) + ("\n" if script_text.endswith("\n") else "")
 
     script_path = job_dir / "submit.sh"
     script_path.write_text(script_text, encoding="utf-8")
@@ -560,6 +672,57 @@ def remote_results_base(remote: dict) -> str:
     return f"{root}/results"
 
 
+def remote_concurrency_limit(remote: dict) -> int | None:
+    """Configured maximum number of simultaneous jobs on one remote machine.
+
+    A missing value means unlimited, preserving the behaviour of existing
+    remote configurations. Invalid values are also treated as unset; the UI
+    normalizes saved values, while hand-written config files remain forgiving.
+    """
+    value = remote.get("max_jobs")
+    if value in (None, ""):
+        return None
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _remote_slot_lines(remote: dict, state_file: str) -> list[str]:
+    """Bash prologue that waits until one of the remote's job slots is free.
+
+    ``flock`` locks are owned by the remote process and released by the kernel
+    even if a job crashes or is killed.  This makes the limit independent of
+    the submitting UI process and safe across separate CLI submissions.
+    """
+    limit = remote_concurrency_limit(remote)
+    if limit is None:
+        return []
+    root = (remote.get("remote_root") or "").rstrip("/")
+    slot_root = f"{root}/{ENGINE_SUBDIR}/job_slots"
+    return [
+        f"vasp_auto_slot_root={shlex.quote(slot_root)}",
+        f"vasp_auto_state_file={shlex.quote(state_file)}",
+        f"vasp_auto_slot_limit={limit}",
+        'mkdir -p "$vasp_auto_slot_root"',
+        'if ! command -v flock >/dev/null 2>&1; then '
+        'printf "%s\\n" "vasp_auto: max jobs requires flock on the remote" >&2; exit 69; fi',
+        'printf "%s\\n" pending > "$vasp_auto_state_file"',
+        'while :; do',
+        '  vasp_auto_slot_i=1',
+        '  while [ "$vasp_auto_slot_i" -le "$vasp_auto_slot_limit" ]; do',
+        '    exec 199>"$vasp_auto_slot_root/slot_${vasp_auto_slot_i}.lock"',
+        '    if flock -n 199; then vasp_auto_slot_acquired=1; break 2; fi',
+        '    exec 199>&-',
+        '    vasp_auto_slot_i=$((vasp_auto_slot_i + 1))',
+        '  done',
+        '  sleep 2',
+        'done',
+        'printf "%s\\n" running > "$vasp_auto_state_file"',
+    ]
+
+
 def run_vasp_remote(
     job_dir: str,
     remote: dict,
@@ -607,16 +770,14 @@ def run_vasp_remote(
 
     # One non-interactive shell: set up the toolchain, then launch mpirun. Its
     # output goes to run.log on the remote (fetched back below).
-    parts = ["unset DISPLAY"]
+    state_file = f"{remote_dir}/.vasp_auto_state"
+    parts = ["unset DISPLAY", *_remote_slot_lines(remote, state_file)]
     if env_setup:
         parts.append(f"{{ {env_setup} ; }} >/dev/null 2>&1 || true")
     parts.append("ulimit -s unlimited 2>/dev/null || true")
     parts.append(f"cd {quoted_dir}")
     if engine == "qe":
-        # pw.x reads pw.in; keep pw.out (the parser's file) and run.log (the UI log
-        # viewer) identical, and preserve mpirun's exit code past the cp.
-        parts.append(f"mpirun -np {ranks} {shlex.quote(exe)} -in pw.in > pw.out 2>&1; "
-                     "rc=$?; cp -f pw.out run.log; exit $rc")
+        parts.extend(_qe_shell_commands(job_dir, exe, ranks, quote_program=False))
     else:
         parts.append(f"mpirun -np {ranks} {shlex.quote(exe)} > run.log 2>&1")
     remote_script = "\n".join(parts)
@@ -658,6 +819,17 @@ _RESUME_RANKS_SH = (
     "OUTCAR 01/OUTCAR 2>/dev/null | grep -oE '[0-9]+' | head -1 || true)"
 )
 
+# Shell equivalent of workflow._ranks_for_images: VASP requires the rank count
+# to be divisible by IMAGES (INCAR) — anything else aborts in M_divide /
+# MPI_Cart_sub. Round $ranks down to a multiple, minimum one rank per image.
+_NEB_RANKS_SH = (
+    "img=$(grep -aiE '^[[:space:]]*IMAGES[[:space:]]*=' INCAR 2>/dev/null "
+    "| grep -oE '[0-9]+' | head -1); "
+    'if [ -n "$img" ] && [ "$img" -gt 0 ]; then '
+    'if [ "${ranks:-0}" -lt "$img" ]; then ranks=$img; '
+    "else ranks=$(( ranks - ranks % img )); fi; fi"
+)
+
 
 def resume_job_remote(
     remote: dict,
@@ -694,7 +866,8 @@ def resume_job_remote(
     # One non-interactive shell: set up the toolchain, advance POSCAR to the
     # newest CONTCAR (the job itself, plus each NEB image subdir, keeping the
     # previous POSCAR as POSCAR.bak), then launch mpirun in place.
-    parts = ["unset DISPLAY"]
+    state_file = f"{remote_job_dir}/.vasp_auto_state"
+    parts = ["unset DISPLAY", *_remote_slot_lines(remote, state_file)]
     if env_setup:
         parts.append(f"{{ {env_setup} ; }} >/dev/null 2>&1 || true")
     parts.append("ulimit -s unlimited 2>/dev/null || true")
@@ -706,13 +879,16 @@ def resume_job_remote(
     )
     parts.append("seed .")
     parts.append('for d in [0-9][0-9]; do [ -d "$d" ] && seed "$d"; done')
+    # Stale summary from the previous run: it would mark the job "finished" while
+    # the resume runs, and its parameters no longer match the (possibly edited) INCAR.
+    parts.append("rm -f job.log")
     if cpus is not None:
-        np_arg = str(cpus)
+        parts.append(f"ranks={int(cpus)}")
     else:
         # No explicit count: reuse the rank count of the previous run (OUTCAR).
         parts.append(_RESUME_RANKS_SH)
-        np_arg = '"${ranks:-1}"'
-    parts.append(f"mpirun -np {np_arg} {shlex.quote(exe)} > run.log 2>&1")
+    parts.append(_NEB_RANKS_SH)
+    parts.append(f'mpirun -np "${{ranks:-1}}" {shlex.quote(exe)} > run.log 2>&1')
     remote_script = "\n".join(parts)
 
     if on_progress is not None:
@@ -730,6 +906,12 @@ def resume_job_remote(
             fetch_remote_results(remote, remote_job_dir, str(local_job_dir), include_heavy=fetch_heavy)
         except (RuntimeError, OSError):
             pass
+        # The remote no longer carries a job.log (removed at resume start), so
+        # rebuild it here from the fetched files — with the resumed INCAR.
+        if (Path(local_job_dir) / "OUTCAR").exists():
+            from vasp_auto.job_log import write_job_log
+            write_job_log(Path(local_job_dir), Path(local_job_dir).name,
+                          return_code=return_code)
         marker = {
             "machine": machine,
             "host": remote.get("host"),
@@ -783,6 +965,7 @@ def resume_job_detached(
     pid_f = f"{control_dir}/pid"
     rc_f = f"{control_dir}/rc"
     jobdir_f = f"{control_dir}/job_dir"
+    state_f = f"{control_dir}/state"
     env_line = env_setup if env_setup else "true"
 
     _run_checked(
@@ -790,15 +973,13 @@ def resume_job_detached(
         "remote mkdir control",
     )
 
-    # No explicit count: reuse the rank count of the previous run (OUTCAR).
-    np_arg = str(cpus) if cpus is not None else '"${ranks:-1}"'
-
     # run.sh: seed POSCAR<-CONTCAR (the job + each NEB image), then mpirun in the
     # job dir. The PID/rc files make it poll-able after the launcher disconnects.
     script = "\n".join([
         "#!/bin/bash",
         f"echo $$ > {shlex.quote(pid_f)}",
         f"echo {quoted_job} > {shlex.quote(jobdir_f)}",
+        *_remote_slot_lines(remote, state_f),
         f"{{ {env_line} ; }} >/dev/null 2>&1 || true",
         "ulimit -s unlimited 2>/dev/null || true",
         f"cd {quoted_job}",
@@ -807,8 +988,11 @@ def resume_job_detached(
         'cp -f "$1/CONTCAR" "$1/POSCAR"; fi; }',
         "seed .",
         'for d in [0-9][0-9]; do [ -d "$d" ] && seed "$d"; done',
-        *( [] if cpus is not None else [_RESUME_RANKS_SH] ),
-        f"mpirun -np {np_arg} {shlex.quote(exe)} > run.log 2>&1",
+        "rm -f job.log",
+        # No explicit count: reuse the rank count of the previous run (OUTCAR).
+        f"ranks={int(cpus)}" if cpus is not None else _RESUME_RANKS_SH,
+        _NEB_RANKS_SH,
+        f'mpirun -np "${{ranks:-1}}" {shlex.quote(exe)} > run.log 2>&1',
         f"echo $? > {shlex.quote(rc_f)}",
         "",
     ])
@@ -832,6 +1016,7 @@ def resume_job_detached(
         "host": remote.get("host"),
         "remote_dir": remote_job_dir,
         "control_dir": control_dir,
+        **({"state_file": state_f} if remote_concurrency_limit(remote) is not None else {}),
         "pid": pid,
         "scheduler": "ssh_detached",
         "mode": "ssh_detached",
@@ -840,6 +1025,9 @@ def resume_job_detached(
         marker = {**result, "resumed_at": datetime.now().isoformat(timespec="seconds")}
         Path(local_job_dir).mkdir(parents=True, exist_ok=True)
         (Path(local_job_dir) / ".remote.json").write_text(json.dumps(marker, indent=2), encoding="utf-8")
+        # Same as the remote side: the stale summary must not mark the mirror
+        # "finished"; the fetch after the run rebuilds it from the resumed INCAR.
+        (Path(local_job_dir) / "job.log").unlink(missing_ok=True)
     return result
 
 
@@ -881,15 +1069,22 @@ def submit_job_remote(
     template = job_template or remote.get("job_template")
 
     # Write the submit script with the remote run directory baked in.
+    scheduler_options = list(remote.get("scheduler_options") or [])
+    qe_env_setup = _remote_env_setup(remote, engine)
+    if engine == "qe" and qe_env_setup:
+        scheduler_options.append(qe_env_setup)
+    state_file = f"{remote_dir}/.vasp_auto_state"
+    slot_preamble = _remote_slot_lines(remote, state_file)
     write_submit_script(
         str(job_dir),
         str(exe),
         cpus=cpus,
         scheduler=scheduler,
         template_path=template,
-        options=remote.get("scheduler_options"),
+        options=scheduler_options,
         run_dir=remote_dir,
         engine=engine,
+        preamble=slot_preamble,
     )
 
     ssh_opts = _ssh_options(remote)
@@ -920,6 +1115,7 @@ def submit_job_remote(
         "machine": machine,
         "host": remote.get("host"),
         "remote_dir": remote_dir,
+        **({"state_file": state_file} if slot_preamble else {}),
         "submit_output": output,
     }
 
@@ -991,10 +1187,16 @@ def build_engine_wheel(dest_dir: str | Path) -> Path:
         )
     dest = Path(dest_dir)
     dest.mkdir(parents=True, exist_ok=True)
-    _run_checked(
-        [sys.executable, "-m", "pip", "wheel", str(repo_root), "-w", str(dest), "--no-deps"],
-        "build wheel",
-    )
+    # setuptools uses <repo>/build even when wheels have separate destinations.
+    # Serialize builds so concurrent setup requests for multiple remotes do not
+    # delete or replace one another's intermediate files.
+    lock_path = Path(tempfile.gettempdir()) / "vasp_auto-wheel-build.lock"
+    with lock_path.open("a", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        _run_checked(
+            [sys.executable, "-m", "pip", "wheel", str(repo_root), "-w", str(dest), "--no-deps"],
+            "build wheel",
+        )
     wheels = sorted(dest.glob("vasp_auto-*.whl"))
     if not wheels:
         raise RuntimeError("wheel build produced no vasp_auto-*.whl")
@@ -1169,9 +1371,11 @@ def submit_job_detached(
     rc_f = f"{control_dir}/rc"
     log_f = f"{control_dir}/run.log"
     jobdir_f = f"{control_dir}/job_dir"
+    state_f = f"{control_dir}/state"
     script = "\n".join([
         "#!/bin/bash",
         f"echo $$ > {shlex.quote(pid_f)}",
+        *_remote_slot_lines(remote, state_f),
         f"cd {shlex.quote(paths['root'])}",
         *([f"export VASP_AUTO_ROOT={shlex.quote(templates_root)}"] if templates_root else []),
         # The engine writes the real (numbered) job root here, so the submitting host
@@ -1203,6 +1407,7 @@ def submit_job_detached(
         "remote_dir": jobs_remote,
         "inputs_dir": inputs_remote,
         "control_dir": control_dir,
+        **({"state_file": state_f} if remote_concurrency_limit(remote) is not None else {}),
         "pid": pid,
         "log": log_f,
         "scheduler": "ssh_detached",
@@ -1223,8 +1428,10 @@ def poll_detached_job(remote: dict, control_dir: str, pid: str | None = None) ->
     target = _ssh_target(remote)
     ssh_opts = _ssh_options(remote)
     rc_f = f"{control_dir}/rc"
+    state_f = f"{control_dir}/state"
     cmd = (
         f"if [ -f {shlex.quote(rc_f)} ]; then echo DONE; cat {shlex.quote(rc_f)}; "
+        f"elif [ \"$(cat {shlex.quote(state_f)} 2>/dev/null)\" = pending ]; then echo PENDING; "
         f"elif [ -n {shlex.quote(pid or '')} ] && kill -0 {shlex.quote(pid or '0')} 2>/dev/null; "
         f"then echo RUNNING; else echo UNKNOWN; fi"
     )
@@ -1239,6 +1446,8 @@ def poll_detached_job(remote: dict, control_dir: str, pid: str | None = None) ->
                 "raw": res.stdout.strip()}
     if lines and lines[0] == "RUNNING":
         return {"state": "running", "return_code": None, "raw": res.stdout.strip()}
+    if lines and lines[0] == "PENDING":
+        return {"state": "pending", "return_code": None, "raw": res.stdout.strip()}
     return {"state": "unknown", "return_code": None, "raw": res.stdout.strip() or res.stderr.strip()}
 
 
@@ -1468,6 +1677,31 @@ def check_remote_connection(remote: dict) -> dict:
         ok = "yes" in res.stdout
         checks.append({"name": "qe_executable", "ok": ok,
                        "detail": f"{qe} found" if ok else f"{qe} not found or not executable"})
+        if ok and "/" in qe:
+            from vasp_auto.qe_tools import QE_COMPANION_PROGRAMS
+            qe_dir = str(Path(qe).parent)
+            names = " ".join(shlex.quote(name) for name in QE_COMPANION_PROGRAMS)
+            script = (
+                f"missing=''; for x in {names}; do test -x {shlex.quote(qe_dir)}/$x || "
+                "missing=\"$missing $x\"; done; "
+                "test -z \"$missing\" && echo yes || echo missing:$missing"
+            )
+            suite = remote_command(remote, script)
+            suite_ok = suite.stdout.strip() == "yes"
+            checks.append({"name": "qe_suite", "ok": suite_ok,
+                           "detail": "all companion programs found" if suite_ok
+                           else suite.stdout.strip()})
+
+    if remote.get("pseudo_dir"):
+        pseudo_dir = remote["pseudo_dir"]
+        res = remote_command(
+            remote, f"find {shlex.quote(pseudo_dir)} -maxdepth 1 -type f -iname '*.upf' -print -quit "
+                    "2>/dev/null | grep -q . && echo yes || echo no",
+        )
+        ok = "yes" in res.stdout
+        checks.append({"name": "qe_pseudos", "ok": ok,
+                       "detail": f"UPF files found in {pseudo_dir}" if ok
+                       else f"no UPF files found in {pseudo_dir}"})
 
     # ssh run mode launches mpirun directly; scheduler modes need their submit cmd.
     if remote_run_mode(remote) == "ssh":
@@ -1484,6 +1718,13 @@ def check_remote_connection(remote: dict) -> dict:
             checks.append({"name": scheduler, "ok": ok,
                            "detail": f"{submit_cmd} available" if ok else f"{submit_cmd} not on PATH"})
 
+    if remote_concurrency_limit(remote) is not None:
+        res = remote_command(remote, "command -v flock >/dev/null 2>&1 && echo yes || echo no")
+        ok = "yes" in res.stdout
+        checks.append({"name": "job limit", "ok": ok,
+                       "detail": (f"up to {remote_concurrency_limit(remote)} jobs at once"
+                                  if ok else "flock is required for the max-jobs setting")})
+
     # remote_root is allowed to be missing (created on submit); everything else must pass.
     overall = all(c["ok"] for c in checks if c["name"] != "remote_root")
     return {
@@ -1494,8 +1735,13 @@ def check_remote_connection(remote: dict) -> dict:
     }
 
 
-def poll_remote_job(remote: dict, job_id: str) -> dict:
-    """Query the remote scheduler for a job's status over SSH."""
+def poll_remote_job(remote: dict, job_id: str, state_file: str | None = None) -> dict:
+    """Query the remote scheduler for a job's status over SSH.
+
+    When a configured concurrency limit holds an already-allocated scheduler
+    job at the application gate, its state file takes precedence over the
+    scheduler's coarse ``running`` state and reports ``pending`` to the UI.
+    """
     scheduler = remote.get("scheduler", "slurm")
     if scheduler not in POLL_COMMANDS:
         return {"job_id": job_id, "scheduler": scheduler, "state": "unknown", "raw": ""}
@@ -1505,7 +1751,17 @@ def poll_remote_job(remote: dict, job_id: str) -> dict:
         res = remote_command(remote, command, timeout=30)
     except (subprocess.TimeoutExpired, OSError):
         return {"job_id": job_id, "scheduler": scheduler, "state": "unknown", "raw": ""}
-    return _parse_poll_output(scheduler, job_id, res.returncode, res.stdout, res.stderr)
+    result = _parse_poll_output(scheduler, job_id, res.returncode, res.stdout, res.stderr)
+    if state_file and result.get("state") == "running":
+        try:
+            gated = remote_command(
+                remote, f"cat {shlex.quote(state_file)} 2>/dev/null", timeout=15
+            ).stdout.strip()
+        except (subprocess.TimeoutExpired, OSError):
+            gated = ""
+        if gated == "pending":
+            result["state"] = "pending"
+    return result
 
 
 def fetch_remote_results(
@@ -1598,6 +1854,10 @@ def list_remote_jobs(remote: dict, root: str) -> list[dict]:
         'grep -q "General timing" "$d/OUTCAR" 2>/dev/null || '
         'grep -q "JOB DONE" "$d/pw.out" 2>/dev/null; } && g=1; '
         'k=0; [ -e "$d/.terminated" ] && k=1; '
+        # q: waiting at the per-machine concurrency gate. Scheduler jobs place
+        # their state in the job dir; detached jobs are visible via their local
+        # marker/status endpoint until the remote engine allocates this dir.
+        'q=0; [ "$(cat "$d/.vasp_auto_state" 2>/dev/null)" = pending ] && q=1; '
         # p: a .pid is recorded; a: the job is actually alive right now — its
         # recorded PID exists, or some live process has its cwd inside the dir
         # (real liveness, not just "output file exists"). pd: PID for display.
@@ -1617,7 +1877,7 @@ def list_remote_jobs(remote: dict, root: str) -> list[dict]:
         '-e "aborting loop because EDIFF is reached" "$d/OUTCAR" 2>/dev/null && c=1; '
         "e=$(awk '$4==\"E0=\"{x=$5} END{print x}' \"$d/OSZICAR\" 2>/dev/null); "
         '[ -n "$e" ] || e=-; '
-        'printf "%s\\t%s%s%s%s%s%s%s\\t%s%s\\t%s\\t%s\\t%s\\n" "$n" "$o" "$v" "$z" "$g" "$k" "$p" "$a" "$y" "$c" "$e" "$pd" "$d"; }; '
+        'printf "%s\\t%s%s%s%s%s%s%s%s\\t%s%s\\t%s\\t%s\\t%s\\n" "$n" "$o" "$v" "$z" "$g" "$k" "$p" "$a" "$q" "$y" "$c" "$e" "$pd" "$d"; }; '
         'for d in "$r"/*/; do d=${d%/}; [ -d "$d" ] || continue; '
         'if isjob "$d"; then emit "$d"; else '
         'for s in "$d"/*/; do s=${s%/}; [ -d "$s" ] || continue; '
@@ -1635,16 +1895,18 @@ def list_remote_jobs(remote: dict, root: str) -> list[dict]:
         if len(parts) != 6:
             continue
         mt, flags, type_conv, energy, pid, path = parts
-        flags = (flags + "0000000")[:7]
+        flags = (flags + "00000000")[:8]
         has_out, has_vr, has_osz = flags[0] == "1", flags[1] == "1", flags[2] == "1"
         has_log, killed = flags[3] == "1", flags[4] == "1"
         has_pid, alive = flags[5] == "1", flags[6] == "1"
+        pending = flags[7] == "1"
         type_conv = (type_conv + "s0")[:2]
         rel = path[len(root):].lstrip("/") if path.startswith(root) else path
         # Same rule as _local_job_rows: terminated > finished > actually alive
         # (live PID or a process working in the dir) > output-without-a-process
         # = stalled. A created file alone never counts as "running".
         status = ("terminated" if killed else "done" if has_log
+                  else "pending" if pending
                   else "running" if alive
                   else "stalled" if (has_pid or has_osz or has_out)
                   else "prepared")
@@ -1801,7 +2063,7 @@ def list_running_jobs(config: dict, running_only: bool = True,
     if running_only:
         # "stalled" = had a PID that has since died without finishing; surface it
         # too so a job that silently crashed doesn't just vanish from the board.
-        jobs = [j for j in jobs if j.get("status") in ("running", "stalled")]
+        jobs = [j for j in jobs if j.get("status") in ("pending", "running", "stalled")]
     jobs.sort(key=lambda j: j.get("modified_ts", 0), reverse=True)
     return {"jobs": jobs, "errors": errors}
 

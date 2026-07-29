@@ -10,6 +10,7 @@ Pure Python, no numpy, no third-party imports beyond the engine's own modules.
 """
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -31,11 +32,23 @@ QE_CALC_MAP: dict[str, str] = {
     "vcrelax": "vc-relax",
     "dos": "nscf",
     "bands": "bands",
+    "charge": "scf",
+    "md": "md",
+    "phonon": "scf",
+    "hse06": "scf",
+    "freq": "scf",
+    "optics": "nscf",
+    "workfunction": "scf",
 }
 
-# Calculation types the QE backend understands. Anything else (neb, phonon,
-# freq, optics, workfunction, md, charge, hse06) is a documented follow-up.
+# Calculation types implemented by the pw.x and companion-program stage runner.
+# NEB is assembled separately because its endpoint case layout is different.
 QE_SUPPORTED_CALC_TYPES = tuple(QE_CALC_MAP)
+QE_ALL_CALC_TYPES = (*QE_SUPPORTED_CALC_TYPES, "neb")
+QE_COMPANION_PROGRAMS = (
+    "average.x", "bands.x", "dos.x", "dynmat.x", "epsilon.x", "neb.x", "ph.x", "pp.x",
+    "projwfc.x",
+)
 
 # Standard atomic weights for ATOMIC_SPECIES. QE only uses the mass for
 # dynamics, but a correct value avoids surprises. Covers the common elements;
@@ -221,6 +234,21 @@ def build_pw_input(
 
     electrons = {"conv_thr": float(params["conv_thr"]), "mixing_beta": 0.7}
 
+    if calc_type == "md":
+        control["nstep"] = int(params.get("md_steps", 100))
+        control["dt"] = float(params.get("md_dt", 20.0))
+    elif calc_type == "hse06":
+        system.update({
+            "input_dft": "HSE",
+            "exx_fraction": float(params.get("exx_fraction", 0.25)),
+            "screening_parameter": float(params.get("screening_parameter", 0.106)),
+        })
+    elif calc_type in ("dos", "optics"):
+        # NSCF post-processing needs enough empty states. Users can set qe_nbnd
+        # explicitly; leaving it absent lets QE choose its normal default.
+        if params.get("nbnd") is not None:
+            system["nbnd"] = int(params["nbnd"])
+
     # Spin polarisation: nspin=2 plus a starting moment per *species* (QE indexes
     # starting_magnetization by the ATOMIC_SPECIES order).
     species_magmom: list[float] = []
@@ -250,7 +278,14 @@ def build_pw_input(
 
     emit("ELECTRONS", electrons)
     if qe_calc in ("relax", "vc-relax", "md"):
-        emit("IONS", {"ion_dynamics": "bfgs"})
+        if qe_calc == "md":
+            emit("IONS", {
+                "ion_dynamics": str(params.get("md_dynamics", "verlet")),
+                "ion_temperature": str(params.get("md_thermostat", "rescaling")),
+                "tempw": float(params.get("md_temperature", 300.0)),
+            })
+        else:
+            emit("IONS", {"ion_dynamics": "bfgs"})
     if qe_calc == "vc-relax":
         emit("CELL", {"cell_dynamics": "bfgs"})
 
@@ -300,11 +335,210 @@ def _qe_params_from_config(config: dict | None) -> dict:
     """Pull qe_* overrides out of a config dict into a QE params dict."""
     config = config or {}
     params: dict = {}
-    for key in ("ecutwfc", "ecutrho", "conv_thr", "degauss", "smearing", "occupations"):
+    for key in (
+        "ecutwfc", "ecutrho", "conv_thr", "degauss", "smearing", "occupations",
+        "nbnd", "md_steps", "md_dt", "md_dynamics", "md_thermostat",
+        "md_temperature", "exx_fraction", "screening_parameter",
+    ):
         value = config.get(f"qe_{key}")
         if value is not None:
             params[key] = value
     return params
+
+
+def _auxiliary_inputs(calc_type: str, config: dict, struct: dict) -> tuple[dict[str, str], list[dict]]:
+    """Return companion-program input files and stage records for a calc type."""
+    files: dict[str, str] = {}
+    stages: list[dict] = []
+    prefix = str(config.get("qe_prefix", "vasp_auto"))
+    outdir = "./tmp"
+
+    if calc_type == "dos":
+        files["dos.in"] = (
+            "&DOS\n"
+            f"  prefix = '{prefix}'\n  outdir = '{outdir}'\n"
+            "  fildos = 'dos.dat'\n"
+            f"  DeltaE = {float(config.get('qe_dos_deltae', 0.01)):.10g}\n/\n"
+        )
+        stages.append({"program": "dos.x", "input": "dos.in", "output": "dos.out", "mpi": True})
+        files["projwfc.in"] = (
+            "&PROJWFC\n"
+            f"  prefix = '{prefix}'\n  outdir = '{outdir}'\n"
+            "  filpdos = 'pdos'\n"
+            f"  DeltaE = {float(config.get('qe_dos_deltae', 0.01)):.10g}\n/\n"
+        )
+        stages.append({
+            "program": "projwfc.x", "input": "projwfc.in", "output": "projwfc.out", "mpi": True,
+        })
+    elif calc_type == "bands":
+        files["bands.in"] = (
+            "&BANDS\n"
+            f"  prefix = '{prefix}'\n  outdir = '{outdir}'\n"
+            "  filband = 'bands.dat'\n/\n"
+        )
+        stages.append({"program": "bands.x", "input": "bands.in", "output": "bands.out", "mpi": True})
+    elif calc_type in ("phonon", "freq"):
+        qpoint = str(config.get("qe_ph_qpoint", "0.0 0.0 0.0"))
+        files["ph.in"] = (
+            "&INPUTPH\n"
+            f"  prefix = '{prefix}'\n  outdir = '{outdir}'\n"
+            f"  tr2_ph = {float(config.get('qe_tr2_ph', 1e-14)):.10g}\n"
+            "  fildyn = 'dynamical-matrix'\n/\n"
+            f"{qpoint}\n"
+        )
+        stages.append({"program": "ph.x", "input": "ph.in", "output": "ph.out", "mpi": True})
+        if calc_type == "freq":
+            files["dynmat.in"] = "&INPUT\n  fildyn = 'dynamical-matrix'\n  asr = 'zero-dim'\n/\n"
+            stages.append({
+                "program": "dynmat.x", "input": "dynmat.in", "output": "dynmat.out", "mpi": False,
+            })
+    elif calc_type == "optics":
+        files["epsilon.in"] = (
+            "&INPUTPP\n"
+            f"  prefix = '{prefix}'\n  outdir = '{outdir}'\n  calculation = 'eps'\n/\n"
+            "&ENERGY_GRID\n"
+            f"  wmin = {float(config.get('qe_optics_wmin', 0.0)):.10g}\n"
+            f"  wmax = {float(config.get('qe_optics_wmax', 30.0)):.10g}\n"
+            f"  nw = {int(config.get('qe_optics_nw', 600))}\n/\n"
+        )
+        stages.append({
+            "program": "epsilon.x", "input": "epsilon.in", "output": "epsilon.out", "mpi": True,
+        })
+    elif calc_type in ("charge", "workfunction"):
+        plot_num = 0 if calc_type == "charge" else 11
+        filplot = "charge-density.dat" if calc_type == "charge" else "electrostatic-potential.dat"
+        files["pp.in"] = (
+            "&INPUTPP\n"
+            f"  prefix = '{prefix}'\n  outdir = '{outdir}'\n"
+            f"  plot_num = {plot_num}\n  filplot = '{filplot}'\n/\n"
+            "&PLOT\n  iflag = 3\n  output_format = 6\n"
+            f"  fileout = '{'charge-density.cube' if calc_type == 'charge' else 'electrostatic-potential.cube'}'\n/\n"
+        )
+        stages.append({"program": "pp.x", "input": "pp.in", "output": "pp.out", "mpi": True})
+        if calc_type == "workfunction":
+            c_length = sum(x * x for x in _scaled_lattice(struct)[2]) ** 0.5
+            files["average.in"] = (
+                "1\nelectrostatic-potential.dat\n1.0\n1440\n3\n"
+                f"{c_length:.10f}\n"
+            )
+            stages.append({
+                "program": "average.x", "input": "average.in", "output": "average.out",
+                "mpi": False, "rename": {"avg.dat": "potential-average.dat"},
+            })
+    return files, stages
+
+
+def qe_stage_plan(calc_type: str, config: dict, struct: dict) -> tuple[dict[str, str], list[dict]]:
+    """Build input files and an ordered execution plan for a standalone QE job."""
+    auxiliary, post = _auxiliary_inputs(calc_type, config, struct)
+    stages: list[dict] = []
+    if calc_type in ("dos", "bands", "optics"):
+        stages.append({"program": "pw.x", "input": "scf.in", "output": "scf.out", "mpi": True})
+    stages.append({"program": "pw.x", "input": "pw.in", "output": "pw.out", "mpi": True})
+    stages.extend(post)
+    return auxiliary, stages
+
+
+def _positions_block(pw_text: str, nat: int) -> tuple[list[str], int, int]:
+    lines = pw_text.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.strip().upper().startswith("ATOMIC_POSITIONS"))
+    return lines[start:start + nat + 1], start, start + nat + 1
+
+
+def build_neb_input(
+    initial: dict,
+    final: dict,
+    *,
+    pseudos: dict[str, str],
+    kpoints_card: str,
+    images: int,
+    qe_params: dict | None = None,
+    spin: bool = False,
+    magmom_map: dict | None = None,
+    prefix: str = "vasp_auto",
+) -> str:
+    """Build a neb.x input from two POSCAR structures."""
+    if initial["elements"] != final["elements"] or initial["counts"] != final["counts"]:
+        raise ValueError("QE NEB endpoints must have identical species and atom counts")
+    nat = sum(initial["counts"])
+    engine = build_pw_input(
+        initial, "scf", pseudos=pseudos, kpoints_card=kpoints_card,
+        prefix=prefix, qe_params=qe_params, spin=spin, magmom_map=magmom_map,
+    )
+    first, start, end = _positions_block(engine, nat)
+    final_text = build_pw_input(
+        final, "scf", pseudos=pseudos, kpoints_card=kpoints_card,
+        prefix=prefix, qe_params=qe_params, spin=spin, magmom_map=magmom_map,
+    )
+    last, _, _ = _positions_block(final_text, nat)
+
+    engine_lines = engine.splitlines()
+    engine_lines = [line for line in engine_lines if "calculation =" not in line]
+    # Removing the calculation line changes the position index by one.
+    _, start, end = _positions_block("\n".join(engine_lines), nat)
+    positions = [
+        "BEGIN_POSITIONS", "FIRST_IMAGE", *first,
+        "LAST_IMAGE", *last, "END_POSITIONS",
+    ]
+    engine_lines[start:end] = positions
+    species_index = next(i for i, line in enumerate(engine_lines) if line.strip() == "ATOMIC_SPECIES")
+    engine_lines[species_index:species_index] = ["&IONS", "/", ""]
+
+    path = [
+        "BEGIN", "BEGIN_PATH_INPUT", "&PATH",
+        "  restart_mode = 'from_scratch'",
+        "  string_method = 'neb'",
+        f"  nstep_path = {int((qe_params or {}).get('neb_steps', 100))}",
+        f"  num_of_images = {int(images) + 2}",
+        "  opt_scheme = 'broyden'",
+        "  CI_scheme = 'auto'",
+        f"  path_thr = {float((qe_params or {}).get('neb_path_thr', 0.05)):.10g}",
+        "/", "END_PATH_INPUT", "BEGIN_ENGINE_INPUT",
+        *engine_lines, "END_ENGINE_INPUT", "END", "",
+    ]
+    return "\n".join(path)
+
+
+def create_qe_neb_job(
+    case_info: dict,
+    config: dict,
+    *,
+    neb_images: int = 5,
+    kpoints_spec: dict | None = None,
+    spin: bool = False,
+    magmom_map: dict | None = None,
+) -> Path:
+    """Prepare a QE neb.x job from initial/POSCAR and final/POSCAR."""
+    case_dir = Path(case_info["case_dir"]).resolve()
+    job_dir = Path(case_info["job_dir"]).resolve()
+    initial_path = case_dir / "initial" / "POSCAR"
+    final_path = case_dir / "final" / "POSCAR"
+    if not initial_path.exists() or not final_path.exists():
+        raise FileNotFoundError(f"QE NEB needs initial/POSCAR and final/POSCAR in {case_dir}")
+    initial = read_poscar(initial_path)
+    final = read_poscar(final_path)
+    pseudos = pseudo_files_for_struct(initial, config.get("pseudo_dir"), config.get("pseudo_map"))
+    job_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(case_dir / "initial", job_dir / "initial", dirs_exist_ok=True)
+    shutil.copytree(case_dir / "final", job_dir / "final", dirs_exist_ok=True)
+    text = build_neb_input(
+        initial, final, pseudos=pseudos,
+        kpoints_card=_kpoints_card(kpoints_spec, initial, initial_path, "scf"),
+        images=neb_images, qe_params={**_qe_params_from_config(config),
+                                     "neb_steps": config.get("qe_neb_steps", 100),
+                                     "neb_path_thr": config.get("qe_neb_path_thr", 0.05)},
+        spin=spin, magmom_map=magmom_map, prefix=str(config.get("qe_prefix", "vasp_auto")),
+    )
+    (job_dir / "neb.in").write_text(text, encoding="utf-8")
+    (job_dir / "qe_stages.json").write_text(json.dumps({
+        "version": 1, "calc_type": "neb",
+        "stages": [{"program": "neb.x", "input": "neb.in", "output": "neb.out", "mpi": True}],
+    }, indent=2) + "\n", encoding="utf-8")
+    pseudo_out = job_dir / "pseudo"
+    pseudo_out.mkdir(exist_ok=True)
+    _copy_pseudos(pseudos, config, pseudo_out)
+    (job_dir / ".engine").write_text("qe\n", encoding="utf-8")
+    return job_dir
 
 
 def _struct_and_pseudos(case_dir: Path, config: dict):
@@ -361,8 +595,25 @@ def create_qe_job(
             qe_params=_qe_params_from_config(config),
             spin=spin,
             magmom_map=magmom_map,
+            prefix=str(config.get("qe_prefix", "vasp_auto")),
         )
     (job_dir / "pw.in").write_text(pw_text, encoding="utf-8")
+
+    auxiliary, stages = qe_stage_plan(calc_type, config, struct)
+    if calc_type in ("dos", "bands", "optics"):
+        scf_text = build_pw_input(
+            struct, "scf", pseudos=pseudos,
+            kpoints_card=_kpoints_card(kpoints_spec, struct, poscar, "scf"),
+            prefix=str(config.get("qe_prefix", "vasp_auto")),
+            qe_params=_qe_params_from_config(config), spin=spin, magmom_map=magmom_map,
+        )
+        (job_dir / "scf.in").write_text(scf_text, encoding="utf-8")
+    for name, text in auxiliary.items():
+        (job_dir / name).write_text(text, encoding="utf-8")
+    (job_dir / "qe_stages.json").write_text(
+        json.dumps({"version": 1, "calc_type": calc_type, "stages": stages}, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
     # Stage the pseudopotentials next to the input (pseudo_dir = ./pseudo).
     pseudo_out = job_dir / "pseudo"
@@ -417,9 +668,11 @@ def preview_qe_job(
             qe_params=_qe_params_from_config(config),
             spin=spin,
             magmom_map=magmom_map,
+            prefix=str(config.get("qe_prefix", "vasp_auto")),
         )
 
-    return {
+    auxiliary, stages = qe_stage_plan(calc_type, config, struct)
+    preview = {
         "case_name": case_info["case_name"],
         "calculation_type": case_info.get("calculation_type", "scf"),
         "calc_type": calc_type,
@@ -428,4 +681,7 @@ def preview_qe_job(
         "POSCAR": str(poscar),
         "pw.in": pw_text,
         "pseudos": ", ".join(f"{el}: {f}" for el, f in pseudos.items()),
+        "stages": stages,
     }
+    preview.update(auxiliary)
+    return preview

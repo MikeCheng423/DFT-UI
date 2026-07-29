@@ -219,6 +219,18 @@
   <span id="wc-status" class="badge dim">No working structure yet — build or import one in the Build tab, then just run it.</span>
 </div>
 
+<div class="card">
+  <h3>Run an existing folder</h3>
+  <p class="sub">Point at a folder that already has ready-made inputs — one case (POSCAR/INCAR), or a project folder holding several case subfolders, each with its own POSCAR/INCAR (e.g. <code>inputs/00_refs</code>). Every case folder found gets run. Pick the machine the folder lives on first — 📁 then browses that machine (local or a saved remote, over SSH).</p>
+  <span class="inline"><label>machine</label><select id="proj-remote" onchange="projMachineChanged()" title="Select the machine that already contains the folder."></select></span>
+  <span class="inline wide"><label>folder</label><input id="proj-dir" placeholder="Select a machine first" oninput="projFolderChanged()" disabled><button id="proj-browse" class="iconbtn" style="padding:3px 7px" onclick="projBrowse()" title="Choose a folder on the selected machine" disabled>📁</button></span>
+  <span class="inline"><label>CPU cores (MPI ranks)</label><input id="proj-cpus" placeholder="1" title="Passed to mpirun -np"></span>
+  <span class="inline"><label>cases in parallel</label><input id="proj-par" placeholder="1" title="Run up to N cases at once when the folder has several"></span>
+  <span class="inline"><label>scheduler</label><select id="proj-sched" title="local runs mpirun here; slurm/pbs submit to a queue"><option>local</option><option>slurm</option><option>pbs</option></select></span>
+  <button class="act" id="proj-run" onclick="runProjectFolder()" disabled>▶ Run all cases</button>
+  <pre class="console" id="proj-console" style="display:none;margin-top:8px"></pre>
+</div>
+
 <!-- ============================ BUILD ============================ -->
 <div class="tab active" id="tab-build">
   <div class="row">
@@ -507,9 +519,9 @@
             <option value="qe">Quantum ESPRESSO (pw.x)</option>
             <option value="ase">ASE calculator (any code)</option>
           </select></span>
-        <span class="inline wide qe-only" style="display:none"><label>pw.x path (optional)</label><input id="c-qe-exe" placeholder="pw.x" title="Path to the Quantum ESPRESSO pw.x binary"></span>
+        <span class="inline wide qe-only" style="display:none"><label>QE pw.x path (optional)</label><input id="c-qe-exe" placeholder="pw.x" title="Path to pw.x; companion programs are resolved from the same bin directory"></span>
         <span class="inline wide qe-only" style="display:none"><label>pseudopotential dir (UPF)</label><input id="c-pseudo" placeholder="/path/to/pseudo" title="Directory of .UPF pseudopotentials (or set pseudo_dir in config.yaml)"></span>
-        <p class="sub qe-only" style="display:none">QE supports scf, relax, vc-relax, dos, bands. NEB/phonon/convergence scans are VASP-only for now.</p>
+        <p class="sub qe-only" style="display:none">QE calculations use pw.x and the companion programs installed beside it; numerical cutoff and smearing values use Rydberg.</p>
         <span class="inline ase-only" style="display:none"><label>ASE calculator</label>
           <select id="c-ase-calc" onchange="aseCalcChanged()" title="The ASE calculator class to attach. 'emt' needs no external code and runs anywhere."></select></span>
         <span class="inline wide ase-only" style="display:none"><label>calculation path / command</label><input id="c-ase-command" placeholder="e.g. pw.x   or   mpirun -np 4 pw.x" title="Run command or binary path for the calculator (sets ase_calc_params.command). Leave blank for in-process calculators like emt, gpaw, mace."></span>
@@ -520,6 +532,13 @@
         <h3>What do you want to calculate?</h3>
         <p class="sub">Each type fills in a tested INCAR template for you. If the case folder has its own INCAR, that one wins.</p>
         <div id="ctypes"></div>
+        <div id="nebendpoints" style="display:none">
+          <p class="sub">A NEB run needs a case with both endpoints. Pick them here (case folders or POSCAR files) — creating the case makes it the working case.</p>
+          <span class="inline wide"><label>initial structure</label><input id="cn-init" placeholder="inputs/state_A"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('cn-init')" title="Browse for the initial-state case">📁</button></span>
+          <span class="inline wide"><label>final structure</label><input id="cn-final" placeholder="inputs/state_B"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('cn-final')" title="Browse for the final-state case">📁</button></span>
+          <span class="inline"><label>case name</label><input id="cn-name" placeholder="A_to_B"></span>
+          <br><button class="act" onclick="buildTss('cn')">Create NEB case</button>
+        </div>
         <span class="inline" id="nebimgs" style="display:none"><label>NEB images</label><input id="c-neb" placeholder="5" title="Number of intermediate images between initial and final"></span>
       </div>
       <div class="card">
@@ -580,7 +599,7 @@
         <p class="sub">Only needed for fine-tuning — templates cover the common cases. A saved case INCAR overrides the template.</p>
         <button class="ghost" onclick="loadIncar(false)">Load case INCAR</button>
         <button class="ghost" onclick="loadIncar(true)">Load template for selected type</button>
-        <button class="ghost" onclick="openPicker(null,{what:'the case or job folder to copy the INCAR from',onchoose:incarFromOther})" title="Copy the INCAR of another case or finished job into the editor">Load from another work…</button>
+        <button class="ghost" onclick="openPicker(null,{what:'the case or job folder to copy the INCAR from',chooseMachine:true,onchoose:incarFromOther})" title="Copy the INCAR of another local or remote case/job into the editor">Load from another work…</button>
         <button class="act" onclick="saveIncar()">Save to case</button>
         <details id="incar-guided" style="margin:8px 0" ontoggle="if(this.open)renderIncarForm()">
           <summary style="cursor:pointer">⚙ Guided settings — pick in plain language, no VASP tags</summary>
@@ -707,6 +726,7 @@
       <button class="ghost" onclick="toggleResTool('chgdiffcard')" title="Charge-density difference Δρ between a combined job and its fragments">Δρ Charge-density difference</button>
       <button class="ghost" onclick="toggleResTool('gdiagcard')" title="Free-energy diagram and overpotential (computational hydrogen electrode)">📊 Free-energy diagram</button>
       <button class="ghost" onclick="toggleResTool('magcard')" title="Per-atom magnetic moments from OUTCAR">🧲 Magnetic moments</button>
+      <button class="ghost" onclick="toggleResTool('nebcard')" title="Transition state: barriers and minimum energy path from an NEB job">🛣 Transition state</button>
     </div>
     <div style="margin-top:8px;font-size:12px;color:var(--dim)">
       remote-results cache: <span id="ana-cachesize">—</span>
@@ -714,15 +734,25 @@
     </div>
   </div>
   <div class="card" id="nebcard" style="display:none">
-    <h3>Minimum energy path — <span id="nebcase" style="text-transform:none"></span>
+    <h3>🛣 Transition state — <span id="nebcase" style="text-transform:none">pick an NEB job</span>
       <button class="ghost" onclick="exportCanvas('nebchart','neb_path.png')">⬇ PNG</button>
       <button class="ghost" onclick="exportNebCsv()">⬇ CSV</button>
       <button class="ghost" onclick="$('nebcard').style.display='none'">close</button></h3>
     <p class="sub">The reaction-coordinate (NEB) plot: energy of each image relative to the
       initial state. The peak is the transition state; <b>E<sub>a</sub></b> is the forward
       barrier and <b>ΔE</b> the reaction energy.</p>
-    <div id="nebstats" style="margin:4px 0;font-size:13px"></div>
-    <canvas id="nebchart" width="760" height="360"></canvas>
+    <span class="inline wide"><label>NEB job folder</label><input id="neb-dir" list="jobdirs"><button class="iconbtn" style="padding:3px 7px" onclick="slotPick('neb-dir')">📁</button><select id="neb-dir-m" class="slot-machine"></select></span>
+    <br><label class="sub" style="cursor:pointer"><input type="checkbox" id="neb-ends" onchange="$('neb-endrow').style.display=this.checked?'block':'none'"> add the endpoint images (00 / NN) — VASP never computes them, so give the relaxation runs their energies come from</label>
+    <div id="neb-endrow" style="display:none">
+      <span class="inline wide"><label>initial-state run</label><input id="neb-init" list="jobdirs"><button class="iconbtn" style="padding:3px 7px" onclick="slotPick('neb-init')">📁</button><select id="neb-init-m" class="slot-machine"></select></span>
+      <span class="inline wide"><label>final-state run</label><input id="neb-fin" list="jobdirs"><button class="iconbtn" style="padding:3px 7px" onclick="slotPick('neb-fin')">📁</button><select id="neb-fin-m" class="slot-machine"></select></span>
+    </div>
+    <button class="act" onclick="computeNebProfile()">Read barriers</button>
+    <div id="nebbody" style="display:none">
+      <div id="nebstats" style="margin:4px 0;font-size:13px"></div>
+      <canvas id="nebchart" width="760" height="360"></canvas>
+      <div id="nebimages" style="display:flex;flex-wrap:wrap;gap:10px;margin-top:8px"></div>
+    </div>
   </div>
   <div class="card" id="doscard" style="display:none">
     <h3>Density of states — <span id="doscase" style="text-transform:none"></span>
@@ -789,8 +819,9 @@
       matching calculation type — pick the analysis that fits how the job was run:
       vibrational thermochemistry (ZPE/Gibbs, from a <code>freq</code> job),
       d-band centre (<code>dos</code> with LORBIT), work function (<code>workfunction</code>),
-      optical absorption (<code>optics</code>), or Bader atomic charges (<code>charge</code>).
-      Same maths as the CLI's <code>--thermo</code>/<code>--d-band</code>/<code>--work-function</code>/<code>--optics-parse</code>/<code>--bader</code>.</p>
+      optical absorption (<code>optics</code>), Bader atomic charges (<code>charge</code>),
+      or a simulated powder XRD pattern (any job with a relaxed structure).
+      Same maths as the CLI's <code>--thermo</code>/<code>--d-band</code>/<code>--work-function</code>/<code>--optics-parse</code>/<code>--bader</code>/<code>--xrd</code>.</p>
     <span class="inline wide"><label>job folder</label><input id="ana-dir" list="jobdirs" oninput="ANA_MACHINE=null"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('ana-dir')">📁</button></span>
     <br>
     <button class="ghost" onclick="anaThermo()" title="ZPE + thermal corrections from vibrational modes (calc type: freq)">🌡 ZPE / Gibbs</button>
@@ -802,6 +833,7 @@
     <button class="ghost" onclick="anaWorkfunction()" title="W = V_vacuum − E_Fermi from the LOCPOT planar average (calc type: workfunction)">⚡ Work function</button>
     <span class="inline"><label>axis</label><select id="ana-axis" style="width:50px"><option>a</option><option>b</option><option selected>c</option></select></span>
     <button class="ghost" onclick="anaOptics()" title="Absorption coefficient α(E) from the dielectric function (calc type: optics)">🌈 Absorption α(E)</button>
+    <button class="ghost" onclick="anaXrd()" title="Simulated powder XRD pattern (Cu Kα) from the relaxed structure (CONTCAR, else POSCAR)">💠 XRD pattern</button>
     <button class="ghost" onclick="anaBader()" title="Bader atomic charges — needs the Henkelman 'bader' binary on PATH and a CHGCAR (calc type: charge)">🧲 Bader charges</button>
     <pre class="console" id="ana-out" style="height:auto;max-height:260px;margin-top:8px">Pick a job folder, then choose an analysis.</pre>
     <canvas id="anachart" width="760" height="280" style="display:none"></canvas>
@@ -905,6 +937,7 @@ ssh user@host 'echo ok'      # must print ok with no password</pre>
           </select></span>
         <span class="inline wide"><label>env setup (optional)</label><input id="rm-env" placeholder="source /opt/intel/oneapi/setvars.sh" title="Shell command sourced before mpirun so MKL/MPI libraries are on the path in a non-interactive SSH session. Leave blank if the remote login shell already sets these."></span>
         <span class="inline"><label>default cores</label><input id="rm-cpus" placeholder="e.g. 32" style="width:90px" title="Optional default MPI rank count. Pre-fills the CPU cores field in the Calculate tab when you pick this machine."></span>
+        <span class="inline"><label>max jobs at once</label><input id="rm-maxjobs" type="number" min="1" step="1" placeholder="unlimited" style="width:90px" title="Maximum calculations allowed to run at the same time on this machine. Extra submissions stay pending and start automatically when a slot opens."></span>
         <div style="margin-top:10px">
           <button class="ghost" onclick="testRemote()" title="Check SSH + that the work dir, VASP and scheduler are reachable">🔌 Test connection</button>
           <button class="act" onclick="saveRemote()">💾 Save machine</button>
@@ -975,9 +1008,36 @@ ssh user@host 'echo ok'      # must print ok with no password</pre>
     </div>
   </div>
 </div>
+<!-- Per-step INCAR/KPOINTS editor (Workflow tab) -->
+<div id="wstepmodal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:60">
+  <div style="background:var(--panel);max-width:640px;margin:36px auto;border:1px solid var(--line);border-radius:10px;padding:14px 16px;max-height:88vh;display:flex;flex-direction:column">
+    <h3 id="wstep-title" style="margin:0 0 4px;font-size:14px">Step inputs</h3>
+    <p class="sub" style="margin:0 0 8px">Saved as <code>INCAR_&lt;type&gt;</code> / <code>KPOINTS_&lt;type&gt;</code> in the case — this step picks them up automatically. Overrides in <code>workflow.yaml</code> still layer on top.</p>
+    <div style="overflow:auto;flex:1;min-height:200px">
+      <details style="margin:0 0 8px" open>
+        <summary style="cursor:pointer">⚙ Guided settings — pick in plain language, no VASP tags</summary>
+        <div id="wstep-form"></div>
+        <button class="ghost" onclick="applyAllIncarSettings('wstep-form','wstep-incar')">Write all these settings into INCAR</button>
+      </details>
+      <label style="font-size:12px;color:var(--dim)">INCAR</label>
+      <textarea id="wstep-incar" rows="12" spellcheck="false" style="width:100%"></textarea>
+      <label style="font-size:12px;color:var(--dim)">k-mesh (blank = inherit the case / previous step)</label>
+      <input id="wstep-kpts" placeholder="4  or  3x3x1" title="One number N → NxNxN (bulk); a triplet hxkxl sets each axis (slabs: keep c at 1). Gamma-centred." style="width:100%">
+    </div>
+    <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
+      <button class="ghost" onclick="wstepLoadTemplate()" title="Reset the INCAR to the fresh template for this type">Reset to template</button>
+      <span style="flex:1"></span>
+      <button class="act" onclick="saveStepInputs()">Save</button>
+      <button class="ghost" onclick="closeWStep()">Cancel</button>
+    </div>
+  </div>
+</div>
 <div id="pickermodal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:50">
   <div style="background:var(--panel);max-width:640px;margin:50px auto;border:1px solid var(--line);border-radius:10px;padding:14px 16px;max-height:75vh;display:flex;flex-direction:column">
     <h3 style="margin:0 0 8px;font-size:14px">📁 Choose <span id="pickerwhat">a folder</span></h3>
+    <div id="pickermachinebox" style="display:none;margin-bottom:8px">
+      <span class="inline"><label>machine</label><select id="pickermachine" onchange="pickerMachineChanged()"></select></span>
+    </div>
     <div id="pickerroots" style="margin-bottom:6px"></div>
     <input id="pickerpath" style="width:100%" title="Type a path and press Enter" onkeydown="if(event.key==='Enter')pickerGo(this.value)">
     <div id="pickerlist" style="overflow:auto;flex:1;min-height:200px;margin:8px 0;border:1px solid var(--line);border-radius:6px"></div>
@@ -1082,10 +1142,17 @@ function renderCalcTypes() {
     `<div class="ctype${t === calcType ? " sel" : ""}" data-t="${t}" onclick="pickType('${t}')">
        <b>${t}</b><small>${META.calc_type_info[t] || ""}</small></div>`).join("");
 }
+/* The Calculate-tab endpoints block: shown when the neb type is picked but the
+   working case is not yet a TSS (initial/final) case. */
+function updateNebBlock() {
+  const el = $("nebendpoints");
+  if (el) el.style.display = (calcType === "neb" && currentCaseType() !== "tss") ? "block" : "none";
+}
 function pickType(t) {
   const changed = t !== calcType;
   calcType = t;
   renderCalcTypes();
+  updateNebBlock();
   if (t === "bands" && !$("k-mode").value) { $("k-mode").value = "line"; kModeChanged(); }
   if (changed) {
     syncIncarToType();
@@ -1131,6 +1198,7 @@ function setWork(path, type, machine) {
   updateWorkStatus();
   const isTss = currentCaseType() === "tss";
   $("nebimgs").style.display = isTss ? "inline-block" : "none";
+  updateNebBlock();
   // A case on a remote machine runs there in place — point the Calculate
   // "run on machine" selector at it so the UI matches what the server does.
   const rm = currentCaseMachine();
@@ -2168,13 +2236,15 @@ function importBrowse() {
     openPicker("i-path", { files: true });
   }
 }
-function buildTss() {
-  if (!$("nb-init").value.trim() || !$("nb-final").value.trim()) {
+function buildTss(prefix) {
+  const p = prefix || "nb";
+  if (!$(p + "-init").value.trim() || !$(p + "-final").value.trim()) {
     banner("A NEB case needs both an initial and a final structure."); return;
   }
-  api("/api/build", { action: "tss", initial: $("nb-init").value, final: $("nb-final").value,
-    initial_machine: $("nb-init-machine").value, final_machine: $("nb-final-machine").value,
-    output: $("nb-name").value || null,
+  const initM = $(p + "-init-machine"), finalM = $(p + "-final-machine");
+  api("/api/build", { action: "tss", initial: $(p + "-init").value, final: $(p + "-final").value,
+    initial_machine: initM ? initM.value : null, final_machine: finalM ? finalM.value : null,
+    output: $(p + "-name").value || null,
     machine: workingMachine(), root: isRemoteWorking() ? defaultCasesRoot() : null }).then(built);
 }
 function combineBody() {
@@ -2529,9 +2599,12 @@ async function doPreview() {
   const p = data.previews[0];
   activeConsole = "console";
   if (p.engine === "qe") {
+    const inputs = Object.keys(p).filter(k => k.endsWith(".in") && typeof p[k] === "string");
+    const inputText = inputs.map(k => `--- ${k} ---\n${p[k]}`).join("\n\n");
+    const stages = (p.stages || []).map(s => s.program).join(" -> ");
     $("console").textContent =
       `# Preview for ${p.case_name} (${p.calc_type}) — nothing was written\n` +
-      `# pseudopotentials: ${p.pseudos}\n\n--- pw.in ---\n` + p["pw.in"];
+      `# pseudopotentials: ${p.pseudos}\n# stages: ${stages}\n\n` + inputText;
     return;
   }
   $("console").textContent =
@@ -2540,6 +2613,9 @@ async function doPreview() {
     p.INCAR + "\n--- KPOINTS ---\n" + p.KPOINTS;
 }
 async function startRun(mode, consoleId) {
+  if (calcType === "neb" && currentCaseType() !== "tss") {
+    banner("NEB needs a case with initial and final structures — create one in the block under the calculation types."); return;
+  }
   if (!(await ensureCase())) { banner("Nothing to run — build or import a structure in the Build tab first."); return; }
   if (calcType === "bands" && $("k-mode").value === "line" && !$("k-path").value) {
     banner("Band structures need a k-path — pick a preset (fcc, bcc, …) in the k-path field."); return;
@@ -2722,6 +2798,7 @@ function runningLoop() {
 let REMOTES = [];
 let prevMachine = "local";   // last selection in the c-remote dropdown
 let localCpus = "";          // remembered CPU value for the local machine
+let projMachine = "";        // folder paths are valid only for the machine that chose them
 async function loadRemotes() {
   let data;
   try { data = await api("/api/remotes"); } catch (e) { return; }
@@ -2732,6 +2809,40 @@ async function loadRemotes() {
   refreshResultMachineSelect();
   refreshRunningMachineSelect();
   refreshWorkingMachineSelect();
+  refreshProjRemoteSelect();
+}
+/* Populate the "Run an existing folder" machine dropdown; mirrors refreshRemoteSelect. */
+function refreshProjRemoteSelect() {
+  const sel = $("proj-remote"); if (!sel) return;
+  const keep = sel.value;
+  sel.innerHTML = "<option value=''>Select machine…</option>" +
+                  "<option value='local'>💻 Local — this computer</option>";
+  for (const r of REMOTES) {
+    const cores = r.cpus ? ` · ${r.cpus} cores` : "";
+    sel.add(new Option(`🖥 ${r.name} — ${r.host}${cores}`, r.name));
+  }
+  const valid = keep === "local" || REMOTES.some(r => r.name === keep);
+  sel.value = valid ? keep : "";
+  projMachineChanged();
+}
+/* A folder path belongs to one machine. Changing machines invalidates it. */
+function projMachineChanged() {
+  const sel = $("proj-remote"), cpusEl = $("proj-cpus"), folder = $("proj-dir");
+  const machine = sel.value;
+  if (projMachine && machine !== projMachine) folder.value = "";
+  projMachine = machine;
+  const ready = !!machine;
+  folder.disabled = !ready;
+  $("proj-browse").disabled = !ready;
+  folder.placeholder = ready
+    ? (machine === "local" ? "/path/to/local/folder" : "Folder on " + machine)
+    : "Select a machine first";
+  const def = machine && machine !== "local" ? machineCpus(machine) : null;
+  cpusEl.placeholder = def ? String(def) : "1";
+  projFolderChanged();
+}
+function projFolderChanged() {
+  $("proj-run").disabled = !$("proj-remote").value || !$("proj-dir").value.trim();
 }
 /* Populate the Running tab's machine dropdown: All + Local + each remote. */
 function refreshRunningMachineSelect() {
@@ -2819,10 +2930,11 @@ function renderRemotes() {
     const ro = r.source === "config";
     const where = `${r.user ? r.user + "@" : ""}${r.host}${r.port ? ":" + r.port : ""}`;
     const cores = r.cpus ? ` · ${r.cpus} cores` : "";
+    const maxJobs = r.max_jobs ? ` · max ${r.max_jobs} job${r.max_jobs === 1 ? "" : "s"} at once` : "";
     return `<div class="card" style="margin:6px 0;padding:10px">
       <b>🖥 ${r.name}</b> <span class="badge ${ro ? "dim" : "ok"}">${ro ? "config.yaml" : "editable"}</span>
       <div style="font-size:12px;color:var(--dim);margin:4px 0">
-        ${where} · ${runModeLabel(runModeOf(r))}${cores}<br>
+        ${where} · ${runModeLabel(runModeOf(r))}${cores}${maxJobs}<br>
         work dir: ${r.remote_root || "—"}<br>VASP: ${r.vasp_executable || "—"}${r.qe_executable ? `<br>QE: ${r.qe_executable}` : ""}</div>
       <button class="ghost" style="padding:2px 8px" onclick="testRemoteByName('${r.name}')">🔌 Test</button>
       ${runModeOf(r) === "ssh_detached" ? `<button class="ghost" style="padding:2px 8px" title="One-time: install the vasp_auto engine in a venv on this machine so offload jobs can run with the laptop off" onclick="setupRemote('${r.name}')">⚙ Set up offload engine</button>` : ""}
@@ -2859,10 +2971,11 @@ function remoteForm() {
     scheduler: (runmode === "slurm" || runmode === "pbs") ? runmode : "slurm",
     env_setup: $("rm-env").value.trim(),
     cpus: $("rm-cpus").value.trim(),
+    max_jobs: $("rm-maxjobs").value.trim(),
   };
 }
 function resetRemoteForm() {
-  for (const id of ["rm-name", "rm-host", "rm-user", "rm-port", "rm-key", "rm-root", "rm-exe", "rm-potcar", "rm-qe-exe", "rm-pseudo", "rm-qe-env", "rm-env", "rm-cpus"]) $(id).value = "";
+  for (const id of ["rm-name", "rm-host", "rm-user", "rm-port", "rm-key", "rm-root", "rm-exe", "rm-potcar", "rm-qe-exe", "rm-pseudo", "rm-qe-env", "rm-env", "rm-cpus", "rm-maxjobs"]) $(id).value = "";
   $("rm-runmode").value = "ssh";
   $("rm-formtitle").textContent = "Add a machine";
   $("rm-testout").innerHTML = "";
@@ -2879,6 +2992,7 @@ function editRemote(name) {
   $("rm-qe-env").value = r.qe_env_setup || "";
   $("rm-env").value = r.env_setup || "";
   $("rm-cpus").value = r.cpus || "";
+  $("rm-maxjobs").value = r.max_jobs || "";
   $("rm-formtitle").textContent = "Edit " + r.name;
   $("tab-remote").scrollIntoView({ behavior: "smooth" });
 }
@@ -2953,13 +3067,15 @@ async function syncIncarToType() {
   await loadIncar(true);                               // untouched template — follow the new type
   banner("INCAR editor refreshed with the " + calcType + " template.", "info");
 }
-async function incarFromOther(dir) {
+async function incarFromOther(dir, machine = "local") {
   // Copy another case's / job's INCAR into the editor (💾 Save to case applies it).
-  const data = await api(`/api/file?name=INCAR&dir=${encodeURIComponent(dir)}`);
+  const data = await api(`/api/file?name=INCAR&dir=${encodeURIComponent(dir)}` +
+    (machine !== "local" ? `&machine=${encodeURIComponent(machine)}` : ""));
   if (!data.exists) { banner("No INCAR in that folder — pick a case or job folder that has one."); return; }
   $("incar").value = data.text;
   incarTemplateText = null;
-  banner(`INCAR loaded from ${dir} — review it, then “Save to case” to use it.`, "info");
+  const source = machine === "local" ? dir : `${machine}:${dir}`;
+  banner(`INCAR loaded from ${source} — review it, then “Save to case” to use it.`, "info");
 }
 async function saveIncar() {
   if (!currentCase()) { banner("No working case yet — build or import a structure in the Build tab and 💾 Save it."); return; }
@@ -2970,21 +3086,22 @@ async function saveIncar() {
 
 /* ---------- guided INCAR settings (from the option catalog) ---------- */
 let incarOptionsCache = {};                              // groups per calc type
-async function renderIncarForm() {
-  const type = calcType || "scf";
+async function renderIncarForm(type, formId, taId) {
+  type = type || calcType || "scf";
+  formId = formId || "incar-form"; taId = taId || "incar";
   let groups = incarOptionsCache[type];
   if (!groups) {
     try { groups = (await api("/api/incar_options?type=" + encodeURIComponent(type), null, true)).groups; }
     catch (e) {                                          // older server without the endpoint
-      $("incar-form").innerHTML = '<p class="sub">Restart vasp-auto-ui to enable guided settings.</p>';
+      $(formId).innerHTML = '<p class="sub">Restart vasp-auto-ui to enable guided settings.</p>';
       return;
     }
     incarOptionsCache[type] = groups;
   }
-  $("incar-form").innerHTML = Object.entries(groups).map(([group, fields]) => {
+  $(formId).innerHTML = Object.entries(groups).map(([group, fields]) => {
     const rows = fields.map(f => {
       const doc = f.doc ? ` <a href="${f.doc}" target="_blank" title="VASP wiki: ${f.tag}" style="color:var(--accent);text-decoration:none">?</a>` : "";
-      const on = `onchange="applyIncarSetting('${f.tag}', this.value)"`;
+      const on = `onchange="applyIncarSetting('${f.tag}', this.value, '${taId}')"`;
       let ctrl;
       if (f.kind === "choice") {
         const opts = f.options.map(o =>
@@ -3003,18 +3120,20 @@ async function renderIncarForm() {
       <legend style="padding:0 4px;color:var(--dim)">${group}</legend>${rows}</fieldset>`;
   }).join("");
 }
-async function applyIncarSetting(tag, value) {
-  const res = await api("/api/incar_apply", { text: $("incar").value, choices: { [tag]: value } });
-  $("incar").value = res.text;
-  incarTemplateText = null;                              // form edits are user content, not a pristine template
+async function applyIncarSetting(tag, value, taId) {
+  taId = taId || "incar";
+  const res = await api("/api/incar_apply", { text: $(taId).value, choices: { [tag]: value } });
+  $(taId).value = res.text;
+  if (taId === "incar") incarTemplateText = null;        // form edits are user content, not a pristine template
 }
-async function applyAllIncarSettings() {
+async function applyAllIncarSettings(formId, taId) {
+  formId = formId || "incar-form"; taId = taId || "incar";
   const choices = {};
-  document.querySelectorAll("#incar-form [data-tag]").forEach(el => { choices[el.dataset.tag] = el.value; });
-  const res = await api("/api/incar_apply", { text: $("incar").value, choices });
-  $("incar").value = res.text;
-  incarTemplateText = null;
-  banner("Guided settings written into the INCAR editor. Save to case to keep them.", "info");
+  document.querySelectorAll(`#${formId} [data-tag]`).forEach(el => { choices[el.dataset.tag] = el.value; });
+  const res = await api("/api/incar_apply", { text: $(taId).value, choices });
+  $(taId).value = res.text;
+  if (taId === "incar") incarTemplateText = null;
+  banner("Guided settings written into the INCAR editor. Save to keep them.", "info");
 }
 
 /* ---------- workflow ---------- */
@@ -3040,6 +3159,7 @@ function convergeSettings() {
   if ($("wc-reuse") && $("wc-reuse").checked) s.reuse_wavecar = true;
   return s;
 }
+let wYamlGenerated = "";                                 // last auto-generated yaml; if the box differs, the user hand-edited it
 function workflowYaml() {
   if (!wf.length) return "";
   const cs = convergeSettings();
@@ -3055,11 +3175,15 @@ function workflowYaml() {
 function renderSteps() {
   $("w-steps").innerHTML = wf.map((s, i) =>
     `<li><b>${s}</b> <small style="color:var(--dim)">${stepInfo(s)}</small>
+       <button class="ghost" onclick="editStep(${i})" title="Edit this step's INCAR / KPOINTS">✎</button>
        <button class="ghost" onclick="moveStep(${i},-1)" title="Move up">↑</button>
        <button class="ghost" onclick="moveStep(${i},1)" title="Move down">↓</button>
        <button class="ghost" onclick="wf.splice(${i},1);renderSteps()" title="Remove">×</button></li>`
   ).join("") || "<li style='color:var(--dim);list-style:none'>no steps yet — use a preset above</li>";
-  $("w-yaml").value = workflowYaml();
+  const gen = workflowYaml();
+  if (!$("w-yaml").value.trim() || $("w-yaml").value === wYamlGenerated)
+    $("w-yaml").value = gen;                              // mirror the builder until the box is hand-edited
+  wYamlGenerated = gen;
 }
 async function runWorkflow() {
   if (!(await ensureCase())) { banner("Nothing to run — build or import a structure in the Build tab first."); return; }
@@ -3069,21 +3193,101 @@ async function runWorkflow() {
     spin: $("w-spin").checked || null,
     cpus: ($("w-cpus") && $("w-cpus").value) || $("c-cpus").value || null,
     remote: machine !== "local" ? machine : null };
-  if (wf.includes("converge")) body.workflow_yaml = workflowYaml();
-  else body.workflow = wf.join(",");
+  // Always send YAML so per-step incar:/kpoints: overrides (and converge settings)
+  // survive; honour hand-edits to the advanced box, else regenerate from the builder.
+  const box = $("w-yaml").value;
+  body.workflow_yaml = (box.trim() && box !== wYamlGenerated) ? box : workflowYaml();
   const data = await api("/api/run", body);
   activeToken = data.token; activeConsole = "w-console";
   $("w-console").textContent = "starting…";
   const where = machine !== "local" ? ` on ${machine}` : "";
-  if (body.workflow_yaml)
-    banner(`Convergence workflow started${where} — wrote workflow.yaml; the chosen ENCUT/SIGMA/k-mesh carry into the later steps.`, "info");
-  else if (where)
-    banner(`Workflow shipped to ${machine}. Track it in the Results tab (machine: ${machine}).`, "info");
+  banner(wf.includes("converge")
+    ? `Convergence workflow started${where} — the chosen ENCUT/SIGMA/k-mesh carry into the later steps.`
+    : `Workflow started${where}. Track it in the Results tab${machine !== "local" ? ` (machine: ${machine})` : ""}.`,
+    "info");
 }
 async function saveWorkflowYaml() {
   if (!(await ensureCase())) { banner("No working case yet — build or import a structure in the Build tab first."); return; }
   await api("/api/file", caseBody({ dir: currentCase(), name: "workflow.yaml", text: $("w-yaml").value }));
   banner("workflow.yaml saved — the CLI will use it automatically for this case.", "info");
+}
+
+/* ---------- per-step INCAR/KPOINTS editor ---------- */
+let wstepType = null;
+async function editStep(i) {
+  if (!(await ensureCase())) { banner("Build or import a structure in the Build tab first."); return; }
+  const type = wf[i] === "converge" ? "scf" : wf[i];     // a converge step stages its INCAR as SCF
+  wstepType = type;
+  $("wstep-title").textContent = `Step ${i + 1}: ${wf[i]} — INCAR & KPOINTS`;
+  const dir = currentCase();
+  // Prefer an already-saved per-type INCAR, else start from the type's template.
+  const inc = await api(`/api/file?dir=${encodeURIComponent(dir)}&name=INCAR_${type}` + caseQS());
+  $("wstep-incar").value = inc.exists ? inc.text : (await api("/api/template?type=" + type)).text;
+  const kp = await api(`/api/file?dir=${encodeURIComponent(dir)}&name=KPOINTS_${type}` + caseQS());
+  $("wstep-kpts").value = kp.exists ? kpMeshFromText(kp.text) : "";
+  renderIncarForm(type, "wstep-form", "wstep-incar");
+  $("wstepmodal").style.display = "block";
+}
+async function wstepLoadTemplate() {
+  $("wstep-incar").value = (await api("/api/template?type=" + wstepType)).text;
+}
+async function saveStepInputs() {
+  const type = wstepType, dir = currentCase();
+  const mesh = $("wstep-kpts").value.trim();
+  let kptext = null;
+  if (mesh) { kptext = kpMeshText(mesh); if (kptext === null) return; }   // bad mesh — abort, nothing written
+  await api("/api/file", caseBody({ dir, name: "INCAR_" + type, text: $("wstep-incar").value }));
+  if (kptext) await api("/api/file", caseBody({ dir, name: "KPOINTS_" + type, text: kptext }));
+  closeWStep();
+  banner(`Saved INCAR_${type}${mesh ? " + KPOINTS_" + type : ""} — this ${type} step will use ${mesh ? "them" : "it"}.`, "info");
+}
+function closeWStep() { $("wstepmodal").style.display = "none"; }
+/* Canonical automatic-mesh KPOINTS, matching kpoints.mesh_kpoints_text. */
+function kpMeshText(spec) {
+  const p = spec.split(/[x\s,]+/).map(Number).filter(n => Number.isFinite(n) && n > 0);
+  const m = p.length === 1 ? [p[0], p[0], p[0]] : (p.length === 3 ? p : null);
+  if (!m) { banner("k-mesh needs one number (N→NxNxN) or three (hxkxl), e.g. 4 or 3x3x1."); return null; }
+  return `Automatic mesh\n0\nGamma\n${m[0]} ${m[1]} ${m[2]}\n0 0 0\n`;
+}
+function kpMeshFromText(text) {                            // 4th line holds "a b c"
+  const line = (text.split(/\r?\n/)[3] || "").trim();
+  return line ? line.split(/\s+/).join("x") : "";
+}
+
+/* Browse for the folder to run, on the machine picked above — local picker,
+   or the remote one over SSH (mirrors saveBrowse, folder mode). */
+function projBrowse() {
+  const m = $("proj-remote").value;
+  if (!m) { banner("Select a machine first."); return; }
+  const r = REMOTES.find(x => x.name === m);
+  if (m && m !== "local") {
+    openPicker("proj-dir", { machine: m, root: (r && r.remote_root) || "", what: "a folder (or project folder) on " + m, onpick: projFolderChanged });
+  } else {
+    openPicker("proj-dir", { onpick: projFolderChanged });
+  }
+}
+/* Run a folder as-is, bypassing the working-case builder flow: the CLI's own
+   target scan (target_utils.inspect_target) decides whether it's a single
+   case or a project of several case subfolders, and runs every one found.
+   Picking a remote machine above means the folder already lives there (same
+   "machine" meaning as the Working case card) — the server scans it over SSH
+   (single case or project, same rules as inspect_target), fetches every case
+   found, and re-runs them there. A local folder just runs here. */
+async function runProjectFolder() {
+  const m = $("proj-remote").value;
+  if (!m) { banner("Select a machine first."); return; }
+  const target = $("proj-dir").value.trim();
+  if (!target) { banner("Pick a folder on the selected machine."); return; }
+  const data = await api("/api/run", {
+    target, mode: "run", source: "existing_folder",
+    cpus: $("proj-cpus").value || null,
+    parallel: $("proj-par").value || null,
+    scheduler: $("proj-sched").value,
+    machine: m,
+  });
+  activeToken = data.token; activeConsole = "proj-console";
+  $("proj-console").style.display = "block";
+  $("proj-console").textContent = "starting…";
 }
 
 /* ---------- results ---------- */
@@ -3212,9 +3416,10 @@ function closeAnalysisCards() {
 function resStatusBadge(v) {
   const cls = v === "done" ? "ok"
             : (v === "terminated" || v === "stalled") ? "no"
-            : (v === "running") ? "warn"
+            : (v === "running" || v === "pending") ? "warn"
             : (v === "remote" || v === "submitted") ? "warn" : "dim";
   const title = v === "running" ? "process is alive (PID checked) and still calculating"
+              : v === "pending" ? "waiting for an available remote job slot"
               : v === "stalled" ? "the recorded PID is gone — crashed or killed outside the app, never finished"
               : v === "terminated" ? "stopped with the Terminate/✕ button" : "";
   return `<span class="badge ${cls}"${title ? ` title="${title}"` : ""}>${esc(v || "—")}</span>`;
@@ -3527,12 +3732,31 @@ function exportCanvas(id, name) {
 async function showNeb(i) {
   gotoAnalysis();
   const r = RESULTS[i];
-  let data;
-  try { data = await api("/api/neb?path=" + jobQS(r)); }
-  catch (e) { $("nebcard").style.display = "none"; return; }
-  LAST.neb = { name: r.case, data };
-  $("nebcase").textContent = r.case;
+  $("neb-dir").value = r.remote ? r.path : r.job_dir;
+  if ($("neb-dir-m")) $("neb-dir-m").value = r.remote ? r.machine : "local";
+  loadNebProfile(r.case, jobQS(r));
+}
+function computeNebProfile() {
+  const s = slotObj("neb-dir");
+  if (!s.path) { banner("Pick the NEB job folder."); return; }
+  let qs = encodeURIComponent(s.path)
+    + (s.machine !== "local" ? "&machine=" + encodeURIComponent(s.machine) : "");
+  if ($("neb-ends").checked) {
+    for (const [id, key] of [["neb-init", "einit"], ["neb-fin", "efinal"]]) {
+      const e = slotObj(id);
+      if (!e.path) { banner("Give both endpoint runs (or untick the endpoints box)."); return; }
+      qs += `&${key}=` + encodeURIComponent(e.path)
+          + (e.machine !== "local" ? `&${key}_m=` + encodeURIComponent(e.machine) : "");
+    }
+  }
+  loadNebProfile(s.path.replace(/\/+$/, "").split("/").pop() || s.path, qs);
+}
+async function loadNebProfile(name, qs) {
+  const data = await api("/api/neb?path=" + qs);   // api() banners the error
+  LAST.neb = { name, data };
+  $("nebcase").textContent = name;
   $("nebcard").style.display = "block";
+  $("nebbody").style.display = "block";
   const eV = x => (x >= 0 ? "+" : "") + x.toFixed(3);
   $("nebstats").innerHTML =
     `<span class="badge ok">E<sub>a</sub> (forward) = ${data.forward_barrier_eV.toFixed(3)} eV</span> ` +
@@ -3540,6 +3764,63 @@ async function showNeb(i) {
     `<span class="badge">ΔE = ${eV(data.delta_e_eV)} eV</span> ` +
     `<span class="badge dim">transition state: image ${data.ts_image} of ${data.n_images - 1}</span>`;
   drawNebProfile(data);
+  loadNebImages(qs);
+}
+/* One structure thumbnail per NEB image (side view, a–c plane), labelled with
+   the image number and its reaction coordinate; the transition state is
+   outlined red. Click a thumbnail to open that image in the 3D viewer. */
+async function loadNebImages(qs) {
+  const wrap = $("nebimages");
+  wrap.innerHTML = "";
+  let t;
+  try { t = await api("/api/trajectory?path=" + qs, null, true); }
+  catch (e) { return; }              // no structures — the profile alone is fine
+  if (t.kind !== "neb") return;
+  const d = LAST.neb.data;
+  LAST.neb.traj = t;
+  // frames and profile images both come from the numbered dirs, but an image
+  // can have a structure and no energy (or vice versa) — only label with the
+  // reaction coordinate when they line up 1:1
+  const aligned = t.frames.length === d.images.length;
+  // shared x–z bounds across all images so every thumbnail uses the same view
+  let x0 = 1/0, x1 = -1/0, z0 = 1/0, z1 = -1/0;
+  for (const f of t.frames) for (const p of f) {
+    x0 = Math.min(x0, p[0]); x1 = Math.max(x1, p[0]);
+    z0 = Math.min(z0, p[2]); z1 = Math.max(z1, p[2]);
+  }
+  const W = 170, H = 150, pad = 14;
+  const s = Math.min((W - 2*pad) / (x1 - x0 || 1), (H - 2*pad) / (z1 - z0 || 1));
+  t.frames.forEach((frame, i) => {
+    const isTs = aligned && i === d.ts_index;
+    const div = document.createElement("div");
+    div.style.cssText = "text-align:center;cursor:pointer";
+    div.title = "Open this image in the 3D viewer";
+    div.onclick = () => {
+      document.querySelector('nav button[data-tab="build"]').click();
+      loadTrajectory(LAST.neb.traj); stopAnim(); setFrame(i);
+    };
+    const cv = document.createElement("canvas");
+    cv.width = W; cv.height = H;
+    cv.style.cssText = `border:1.5px solid ${isTs ? "#ff6b6b" : "#3a424d"};border-radius:6px`;
+    const ctx = cv.getContext("2d");
+    chartBg(ctx, W, H);
+    // depth-sort along b so nearer atoms draw on top
+    frame.map((p, k) => [p, t.symbols[k]]).sort((a, b) => a[0][1] - b[0][1])
+      .forEach(([p, el]) => {
+        const X = pad + (p[0] - x0) * s + (W - 2*pad - (x1 - x0) * s) / 2;
+        const Y = H - pad - (p[2] - z0) * s - (H - 2*pad - (z1 - z0) * s) / 2;
+        ctx.beginPath(); ctx.arc(X, Y, (RADII[el] || 1.0) * s * 0.9 + 1.5, 0, 2*Math.PI);
+        ctx.fillStyle = colorOf(el); ctx.fill();
+        ctx.strokeStyle = "rgba(0,0,0,.35)"; ctx.stroke();
+      });
+    const lbl = document.createElement("div");
+    lbl.style.cssText = "font-size:12px;margin-top:2px" + (isTs ? ";color:#ff6b6b" : "");
+    lbl.textContent = aligned
+      ? `${d.images[i]} · x = ${d.reaction_coord[i].toFixed(2)}` + (isTs ? " · TS" : "")
+      : `image ${i}`;
+    div.append(cv, lbl);
+    wrap.appendChild(div);
+  });
 }
 function drawNebProfile(data) {
   const cv = $("nebchart"), ctx = cv.getContext("2d");
@@ -4057,6 +4338,23 @@ async function anaOptics() {
   ]);
   drawAnaChart(d.energies_eV, d.alpha_cm1, "photon energy (eV)", "α (cm⁻¹)", []);
 }
+async function anaXrd() {
+  const dir = anaDir();
+  const d = await api("/api/xrd?path=" + anaQS(dir));
+  const order = d.intensity.map((_, i) => i).sort((a, b) => d.intensity[b] - d.intensity[a]);
+  const lines = [
+    `structure    : ${d.structure_file}   λ = ${d.wavelength_A.toFixed(4)} Å`,
+    `peaks        : ${d.two_theta_deg.length} in 10–90° 2θ  (strongest first)`,
+    "   2θ (°)   I (%)   d (Å)   hkl",
+  ];
+  for (const i of order.slice(0, 12))
+    lines.push(`  ${d.two_theta_deg[i].toFixed(2).padStart(6)} ${d.intensity[i].toFixed(1).padStart(7)} ${d.d_spacing_A[i].toFixed(3).padStart(7)}   ${d.hkl[i]}`);
+  anaShow("xrd", dir.split("/").pop(), d, lines);
+  const xs = [], ys = [];
+  for (let i = 0; i < d.two_theta_deg.length; i++)
+    xs.push(d.two_theta_deg[i], d.two_theta_deg[i], d.two_theta_deg[i]), ys.push(0, d.intensity[i], 0);
+  drawAnaChart(xs, ys, "2θ (deg)", "intensity (%)", []);
+}
 async function anaBader() {
   const dir = anaDir();
   banner("Running the bader binary — can take a while on fine grids…", "info");
@@ -4086,6 +4384,9 @@ function exportAnaCsv() {
   else if (ANA.kind === "optics")
     downloadCSV(n + "_absorption.csv", ["energy_eV", "alpha_cm1", "eps_real", "eps_imag"],
       d.energies_eV.map((e, i) => [e, d.alpha_cm1[i], d.real[i], d.imag[i]]));
+  else if (ANA.kind === "xrd")
+    downloadCSV(n + "_xrd.csv", ["two_theta_deg", "intensity", "d_spacing_A", "hkl"],
+      d.two_theta_deg.map((t, i) => [t, d.intensity[i], d.d_spacing_A[i], '"' + d.hkl[i] + '"']));
   else if (ANA.kind === "bader")
     downloadCSV(n + "_bader.csv", ["index", "element", "electrons", "net_charge_e"],
       d.charges.map(c => [c.index, c.element, c.electrons, c.net_charge]));
@@ -4264,14 +4565,33 @@ let PICKER_LAST = null;  // last browsed folder — picking related paths in a r
 function openPicker(targetId, opts = {}) {
   PICKER = { target: targetId, files: !!opts.files, onpick: opts.onpick || null,
              onchoose: opts.onchoose || null,
+             chooseMachine: !!opts.chooseMachine,
              machine: opts.machine || null, root: opts.root || null };
   $("pickerwhat").textContent = PICKER.files ? "a file" : (opts.what || "a folder");
   $("pickerchoose").style.display = PICKER.files ? "none" : "inline-block";
+  $("pickermachinebox").style.display = PICKER.chooseMachine ? "block" : "none";
+  if (PICKER.chooseMachine) {
+    const sel = $("pickermachine");
+    sel.innerHTML = "<option value='local'>💻 Local — this computer</option>";
+    for (const r of REMOTES) sel.add(new Option(`🖥 ${r.name} — ${r.host}`, r.name));
+    sel.value = PICKER.machine && REMOTES.some(r => r.name === PICKER.machine)
+      ? PICKER.machine : "local";
+    PICKER.machine = sel.value;
+    const remote = REMOTES.find(r => r.name === PICKER.machine);
+    PICKER.root = remote ? (remote.remote_root || "") : null;
+  }
   $("pickermodal").style.display = "block";
   const current = (targetId && $(targetId).value.trim()) || opts.start || "";
   const start = current && current.startsWith("/") ? current
               : (PICKER.machine ? (PICKER.root || "") : PICKER_LAST);
   pickerGo(start);
+}
+function pickerMachineChanged() {
+  const machine = $("pickermachine").value || "local";
+  PICKER.machine = machine;
+  const remote = REMOTES.find(r => r.name === machine);
+  PICKER.root = remote ? (remote.remote_root || "") : null;
+  pickerGo(remote ? PICKER.root : (PICKER_LAST || ""));
 }
 function closePicker() { $("pickermodal").style.display = "none"; }
 $("pickermodal").onclick = e => { if (e.target === $("pickermodal")) closePicker(); };
@@ -4324,7 +4644,7 @@ function pickerNav(i) {
 function pickerChoose() {
   const chosen = $("pickerpath").value;
   closePicker();
-  if (PICKER.onchoose) { PICKER.onchoose(chosen); return; }
+  if (PICKER.onchoose) { PICKER.onchoose(chosen, PICKER.machine || "local"); return; }
   $(PICKER.target).value = chosen;
   $(PICKER.target).dispatchEvent(new Event("input"));  // run the field's oninput
   if (PICKER.onpick) PICKER.onpick();

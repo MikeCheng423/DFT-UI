@@ -365,13 +365,25 @@ def job_finished(job_dir) -> bool:
     ``ase_results.json`` (only written at the end).
     """
     job_dir = Path(job_dir)
+    if (job_dir / ".qe_complete").exists():
+        return True
     if (job_dir / "job.log").exists() or (job_dir / "ase_results.json").exists():
         return True
     outcar = job_dir / "OUTCAR"
     if outcar.exists() and _tail_has(outcar, "General timing"):
         return True
     pw = job_dir / "pw.out"
-    return pw.exists() and _tail_has(pw, "JOB DONE")
+    if pw.exists() and _tail_has(pw, "JOB DONE"):
+        return True
+    manifest = job_dir / "qe_stages.json"
+    if manifest.exists():
+        try:
+            stages = json.loads(manifest.read_text(encoding="utf-8")).get("stages", [])
+            output = job_dir / stages[-1]["output"]
+            return output.exists() and _tail_has(output, "JOB DONE")
+        except (ValueError, KeyError, IndexError, OSError, TypeError):
+            return False
+    return False
 
 
 def pid_alive(pid: int) -> bool:
@@ -551,9 +563,15 @@ def _build_neb_row(project_name, mode, case_info, status_override=None):
     }
 
 
-def neb_energy_profile(job_dir):
+def neb_energy_profile(job_dir, endpoint_energies=None):
     """Energy profile along an NEB/TSS path — the reaction-coordinate ("energy
     stage") plot usually shown in papers.
+
+    ``endpoint_energies`` is an optional ``(initial_eV, final_eV)`` pair used
+    for the first/last image directories when they have no energy files of
+    their own — a standard NEB run never computes the endpoints, so their
+    energies come from the endpoint relaxation runs. Either entry may be None.
+    An energy file already inside 00/NN wins over the provided value.
 
     Returns ``None`` when there are fewer than two images with energies, else a
     dict:
@@ -579,9 +597,17 @@ def neb_energy_profile(job_dir):
 
     from vasp_auto.trajectory import _frac_to_cart, _poscar_frame
 
+    fallback = {}
+    if endpoint_energies:
+        for image_dir, energy in zip((numeric[0], numeric[-1]), endpoint_energies):
+            if energy is not None:
+                fallback[image_dir.name] = float(energy)
+
     images, energies, carts = [], [], []
     for image_dir in numeric:
         energy = _neb_image_energy(image_dir)
+        if energy is None:
+            energy = fallback.get(image_dir.name)
         if energy is None:
             continue
         images.append(int(image_dir.name))
@@ -680,6 +706,22 @@ def _build_qe_row(project_name, mode, case_info, status_override=None):
     """Summary row for a Quantum ESPRESSO job (pw.out), mirroring build_row."""
     job_dir = Path(case_info["job_dir"])
     pw_out = job_dir / "pw.out"
+    if case_info.get("calculation_type") == "tss":
+        from vasp_auto.parser import parse_qe_neb
+        profile = parse_qe_neb(job_dir) or {}
+        neb_out = job_dir / "neb.out"
+        row = {
+            "project": project_name, "case": case_info["case_name"], "engine": "qe",
+            "calculation_type": "tss", "job_dir": str(job_dir),
+            "status": status_override or terminal_status(job_dir, neb_out.exists()),
+            "converged": job_finished(job_dir),
+            "barrier_forward_eV": profile.get("barrier_forward_eV"),
+            "barrier_reverse_eV": profile.get("barrier_reverse_eV"),
+            "delta_eV": profile.get("delta_eV"),
+        }
+        if status_override is None:
+            _apply_remote_marker(row, job_dir)
+        return row
     summary = parse_pw_output(pw_out) or {}
 
     row = {
@@ -725,14 +767,13 @@ def _build_ase_row(project_name, mode, case_info, status_override=None):
 
 
 def build_row(project_name, mode, case_info, status_override=None):
-    if case_info.get("calculation_type") == "tss":
-        return _build_neb_row(project_name, mode, case_info, status_override=status_override)
-
     engine_name = job_engine(Path(case_info["job_dir"]))
     if engine_name == "qe":
         return _build_qe_row(project_name, mode, case_info, status_override=status_override)
     if engine_name == "ase":
         return _build_ase_row(project_name, mode, case_info, status_override=status_override)
+    if case_info.get("calculation_type") == "tss":
+        return _build_neb_row(project_name, mode, case_info, status_override=status_override)
 
     job_dir = Path(case_info["job_dir"])
     outcar = job_dir / "OUTCAR"
@@ -787,6 +828,8 @@ def should_retry_failed(case_info):
 
     engine_name = job_engine(job_dir)
     if engine_name == "qe":
+        if case_info.get("calculation_type") == "tss":
+            return not job_finished(job_dir)
         summary = parse_pw_output(job_dir / "pw.out")
         if not summary:
             return True
@@ -989,6 +1032,29 @@ def _previous_run_ranks(job_dir: Path) -> int | None:
     return None
 
 
+def _ranks_for_images(job_dir: Path, cpus: int | None) -> int | None:
+    """Clamp an MPI rank count to what a NEB job can actually use.
+
+    VASP requires the rank count to be divisible by IMAGES (INCAR); anything
+    else aborts immediately in M_divide / MPI_Cart_sub. Rounds ``cpus`` down to
+    a multiple of IMAGES (minimum one rank per image). INCARs without an IMAGES
+    tag return ``cpus`` unchanged.
+    """
+    try:
+        text = (job_dir / "INCAR").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return cpus
+    match = re.search(r"^[ \t]*IMAGES[ \t]*=[ \t]*(\d+)", text, re.M | re.I)
+    if not match:
+        return cpus
+    images = int(match.group(1))
+    if images <= 0:
+        return cpus
+    if not cpus or cpus < images:
+        return images
+    return cpus - cpus % images
+
+
 def _seed_poscar_from_contcar(work_dir: Path) -> bool:
     """Advance POSCAR to the latest geometry VASP wrote (CONTCAR), in place.
 
@@ -1099,6 +1165,15 @@ def resume_job(
         cpus = _previous_run_ranks(job_dir)
         if cpus:
             print(f"CPUs      : {cpus} (same as the previous run, from OUTCAR)")
+    adjusted = _ranks_for_images(job_dir, cpus)
+    if adjusted != cpus:
+        print(f"CPUs      : {adjusted} (rounded to a multiple of IMAGES for NEB)")
+        cpus = adjusted
+
+    # Drop the stale summary: while the resume runs the job must not read
+    # "finished", and the rebuilt job.log below reflects the current (possibly
+    # edited) INCAR instead of the previous run's parameters.
+    (job_dir / "job.log").unlink(missing_ok=True)
 
     return_code = run_vasp(str(job_dir), str(vasp_executable), cpus=cpus, on_progress=on_progress)
     error_summary = report_vasp_errors(job_dir)

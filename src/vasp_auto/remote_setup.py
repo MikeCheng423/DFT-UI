@@ -21,6 +21,7 @@ no flags it asks interactively.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import shlex
 import shutil
@@ -41,7 +42,8 @@ REMOTES_FILE = REPO_ROOT / "remotes.json"
 
 # The fields persisted for a machine (mirrors the UI's REMOTE_FIELDS plus lists).
 SCALAR_FIELDS = ("host", "user", "port", "ssh_key", "remote_root",
-                 "vasp_executable", "scheduler")
+                 "vasp_executable", "potcar_root", "qe_executable", "pseudo_dir",
+                 "qe_env_setup", "scheduler", "run_mode", "cpus")
 LIST_FIELDS = ("ssh_options", "scheduler_options")
 
 
@@ -187,14 +189,21 @@ def save_to_config(remote: dict, name: str, config_path: str | Path | None = Non
 def save_to_ui_store(remote: dict, name: str, store_path: str | Path | None = None) -> Path:
     """Merge the machine into remotes.json (read by the web UI Remote tab)."""
     path = Path(store_path).expanduser() if store_path else REMOTES_FILE
-    store: dict = {}
-    if path.exists():
-        try:
-            store = json.loads(path.read_text(encoding="utf-8"))
-        except ValueError:
-            store = {}
-    store[name] = {**_clean_entry(remote), "name": name}
-    path.write_text(json.dumps(store, indent=2), encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(path.name + ".lock")
+    with lock_path.open("a", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        store: dict = {}
+        if path.exists():
+            try:
+                store = json.loads(path.read_text(encoding="utf-8"))
+            except ValueError:
+                store = {}
+        previous = store.get(name) if isinstance(store.get(name), dict) else {}
+        store[name] = {**previous, **_clean_entry(remote), "name": name}
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(json.dumps(store, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(path)
     return path
 
 
@@ -222,8 +231,10 @@ def _collect_interactive() -> tuple[str, dict, str | None]:
         remote.pop("port")
     remote["remote_root"] = _prompt("Remote base dir for jobs", "/scratch/$USER/vasp_jobs",
                                     required=True)
-    remote["vasp_executable"] = _prompt("VASP binary path ON the remote",
-                                        "vasp_std", required=True)
+    remote["vasp_executable"] = _prompt("VASP binary path ON the remote (blank for QE-only)")
+    remote["qe_executable"] = _prompt("QE pw.x path ON the remote (blank for VASP-only)")
+    if remote.get("qe_executable"):
+        remote["pseudo_dir"] = _prompt("QE UPF directory ON the remote")
     remote["scheduler"] = _prompt("Scheduler (slurm/pbs)", "slurm")
     key_path = _prompt("SSH private key to use (blank = auto)") or None
     extra = _prompt("Extra submit-script lines (semicolon-separated, e.g. "
@@ -287,6 +298,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--port", help="SSH port")
     p.add_argument("--remote-root", help="base directory for jobs on the remote")
     p.add_argument("--vasp-executable", help="VASP binary path on the remote")
+    p.add_argument("--qe-executable", help="Quantum ESPRESSO pw.x path on the remote")
+    p.add_argument("--pseudo-dir", help="UPF pseudopotential directory on the remote")
+    p.add_argument("--qe-env-setup", help="shell setup used only for QE runs")
     p.add_argument("--scheduler", default=None, choices=["slurm", "pbs"],
                    help="remote scheduler (default slurm)")
     p.add_argument("--ssh-key", help="private key to use (default: auto/generate)")
@@ -312,7 +326,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.host:  # non-interactive
         name = args.name or args.host
         remote = {"host": args.host}
-        for flag in ("user", "port", "remote_root", "vasp_executable", "scheduler", "ssh_key"):
+        for flag in ("user", "port", "remote_root", "vasp_executable", "qe_executable",
+                     "pseudo_dir", "qe_env_setup", "scheduler", "ssh_key"):
             value = getattr(args, flag)
             if value:
                 remote[flag] = value
@@ -326,8 +341,10 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         name, remote, key_path = _collect_interactive()
 
-    if not remote.get("remote_root") or not remote.get("vasp_executable"):
-        print("A remote needs both remote_root and vasp_executable.", file=sys.stderr)
+    if not remote.get("remote_root") or not (
+        remote.get("vasp_executable") or remote.get("qe_executable")
+    ):
+        print("A remote needs remote_root and at least one DFT executable.", file=sys.stderr)
         return 2
 
     if args.no_keygen and not key_path:

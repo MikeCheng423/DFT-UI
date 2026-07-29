@@ -89,6 +89,11 @@ def _write_step_kpoints(
         )
     elif step.get("kpoints"):
         target.write_text(mesh_kpoints_text(parse_mesh(step["kpoints"])), encoding="utf-8")
+    elif step.get("calc_type") and (case_dir / f"KPOINTS_{step['calc_type']}").exists():
+        # Per-step KPOINTS saved from the workflow editor; an explicit user choice, so
+        # it beats a converge scan's carried mesh (mirrors INCAR_<type>).
+        # ponytail: type-keyed — two steps of the same type share one file.
+        shutil.copy2(case_dir / f"KPOINTS_{step['calc_type']}", target)
     elif carry_kpoints:
         # k-mesh chosen by a preceding convergence step.
         target.write_text(mesh_kpoints_text(parse_mesh(carry_kpoints)), encoding="utf-8")

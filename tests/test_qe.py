@@ -127,10 +127,11 @@ def test_bands_kpath_crystal_b(qe_case):
     assert "K_POINTS crystal_b" in preview["pw.in"]
 
 
-def test_unsupported_calc_type_rejected(qe_case):
+def test_phonon_generates_native_stage(qe_case):
     case, config, case_info = qe_case
-    with pytest.raises(ValueError):
-        preview_job_from_case(case_info, calc_type="phonon", engine="qe", config=config)
+    preview = preview_job_from_case(case_info, calc_type="phonon", engine="qe", config=config)
+    assert "&INPUTPH" in preview["ph.in"]
+    assert [stage["program"] for stage in preview["stages"]] == ["pw.x", "ph.x"]
 
 
 def test_spin_adds_starting_magnetization(qe_case):
@@ -166,14 +167,145 @@ def test_user_pw_in_takes_precedence(qe_case):
     assert "CUSTOM" in (job_dir / "pw.in").read_text()
 
 
-def test_qe_tss_rejected(tmp_path):
+def test_qe_tss_generates_neb_input(tmp_path):
     case = tmp_path / "tss"
     for end in ("initial", "final"):
         (case / end).mkdir(parents=True)
         (case / end / "POSCAR").write_text(POSCAR_SI, encoding="utf-8")
+    (tmp_path / "Si.test.UPF").write_text("<UPF/>", encoding="utf-8")
     case_info = make_case_info(case, tmp_path / "jobs")
-    with pytest.raises(ValueError):
-        create_job_from_case(case_info, engine="qe", config={"pseudo_dir": str(tmp_path)})
+    job = create_job_from_case(
+        case_info, engine="qe", config={"pseudo_dir": str(tmp_path)}, neb_images=5,
+    )
+    neb = (job / "neb.in").read_text(encoding="utf-8")
+    assert "BEGIN_PATH_INPUT" in neb
+    assert "num_of_images = 7" in neb
+    assert "FIRST_IMAGE" in neb and "LAST_IMAGE" in neb
+    stages = __import__("json").loads((job / "qe_stages.json").read_text())["stages"]
+    assert stages[0]["program"] == "neb.x"
+
+
+@pytest.mark.parametrize(
+    ("calc_type", "programs", "input_fragment"),
+    [
+        ("dos", ["pw.x", "pw.x", "dos.x", "projwfc.x"], "&DOS"),
+        ("bands", ["pw.x", "pw.x", "bands.x"], "&BANDS"),
+        ("freq", ["pw.x", "ph.x", "dynmat.x"], "&INPUTPH"),
+        ("optics", ["pw.x", "pw.x", "epsilon.x"], "&ENERGY_GRID"),
+        ("charge", ["pw.x", "pp.x"], "plot_num = 0"),
+        ("workfunction", ["pw.x", "pp.x", "average.x"], "plot_num = 11"),
+    ],
+)
+def test_qe_companion_stage_plans(qe_case, calc_type, programs, input_fragment):
+    _case, config, case_info = qe_case
+    kwargs = {"kpoints_spec": {"kpath": "fcc"}} if calc_type == "bands" else {}
+    preview = preview_job_from_case(case_info, calc_type=calc_type, engine="qe", config=config, **kwargs)
+    assert [stage["program"] for stage in preview["stages"]] == programs
+    assert any(input_fragment in value for key, value in preview.items()
+               if key.endswith(".in") and isinstance(value, str))
+
+
+def test_qe_md_and_hse_parameters(qe_case):
+    _case, config, case_info = qe_case
+    md = preview_job_from_case(case_info, calc_type="md", engine="qe", config=config)["pw.in"]
+    assert "calculation = 'md'" in md and "ion_temperature = 'rescaling'" in md
+    hse = preview_job_from_case(case_info, calc_type="hse06", engine="qe", config=config)["pw.in"]
+    assert "input_dft = 'HSE'" in hse and "screening_parameter = 0.106" in hse
+
+
+def test_qe_d_band_center_reads_projwfc_files(tmp_path):
+    from vasp_auto.analysis import qe_d_band_center
+
+    job = tmp_path / "dos"
+    job.mkdir()
+    (job / "pw.out").write_text("the Fermi energy is 0.0000 ev\n", encoding="utf-8")
+    (job / "pdos.pdos_atm#1(Fe)_wfc#3(d)").write_text(
+        "# E (eV) ldos(E) pdos(E)\n-2 1 1\n-1 1 1\n0 1 1\n",
+        encoding="utf-8",
+    )
+    result = qe_d_band_center(job, [1])
+    assert result["d_band_center_eV"] == pytest.approx(-1.0)
+    assert result["d_band_width_eV"] == pytest.approx(0.5)
+
+
+def test_qe_cube_charge_difference(tmp_path):
+    from vasp_auto.qe_volumetric import cube_difference, read_cube
+
+    header = (
+        "total\nQE pp.x\n 1 0 0 0\n 2 1 0 0\n 1 0 1 0\n 1 0 0 1\n"
+        " 14 0 0 0 0\n"
+    )
+    total = tmp_path / "total.cube"
+    part = tmp_path / "part.cube"
+    total.write_text(header + " 3.0 5.0\n", encoding="utf-8")
+    part.write_text(header + " 1.0 2.0\n", encoding="utf-8")
+    output = tmp_path / "diff.cube"
+    cube_difference(total, [part], output)
+    assert read_cube(output)["data"] == pytest.approx([2.0, 3.0])
+
+
+def test_qe_upf_zval_formats(tmp_path):
+    from vasp_auto.chgcar import _upf_zval
+
+    xml = tmp_path / "xml.UPF"
+    legacy = tmp_path / "legacy.UPF"
+    xml.write_text('<PP_HEADER z_valence="8.000000"/>\n', encoding="utf-8")
+    legacy.write_text("  4.000000 Z valence\n", encoding="utf-8")
+    assert _upf_zval(xml) == 8.0
+    assert _upf_zval(legacy) == 4.0
+
+
+def test_aggregate_qe_pdos_spin_and_selection(tmp_path):
+    from vasp_auto.parser import aggregate_qe_pdos
+
+    job = tmp_path / "dos"
+    job.mkdir()
+    (job / "pw.out").write_text("the Fermi energy is 1.5 ev\n", encoding="utf-8")
+    for atom, scale in ((1, 1.0), (2, 10.0)):
+        (job / f"pdos.pdos_atm#{atom}(Fe)_wfc#2(d)").write_text(
+            "# E (eV) ldosup(E) ldosdw(E)\n"
+            f"0 {scale} {2 * scale}\n1 {3 * scale} {4 * scale}\n",
+            encoding="utf-8",
+        )
+    result = aggregate_qe_pdos(job, ["Fe", "Fe"], atoms=[1])
+    assert result["efermi"] == 1.5
+    assert len(result["curves"]) == 2
+    assert result["curves"][0]["values"] == [1.0, 3.0]
+    assert result["curves"][1]["values"] == [2.0, 4.0]
+
+
+def test_run_qe_executes_manifest_and_marks_completion(tmp_path, monkeypatch):
+    import json
+    from vasp_auto.runner import run_qe
+
+    job = tmp_path / "job"
+    binary = tmp_path / "bin"
+    job.mkdir()
+    binary.mkdir()
+    for program in ("pw.x", "ph.x"):
+        (binary / program).write_text("", encoding="utf-8")
+    for name in ("pw.in", "ph.in"):
+        (job / name).write_text("&INPUT\n/\n", encoding="utf-8")
+    (job / "qe_stages.json").write_text(json.dumps({"stages": [
+        {"program": "pw.x", "input": "pw.in", "output": "pw.out", "mpi": True},
+        {"program": "ph.x", "input": "ph.in", "output": "ph.out", "mpi": True},
+    ]}), encoding="utf-8")
+    commands = []
+
+    class Process:
+        stdout = ["JOB DONE.\n"]
+
+        def wait(self):
+            return 0
+
+    def fake_popen(command, **_kwargs):
+        commands.append(command)
+        return Process()
+
+    monkeypatch.setattr("vasp_auto.runner.subprocess.Popen", fake_popen)
+    assert run_qe(str(job), str(binary / "pw.x"), cpus=2) == 0
+    assert [command[-3] for command in commands] == [str(binary / "pw.x"), str(binary / "ph.x")]
+    assert (job / ".qe_complete").exists()
 
 
 # ----------------------------------------------------------------- parsing

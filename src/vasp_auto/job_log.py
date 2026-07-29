@@ -251,6 +251,30 @@ def build_job_log(job_dir: Path, case_name: str | None = None,
         if summary["magmom_total"] is not None:
             lines.append(f"  Total magnetisation : {_fmt(summary['magmom_total'], ' μB', 3)}")
 
+    # Thermochemistry for frequency runs (IBRION 5-8): ZPE / Hcorr / -TS and the
+    # Gibbs correction to add to E_DFT (see freq_thermo).
+    if str(ibrion) in ("5", "6", "7", "8") and (job_dir / "OUTCAR").exists():
+        from vasp_auto.freq_thermo import CM2EV, parse_frequencies, thermo
+        real, imag = parse_frequencies(job_dir / "OUTCAR")
+        if real:
+            t = thermo(real)
+            lines += _section("THERMOCHEMISTRY  (harmonic, 298.15 K)")
+            lines += [
+                f"  Real modes          : {len(real)}",
+                f"  Imaginary (dropped) : {len(imag)}"
+                + (f"   [{', '.join(f'{e / CM2EV:.1f}' for e in imag)} cm⁻¹]" if imag else ""),
+                f"  Zero-point energy   : {t['ZPE']:.3f} eV",
+                f"  Thermal corr. Hcorr : {t['Hcorr']:.3f} eV",
+                f"  Entropy term  T·S   : {t['TS']:.3f} eV",
+                f"  Gibbs correction    : {t['G_corr']:.3f} eV   (add to E_DFT for G)",
+            ]
+            # E_DFT for a frequency run is the undisplaced reference = first
+            # OSZICAR step, not the last displaced geometry.
+            osz = _oszicar_energies(job_dir / "OSZICAR")
+            e_dft = osz[0] if osz else energy
+            if e_dft is not None:
+                lines.append(f"  G = E_DFT + corr    : {e_dft + t['G_corr']:.3f} eV")
+
     # Cell
     if cell and not is_neb:
         lines += _section(f"CELL  (from {cell['src']})")

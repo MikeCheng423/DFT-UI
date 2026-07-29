@@ -4,6 +4,7 @@ OUTCAR/OSZICAR parsing lives in workflow.py; this module is the structured
 XML path used to enrich summary rows.
 """
 import math
+import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -241,6 +242,66 @@ def aggregate_pdos(pdos: dict, symbols: list[str],
     return {"efermi": pdos["efermi"], "energies": pdos["energies"], "curves": curves}
 
 
+def aggregate_qe_pdos(job_dir: Path, symbols: list[str],
+                      atoms: list[int] | None = None) -> dict | None:
+    """Aggregate projwfc.x atomic files into the UI/CSV PDOS curve schema."""
+    job_dir = Path(job_dir)
+    selected = set(atoms) if atoms else set(range(1, len(symbols) + 1))
+    energies = None
+    sums: dict[tuple[str, str, int], list[float]] = {}
+    pattern = re.compile(r"pdos_atm#(\d+)\([^)]*\)_wfc#\d+\(([spdf])\)")
+    for path in sorted(job_dir.glob("*.pdos_atm#*_wfc#*(*)")):
+        match = pattern.search(path.name)
+        if not match:
+            continue
+        atom, shell = int(match.group(1)), match.group(2)
+        if atom not in selected or atom > len(symbols):
+            continue
+        header = ""
+        rows = []
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if line.lstrip().startswith("#"):
+                header += " " + line.lower()
+                continue
+            try:
+                values = [float(value) for value in line.split()]
+            except ValueError:
+                continue
+            if len(values) >= 2:
+                rows.append(values)
+        if not rows:
+            continue
+        file_energies = [row[0] for row in rows]
+        if energies is None:
+            energies = file_energies
+        elif len(file_energies) != len(energies) or any(
+            abs(a - b) > 1e-7 for a, b in zip(file_energies, energies)
+        ):
+            raise ValueError(f"QE projected-DOS energy grids differ in {job_dir}")
+        nspin = 2 if "ldosdw" in header or "ldosdown" in header else 1
+        for spin in range(nspin):
+            key = (symbols[atom - 1], shell, spin)
+            accumulator = sums.setdefault(key, [0.0] * len(rows))
+            for index, row in enumerate(rows):
+                accumulator[index] += row[1 + spin]
+    if energies is None:
+        return None
+
+    fermi = None
+    pw_out = job_dir / "pw.out"
+    if pw_out.exists():
+        for line in pw_out.read_text(encoding="utf-8", errors="ignore").splitlines():
+            match = re.search(r"fermi energy is\s+([-+0-9.eE]+)", line, re.IGNORECASE)
+            if match:
+                fermi = float(match.group(1))
+    curves = [
+        {"label": f"{element} {shell}", "element": element, "shell": shell,
+         "spin": spin, "values": values}
+        for (element, shell, spin), values in sorted(sums.items())
+    ]
+    return {"efermi": fermi, "energies": energies, "curves": curves}
+
+
 def read_kpoints_labels(kpoints_path: Path) -> list[dict] | None:
     """High-symmetry labels from a line-mode KPOINTS file.
 
@@ -464,6 +525,36 @@ def parse_pw_output(pw_out_path: Path) -> dict | None:
     return summary
 
 
+def parse_qe_neb(job_dir: Path) -> dict | None:
+    """Parse neb.x path data (reaction coordinate, relative energy, error)."""
+    job_dir = Path(job_dir)
+    candidates = [job_dir / "vasp_auto.dat", *sorted(job_dir.glob("*.dat"))]
+    seen: set[Path] = set()
+    for path in candidates:
+        if path in seen or not path.exists() or path.name in {
+            "dos.dat", "bands.dat", "charge-density.dat", "electrostatic-potential.dat"
+        }:
+            continue
+        seen.add(path)
+        images = []
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            try:
+                coordinate, energy, error = map(float, parts[:3])
+            except ValueError:
+                continue
+            images.append({"coordinate": coordinate, "relative_energy_eV": energy,
+                           "error_eV_A": error})
+        if len(images) >= 2:
+            energies = [item["relative_energy_eV"] for item in images]
+            return {"images": images, "barrier_forward_eV": max(energies) - energies[0],
+                    "barrier_reverse_eV": max(energies) - energies[-1],
+                    "delta_eV": energies[-1] - energies[0], "path_file": str(path)}
+    return None
+
+
 def _ry_value(line: str) -> float | None:
     """Extract the Ry number from a '... total energy = -123.45 Ry' line."""
     try:
@@ -652,6 +743,34 @@ def parse_qe_dos(job_dir: Path, sigma: float = 0.05, n_points: int = 600) -> dic
     summed if the run was spin-polarised). ``sigma`` is the Gaussian width in
     eV. None when the job has no QE eigenvalue file.
     """
+    job_dir = Path(job_dir)
+    dos_file = job_dir / "dos.dat"
+    if dos_file.exists():
+        energies: list[float] = []
+        channels: list[list[float]] = []
+        efermi = None
+        for line in dos_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if line.lstrip().startswith("#"):
+                match = re.search(r"Efermi\s*=\s*([-+0-9.Ee]+)", line, re.I)
+                if match:
+                    efermi = float(match.group(1))
+                continue
+            parts = line.split()
+            try:
+                values = [float(value) for value in parts]
+            except ValueError:
+                continue
+            if len(values) < 2:
+                continue
+            energies.append(values[0])
+            density_values = values[1:-1] if len(values) > 2 else values[1:2]
+            while len(channels) < len(density_values):
+                channels.append([])
+            for index, value in enumerate(density_values):
+                channels[index].append(value)
+        if energies and channels:
+            return {"efermi": efermi, "energies": energies, "total": channels}
+
     data = parse_qe_eigenvalues(job_dir)
     if data is None:
         return None

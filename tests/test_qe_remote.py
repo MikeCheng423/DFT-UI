@@ -92,12 +92,14 @@ def test_qe_remote_run_skips_vasp_env_setup(tmp_path):
 
 
 def test_submit_job_remote_qe_script(tmp_path):
-    """Scheduler submission writes the QE submit template; vasp_executable not needed."""
+    """Scheduler submission writes the QE template and its own environment."""
     job = tmp_path / "0001_Si"
     job.mkdir()
     (job / "pw.in").write_text("&CONTROL\n/\n")
     remote = {"host": "cluster.edu", "remote_root": "/scratch",
-              "qe_executable": "/opt/qe/bin/pw.x", "scheduler": "slurm"}
+              "qe_executable": "/opt/qe/bin/pw.x", "scheduler": "slurm",
+              "env_setup": "source /opt/intel/vasp.sh",
+              "qe_env_setup": "module load qe"}
 
     def fake_run(cmd, **kwargs):
         out = "Submitted batch job 7" if "sbatch" in " ".join(cmd) else ""
@@ -110,6 +112,8 @@ def test_submit_job_remote_qe_script(tmp_path):
     assert result["job_id"] == "7"
     script = (job / "submit.sh").read_text()
     assert '"/opt/qe/bin/pw.x" -in pw.in > pw.out' in script
+    assert "module load qe" in script
+    assert "source /opt/intel/vasp.sh" not in script
 
 
 def test_submit_job_detached_qe_config(tmp_path):
