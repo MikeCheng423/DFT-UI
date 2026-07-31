@@ -814,6 +814,10 @@ def parse_existing_job(project_name, mode, case_info):
 
 def should_retry_failed(case_info):
     job_dir = Path(case_info["job_dir"])
+    engine_name = job_engine(job_dir)
+    if engine_name == "qe":
+        return not job_finished(job_dir)
+
     if case_info.get("calculation_type") == "tss":
         image_dirs = _neb_image_dirs(job_dir) if job_dir.exists() else []
         if not image_dirs:
@@ -825,15 +829,6 @@ def should_retry_failed(case_info):
         if not outcars or any(not outcar.exists() for outcar in outcars):
             return True
         return not all(is_converged(outcar) for outcar in outcars)
-
-    engine_name = job_engine(job_dir)
-    if engine_name == "qe":
-        if case_info.get("calculation_type") == "tss":
-            return not job_finished(job_dir)
-        summary = parse_pw_output(job_dir / "pw.out")
-        if not summary:
-            return True
-        return not summary.get("converged", False)
 
     if engine_name == "ase":
         from vasp_auto.ase_engine import parse_ase_output
@@ -1055,22 +1050,27 @@ def _ranks_for_images(job_dir: Path, cpus: int | None) -> int | None:
     return cpus - cpus % images
 
 
-def _seed_poscar_from_contcar(work_dir: Path) -> bool:
-    """Advance POSCAR to the latest geometry VASP wrote (CONTCAR), in place.
+def _resume_calculation_type(job_dir: Path, requested: str | None = None) -> str:
+    """Compatibility wrapper for the calculation-specific resume package."""
+    from vasp_auto.resume import calculation_type
+    return calculation_type(job_dir, requested)
 
-    Copies a non-empty ``CONTCAR`` onto ``POSCAR`` (keeping the previous POSCAR as
-    ``POSCAR.bak``) and returns True. Returns False when no usable CONTCAR exists —
-    the run never started, so the existing POSCAR is already the newest geometry
-    and is left untouched.
-    """
-    contcar = work_dir / "CONTCAR"
-    poscar = work_dir / "POSCAR"
-    if contcar.exists() and contcar.stat().st_size > 0:
-        if poscar.exists():
-            shutil.copy2(poscar, work_dir / "POSCAR.bak")
-        shutil.copy2(contcar, poscar)
-        return True
-    return False
+
+def _seed_poscar_from_contcar(work_dir: Path) -> bool:
+    """Compatibility wrapper retained for callers and older integrations."""
+    from vasp_auto.resume import seed_from_contcar
+    return seed_from_contcar(work_dir)
+
+
+def _previous_qe_ranks(job_dir: Path) -> int | None:
+    pattern = re.compile(r"Number of MPI processes:\s*(\d+)", re.I)
+    for path in (job_dir / "run.log", *sorted(job_dir.glob("*.out"))):
+        if not path.is_file():
+            continue
+        match = pattern.search(path.read_text(encoding="utf-8", errors="ignore"))
+        if match:
+            return int(match.group(1))
+    return None
 
 
 def resume_job(
@@ -1082,16 +1082,18 @@ def resume_job(
     case_name=None,
     calculation_type=None,
     force=False,
+    qe_executable=None,
 ):
-    """Resume an unfinished VASP job *in place*, restarting from its newest CONTCAR.
+    """Resume an unfinished VASP or Quantum ESPRESSO job in place.
 
     This never allocates a new ``NNNN_`` job number: it runs in ``job_dir`` itself
     (e.g. ``jobs/Fe/0004_Fe``) and reuses the INCAR, KPOINTS and POTCAR already
     sitting there — they are taken verbatim, never rebuilt from the original case
-    directory. Only the geometry advances: the latest non-empty CONTCAR becomes the
-    new POSCAR (the previous POSCAR is kept as ``POSCAR.bak``). Any WAVECAR/CHGCAR
-    present are left untouched so VASP can warm-start from them. Results are written
-    back into the same directory.
+    directory. For relax/MD, the latest non-empty CONTCAR becomes POSCAR (the old
+    POSCAR is kept as ``POSCAR.bak``); fixed-geometry calculation types retain
+    POSCAR. Any WAVECAR/CHGCAR present are left untouched so VASP can warm-start.
+    Overwrite-prone partial outputs are first moved to ``resume_history/NNNN``;
+    new results are then written back into the job directory.
 
     NEB/TSS jobs (numeric image subdirs) are resumed per image: each image's
     CONTCAR seeds its POSCAR, and the shared INCAR/KPOINTS/POTCAR at the top level
@@ -1099,7 +1101,7 @@ def resume_job(
 
     Unless ``force`` is set, a job that already converged is left alone (a row is
     returned without re-running). ``calculation_type`` is auto-detected from the
-    directory layout when not given. Returns a summary row, mirroring
+    directory layout and saved inputs when not given. Returns a summary row, mirroring
     :func:`run_one_case`.
     """
     job_dir = Path(job_dir).resolve()
@@ -1107,24 +1109,26 @@ def resume_job(
         raise FileNotFoundError(f"job directory not found: {job_dir}")
 
     engine_name = job_engine(job_dir)
-    if engine_name != "vasp":
+    if engine_name not in {"vasp", "qe"}:
         raise ValueError(
-            f"resume_job supports VASP jobs only; {job_dir.name} looks like a "
+            f"resume_job supports VASP and QE jobs; {job_dir.name} looks like an "
             f"'{engine_name}' job. Re-run it from the case instead."
         )
 
     if case_name is None:
         case_name = _JOB_NUMBER_PREFIX.sub("", job_dir.name) or job_dir.name
 
-    # NEB/TSS jobs keep one CONTCAR per numeric image subdir; a flat job keeps a
-    # single CONTCAR at the top level. Detect the layout when not told.
+    # Recover the real type rather than treating every flat job as SCF. Existing
+    # jobs are inferred from their job.log / INCAR when the caller cannot supply it.
+    calculation_type = _resume_calculation_type(job_dir, calculation_type)
+
+    # NEB/TSS jobs keep one CONTCAR per numeric image subdir.
     image_dirs = _neb_image_dirs(job_dir)
-    is_neb = (calculation_type == "tss") or (
-        calculation_type is None
-        and len(image_dirs) >= 2
+    is_neb = calculation_type in {"neb", "tss"} or (
+        len(image_dirs) >= 2
         and all((d / "POSCAR").exists() or (d / "CONTCAR").exists() for d in image_dirs)
     )
-    calculation_type = "tss" if is_neb else (calculation_type or "scf")
+    calculation_type = "tss" if is_neb else calculation_type
 
     case_info = {
         "case_name": case_name,
@@ -1138,28 +1142,54 @@ def resume_job(
         print(f"Skip      : {case_name} already finished ({job_dir.name})")
         return build_row(project_name, "single", case_info)
 
-    # The inputs must already live in the job dir — we reuse them as-is and never
-    # fall back to the original case directory.
+    if engine_name == "qe":
+        from vasp_auto.resume import (
+            archive_qe_outputs,
+            prepare_qe,
+            qe_can_restart_pw,
+            qe_remaining_stages,
+        )
+
+        stages = qe_remaining_stages(job_dir, force=force)
+        if not stages:
+            print(f"Skip      : {case_name} already finished ({job_dir.name})")
+            return build_row(project_name, "single", case_info)
+        missing = [stage["input"] for stage in stages if not (job_dir / stage["input"]).is_file()]
+        if missing:
+            raise FileNotFoundError(
+                f"cannot resume {job_dir.name}: missing QE input(s) {', '.join(missing)}"
+            )
+        previous_cpus = _previous_qe_ranks(job_dir)
+        if cpus is None and previous_cpus:
+            cpus = previous_cpus
+            print(f"CPUs      : {cpus} (same as the previous QE run)")
+        can_restart = qe_can_restart_pw(job_dir, stages[0])
+        if previous_cpus and cpus and previous_cpus != cpus and can_restart:
+            raise ValueError(
+                f"QE checkpoint restart requires the previous MPI size ({previous_cpus}); "
+                f"got {cpus}. Omit --cpus or use {previous_cpus}."
+            )
+        archive = archive_qe_outputs(job_dir, stages, calculation_type)
+        if archive:
+            print(f"Archived  : previous QE results -> {archive}")
+        allow_restart = can_restart if stages[0].get("program") == "pw.x" else True
+        message = prepare_qe(calculation_type, job_dir, stages[0], allow_restart)
+        print(f"Resume    : {case_name} ({job_dir.name}) — {message}")
+        return_code = run_qe(
+            str(job_dir), str(qe_executable or "pw.x"), cpus=cpus,
+            on_progress=on_progress, stages=stages,
+        )
+        row = build_row(project_name, "single", case_info)
+        row.update(return_code=return_code, resumed=True,
+                   resumed_stages=" -> ".join(stage["program"] for stage in stages))
+        return row
+
+    # VASP inputs must already live in the job dir; never rebuild from the case.
     missing = [name for name in ("INCAR", "KPOINTS", "POTCAR") if not (job_dir / name).exists()]
     if missing:
         raise FileNotFoundError(
             f"cannot resume {job_dir.name}: missing {', '.join(missing)} in the job directory"
         )
-
-    if is_neb:
-        seeded = sum(_seed_poscar_from_contcar(d) for d in image_dirs)
-        print(
-            f"Resume    : {case_name} ({job_dir.name}) — kept INCAR/KPOINTS/POTCAR; "
-            f"advanced {seeded}/{len(image_dirs)} image POSCAR(s) from CONTCAR"
-        )
-    else:
-        if not (job_dir / "POSCAR").exists() and not (job_dir / "CONTCAR").exists():
-            raise FileNotFoundError(
-                f"cannot resume {job_dir.name}: no POSCAR or CONTCAR in the job directory"
-            )
-        seeded = _seed_poscar_from_contcar(job_dir)
-        source = "CONTCAR" if seeded else "existing POSCAR (no CONTCAR yet)"
-        print(f"Resume    : {case_name} ({job_dir.name}) — kept INCAR/KPOINTS/POTCAR; restart from {source}")
 
     if cpus is None:
         cpus = _previous_run_ranks(job_dir)
@@ -1170,10 +1200,11 @@ def resume_job(
         print(f"CPUs      : {adjusted} (rounded to a multiple of IMAGES for NEB)")
         cpus = adjusted
 
-    # Drop the stale summary: while the resume runs the job must not read
-    # "finished", and the rebuilt job.log below reflects the current (possibly
-    # edited) INCAR instead of the previous run's parameters.
-    (job_dir / "job.log").unlink(missing_ok=True)
+    from vasp_auto.resume import archive_previous_outputs, prepare
+    archive = archive_previous_outputs(job_dir, image_dirs, calculation_type)
+    if archive:
+        print(f"Archived  : previous partial results -> {archive}")
+    print(f"Resume    : {case_name} ({job_dir.name}) — {prepare(calculation_type, job_dir, image_dirs)}")
 
     return_code = run_vasp(str(job_dir), str(vasp_executable), cpus=cpus, on_progress=on_progress)
     error_summary = report_vasp_errors(job_dir)

@@ -192,15 +192,16 @@ def parse_args():
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Resume the latest unfinished job in place from its newest CONTCAR, "
+        help="Resume the latest unfinished job in place from its existing inputs, "
+             "advancing to CONTCAR for geometry-moving calculations and "
              "reusing that job directory's own INCAR/KPOINTS/POTCAR (no new job number).",
     )
     parser.add_argument(
         "--resume-job-dir",
         default=None,
         metavar="DIR",
-        help="Resume one explicit job directory in place from its newest CONTCAR "
-             "(reusing its INCAR/KPOINTS/POTCAR). With --remote/--remote-config the "
+        help="Resume one explicit job directory in place from its existing inputs "
+             "(and latest geometry when applicable). With --remote/--remote-config the "
              "directory is a path on that machine and the restart runs there.",
     )
     parser.add_argument(
@@ -1721,29 +1722,46 @@ def _run_resume(args, config) -> bool:
     """
     if not args.resume_job_dir:
         return False
+    calculation_type = str(parse_calc_type(args.calc_type)) if args.calc_type else None
     remote = resolve_remote(args, config)
     job_dir = args.resume_job_dir
     if remote:
+        from vasp_auto.runner import remote_job_engine
         machine = remote.get("name") or remote.get("host")
         mirror = args.resume_local_mirror or None
+        resume_engine = remote_job_engine(remote, job_dir)
+        if resume_engine == "ase":
+            raise ValueError("Remote resume currently supports VASP and QE jobs, not ASE jobs.")
         # Offload machines resume detached (setsid): the restart keeps running
         # after SSH disconnects, so the local host can power off. Other remotes
         # run mpirun synchronously over SSH and pull the results back.
         if resolve_remote_run_mode(remote) == "ssh_detached":
-            from vasp_auto.runner import resume_job_detached
+            if resume_engine == "qe":
+                from vasp_auto.runner import resume_qe_job_detached
+                resume_detached = resume_qe_job_detached
+            else:
+                from vasp_auto.runner import resume_job_detached
+                resume_detached = resume_job_detached
             print(f"Resume    : {job_dir} on {machine} (detached; local host can power off)")
-            result = resume_job_detached(
+            result = resume_detached(
                 remote, job_dir, cpus=args.cpus,
                 local_job_dir=mirror, on_progress=lambda m: print(m),
+                **({"calculation_type": calculation_type} if resume_engine == "qe" else {}),
             )
             print(f"Launched  : {machine} pid {result['pid'] or '?'} -> {result['remote_dir']}")
             print("Fetch later from the Results tab (⬇) or with --parse-only after copying back.")
         else:
-            from vasp_auto.runner import resume_job_remote
-            print(f"Resume    : {job_dir} on {machine} (in place, from newest CONTCAR)")
-            return_code = resume_job_remote(
+            if resume_engine == "qe":
+                from vasp_auto.runner import resume_qe_job_remote
+                resume_remote = resume_qe_job_remote
+            else:
+                from vasp_auto.runner import resume_job_remote
+                resume_remote = resume_job_remote
+            print(f"Resume    : {job_dir} on {machine} (in place, engine={resume_engine})")
+            return_code = resume_remote(
                 remote, job_dir, cpus=args.cpus,
                 on_progress=lambda m: print(m), local_job_dir=mirror,
+                calculation_type=calculation_type,
             )
             print(f"Finished  : remote resume of {job_dir} (rc={return_code})")
     else:
@@ -1751,7 +1769,9 @@ def _run_resume(args, config) -> bool:
         resume_job(
             job_dir,
             vasp_executable=config.get("vasp_executable"),
+            qe_executable=args.qe_executable or config.get("qe_executable"),
             cpus=args.cpus,
+            calculation_type=calculation_type,
         )
         print(f"Finished  : {job_dir}")
     return True
@@ -2367,10 +2387,14 @@ def _process_case(case_dir, args, base_config, mode, project_name, output_root, 
             Path(jobdir_file).write_text(f"{case_info['job_dir']}\n", encoding="utf-8")
         except OSError:
             pass
+    is_tss = case_info["calculation_type"] == "tss"
+    # Keep the requested calculation type through execution, reporting, and
+    # resume. Historically every non-NEB job was silently recorded as SCF.
+    if calc_type and not is_tss:
+        case_info["calculation_type"] = str(calc_type)
     print(f"Case      : {case_dir.name}")
     print(f"Type      : {case_info['calculation_type']}")
 
-    is_tss = case_info["calculation_type"] == "tss"
     converge_requested = args.converge_scf or args.converge_encut or args.converge_sigma
 
     # Resume runs the latest existing job directory in place from its newest
@@ -2385,6 +2409,7 @@ def _process_case(case_dir, args, base_config, mode, project_name, output_root, 
         row = resume_job(
             case_info["job_dir"],
             vasp_executable=config.get("vasp_executable"),
+            qe_executable=args.qe_executable or config.get("qe_executable"),
             cpus=args.cpus,
             project_name=project_name,
             case_name=case_info["case_name"],

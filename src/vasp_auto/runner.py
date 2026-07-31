@@ -240,7 +240,13 @@ def run_vasp(job_dir: str, vasp_executable: str, cpus: int | None = None, on_pro
         return process.wait()
 
 
-def run_qe(job_dir: str, qe_executable: str, cpus: int | None = None, on_progress=None):
+def run_qe(
+    job_dir: str,
+    qe_executable: str,
+    cpus: int | None = None,
+    on_progress=None,
+    stages: list[dict] | None = None,
+):
     """Run Quantum ESPRESSO pw.x locally via mpirun.
 
     pw.x reads ``pw.in`` and writes its results to stdout, which we capture as
@@ -260,7 +266,7 @@ def run_qe(job_dir: str, qe_executable: str, cpus: int | None = None, on_progres
     env["MKL_NUM_THREADS"] = "1"
 
     mpi_launcher = os.environ.get("VASP_AUTO_MPI", "mpirun")
-    stages = _load_qe_stages(job_dir)
+    stages = stages if stages is not None else _load_qe_stages(job_dir)
     completion_marker = job_dir / ".qe_complete"
     completion_marker.unlink(missing_ok=True)
 
@@ -832,6 +838,43 @@ _NEB_RANKS_SH = (
     "else ranks=$(( ranks - ranks % img )); fi; fi"
 )
 
+# Geometry-moving calculations continue from CONTCAR. Static calculations
+# deliberately keep their POSCAR: a frequency/phonon CONTCAR may represent a
+# displaced structure, while DOS/bands/etc. have no geometry to advance.
+_RESUME_GEOMETRY_SH = (
+    'seed() { if [ -s "$1/CONTCAR" ]; then '
+    '[ -f "$1/POSCAR" ] && cp -f "$1/POSCAR" "$1/POSCAR.bak"; '
+    'cp -f "$1/CONTCAR" "$1/POSCAR"; fi; }; '
+    "ibrion=$(grep -aiE '^[[:space:]]*IBRION[[:space:]]*=' INCAR 2>/dev/null "
+    "| grep -oE '[-]?[0-9]+' | head -1); "
+    "nsw=$(grep -aiE '^[[:space:]]*NSW[[:space:]]*=' INCAR 2>/dev/null "
+    "| grep -oE '[0-9]+' | head -1); "
+    'case "$ibrion" in 0|1|2|3) [ "${nsw:-0}" -gt 0 ] && seed . ;; esac; '
+    'for d in [0-9][0-9]; do [ -d "$d" ] && seed "$d"; done'
+)
+
+_RESUME_CHECKPOINT_SH = (
+    'if [ "$ibrion" = 6 ] && [ -s vaspcheckfd.h5 ]; then '
+    "sed -i -E '/^[[:space:]]*CHECKPOINT_FD[[:space:]]*=/Id' INCAR; "
+    "printf '\\nCHECKPOINT_FD = CONTINUE\\n' >> INCAR; fi"
+)
+
+_RESUME_ARCHIVE_SH = (
+    "outputs='job.log run.log OUTCAR OSZICAR vasprun.xml vaspout.h5 XDATCAR DOSCAR "
+    "EIGENVAL PROCAR PCDAT LOCPOT CHG ELFCAR DYNMAT REPORT IBZKPT PARCHG WAVEDER'; "
+    "found=0; for d in . [0-9][0-9]; do [ -d \"$d\" ] || continue; "
+    "for f in $outputs; do [ -f \"$d/$f\" ] && found=1; done; done; "
+    "if [ \"$found\" = 1 ]; then n=1; "
+    "while [ -e \"resume_history/$(printf '%04d' \"$n\")\" ]; do n=$((n+1)); done; "
+    "archive=resume_history/$(printf '%04d' \"$n\"); "
+    "for d in . [0-9][0-9]; do [ -d \"$d\" ] || continue; "
+    "rel=${d#./}; [ \"$rel\" = . ] && rel=''; target=\"$archive/$rel\"; "
+    "for f in INCAR KPOINTS POSCAR; do if [ -f \"$d/$f\" ]; then "
+    "mkdir -p \"$target\"; cp -p \"$d/$f\" \"$target/$f\"; fi; done; "
+    "for f in $outputs; do if [ -f \"$d/$f\" ]; then "
+    "mkdir -p \"$target\"; mv \"$d/$f\" \"$target/$f\"; fi; done; done; fi"
+)
+
 
 def resume_job_remote(
     remote: dict,
@@ -840,15 +883,17 @@ def resume_job_remote(
     on_progress=None,
     local_job_dir: str | None = None,
     fetch_heavy: bool = True,
+    calculation_type: str | None = None,
 ) -> int:
     """Resume an unfinished VASP job *in place* on a remote machine.
 
     The remote counterpart of :func:`vasp_auto.workflow.resume_job`. Unlike
     :func:`run_vasp_remote`, nothing is shipped to the remote: the job already
     lives there, so its own INCAR/KPOINTS/POTCAR are reused verbatim. In one SSH
-    session it advances POSCAR to the latest geometry (CONTCAR -> POSCAR, keeping
-    POSCAR.bak) for the job and for every NEB image subdir, then runs ``mpirun``
-    in that directory (sourcing the machine's ``env_setup`` first). When
+    session it advances POSCAR to the latest geometry for relax/MD and every NEB
+    image, while fixed-geometry calculations retain POSCAR. Partial outputs are
+    archived under ``resume_history/NNNN`` before ``mpirun`` runs in that directory
+    (sourcing the machine's ``env_setup`` first). When
     ``local_job_dir`` is given the results are copied back so the local parsers
     and viewers work. Returns the VASP exit code, mirroring :func:`run_vasp_remote`.
 
@@ -865,31 +910,23 @@ def resume_job_remote(
     remote_job_dir = remote_job_dir.rstrip("/")
     quoted_dir = shlex.quote(remote_job_dir)
 
-    # One non-interactive shell: set up the toolchain, advance POSCAR to the
-    # newest CONTCAR (the job itself, plus each NEB image subdir, keeping the
-    # previous POSCAR as POSCAR.bak), then launch mpirun in place.
+    # One non-interactive shell: set up the toolchain, advance moving geometries,
+    # then launch mpirun in place.
     state_file = f"{remote_job_dir}/.vasp_auto_state"
     parts = ["unset DISPLAY", *_remote_slot_lines(remote, state_file)]
     if env_setup:
         parts.append(f"{{ {env_setup} ; }} >/dev/null 2>&1 || true")
     parts.append("ulimit -s unlimited 2>/dev/null || true")
     parts.append(f"cd {quoted_dir}")
-    parts.append(
-        'seed() { if [ -s "$1/CONTCAR" ]; then '
-        '[ -f "$1/POSCAR" ] && cp -f "$1/POSCAR" "$1/POSCAR.bak"; '
-        'cp -f "$1/CONTCAR" "$1/POSCAR"; fi; }'
-    )
-    parts.append("seed .")
-    parts.append('for d in [0-9][0-9]; do [ -d "$d" ] && seed "$d"; done')
-    # Stale summary from the previous run: it would mark the job "finished" while
-    # the resume runs, and its parameters no longer match the (possibly edited) INCAR.
-    parts.append("rm -f job.log")
     if cpus is not None:
         parts.append(f"ranks={int(cpus)}")
     else:
         # No explicit count: reuse the rank count of the previous run (OUTCAR).
         parts.append(_RESUME_RANKS_SH)
     parts.append(_NEB_RANKS_SH)
+    parts.append(_RESUME_ARCHIVE_SH)
+    parts.append(_RESUME_GEOMETRY_SH)
+    parts.append(_RESUME_CHECKPOINT_SH)
     parts.append(f'mpirun -np "${{ranks:-1}}" {shlex.quote(exe)} > run.log 2>&1')
     remote_script = "\n".join(parts)
 
@@ -913,6 +950,7 @@ def resume_job_remote(
         if (Path(local_job_dir) / "OUTCAR").exists():
             from vasp_auto.job_log import write_job_log
             write_job_log(Path(local_job_dir), Path(local_job_dir).name,
+                          calc_type=calculation_type,
                           return_code=return_code)
         marker = {
             "machine": machine,
@@ -937,8 +975,8 @@ def resume_job_detached(
     """Resume an unfinished VASP job *in place* on a remote machine, detached.
 
     The power-off-safe counterpart of :func:`resume_job_remote`: it advances
-    POSCAR to the newest CONTCAR (the job itself plus every NEB image subdir,
-    keeping POSCAR.bak) and re-runs ``mpirun`` in the remote job directory under
+    moving relax/MD/NEB geometries from CONTCAR, preserves static geometries,
+    archives partial outputs, and re-runs ``mpirun`` in the remote job directory under
     ``setsid``, recording the PID and return code in a control dir so the run can
     be polled (and the local host powered off) after SSH disconnects. Nothing is
     shipped — the remote job's own INCAR/KPOINTS/POTCAR are reused.
@@ -975,8 +1013,8 @@ def resume_job_detached(
         "remote mkdir control",
     )
 
-    # run.sh: seed POSCAR<-CONTCAR (the job + each NEB image), then mpirun in the
-    # job dir. The PID/rc files make it poll-able after the launcher disconnects.
+    # run.sh: advance moving geometries, then mpirun in the job dir. The PID/rc
+    # files make it poll-able after the launcher disconnects.
     script = "\n".join([
         "#!/bin/bash",
         f"echo $$ > {shlex.quote(pid_f)}",
@@ -985,15 +1023,12 @@ def resume_job_detached(
         f"{{ {env_line} ; }} >/dev/null 2>&1 || true",
         "ulimit -s unlimited 2>/dev/null || true",
         f"cd {quoted_job}",
-        'seed() { if [ -s "$1/CONTCAR" ]; then '
-        '[ -f "$1/POSCAR" ] && cp -f "$1/POSCAR" "$1/POSCAR.bak"; '
-        'cp -f "$1/CONTCAR" "$1/POSCAR"; fi; }',
-        "seed .",
-        'for d in [0-9][0-9]; do [ -d "$d" ] && seed "$d"; done',
-        "rm -f job.log",
         # No explicit count: reuse the rank count of the previous run (OUTCAR).
         f"ranks={int(cpus)}" if cpus is not None else _RESUME_RANKS_SH,
         _NEB_RANKS_SH,
+        _RESUME_ARCHIVE_SH,
+        _RESUME_GEOMETRY_SH,
+        _RESUME_CHECKPOINT_SH,
         f'mpirun -np "${{ranks:-1}}" {shlex.quote(exe)} > run.log 2>&1',
         f"echo $? > {shlex.quote(rc_f)}",
         "",
@@ -1030,6 +1065,150 @@ def resume_job_detached(
         # Same as the remote side: the stale summary must not mark the mirror
         # "finished"; the fetch after the run rebuilds it from the resumed INCAR.
         (Path(local_job_dir) / "job.log").unlink(missing_ok=True)
+    return result
+
+
+def _remote_qe_resume_command(
+    remote: dict,
+    remote_job_dir: str,
+    cpus: int | None,
+    calculation_type: str | None,
+) -> str:
+    paths = _remote_engine_paths(remote)
+    exe = _remote_exe(remote, "qe")
+    args = [
+        paths["vasp_auto"], "--resume-job-dir", remote_job_dir,
+        "--engine", "qe", "--qe-executable", exe,
+    ]
+    if cpus is not None:
+        args += ["-n", str(cpus)]
+    if calculation_type:
+        args += ["--calc-type", calculation_type]
+    command = " ".join(shlex.quote(arg) for arg in args)
+    env_setup = _remote_env_setup(remote, "qe") or "true"
+    return (
+        f"cd {shlex.quote(paths['root'])}; "
+        f"export VASP_AUTO_ROOT={shlex.quote(paths['root'])}; "
+        f"{{ {env_setup} ; }} >/dev/null 2>&1 || true; "
+        f"{command}; rc=$?; "
+        f"[ -f {shlex.quote(remote_job_dir + '/.qe_complete')} ] || rc=1; (exit $rc)"
+    )
+
+
+def _remote_qe_resume_installed(remote: dict) -> bool:
+    if not remote_engine_installed(remote):
+        return False
+    paths = _remote_engine_paths(remote)
+    try:
+        result = subprocess.run(
+            ["ssh", "-x", *_ssh_options(remote), _ssh_target(remote),
+             f"{shlex.quote(paths['venv'] + '/bin/python')} -c "
+             + shlex.quote("from vasp_auto.resume import prepare_qe")],
+            capture_output=True, timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def remote_job_engine(remote: dict, remote_job_dir: str) -> str:
+    """Read a remote job's engine marker, defaulting to VASP."""
+    result = subprocess.run(
+        ["ssh", "-x", *_ssh_options(remote), _ssh_target(remote),
+         f"cat {shlex.quote(remote_job_dir.rstrip('/') + '/.engine')} 2>/dev/null || echo vasp"],
+        capture_output=True, encoding="utf-8", errors="replace",
+    )
+    engine = (result.stdout.strip().splitlines() or ["vasp"])[-1].strip().lower()
+    return engine if engine in {"vasp", "qe", "ase"} else "vasp"
+
+
+def resume_qe_job_remote(
+    remote: dict,
+    remote_job_dir: str,
+    cpus: int | None = None,
+    on_progress=None,
+    local_job_dir: str | None = None,
+    calculation_type: str | None = None,
+) -> int:
+    """Run the calculation-specific QE resume dispatcher over SSH."""
+    if not remote_job_dir:
+        raise ValueError("resume_qe_job_remote needs the remote QE job directory")
+    machine = remote.get("name") or remote.get("host")
+    if not _remote_qe_resume_installed(remote):
+        if on_progress:
+            on_progress(f"[remote] installing the QE resume engine on {machine} (one-time)…")
+        setup = setup_remote_engine(remote, on_progress=on_progress)
+        if not setup.get("ok"):
+            raise RuntimeError(f"could not install remote resume engine: {setup.get('detail', '')}")
+    if on_progress:
+        on_progress(f"[remote] resuming QE on {machine}: {remote_job_dir}")
+    result = subprocess.run(
+        ["ssh", "-x", *_ssh_options(remote), _ssh_target(remote),
+         f"bash -lc {shlex.quote(_remote_qe_resume_command(remote, remote_job_dir, cpus, calculation_type))}"],
+        capture_output=True, encoding="utf-8", errors="replace",
+    )
+    if on_progress and (result.stdout or result.stderr):
+        on_progress((result.stdout + result.stderr).rstrip())
+    if local_job_dir:
+        try:
+            fetch_remote_results(remote, remote_job_dir, str(local_job_dir), include_heavy=True)
+        except (RuntimeError, OSError):
+            pass
+    return result.returncode
+
+
+def resume_qe_job_detached(
+    remote: dict,
+    remote_job_dir: str,
+    cpus: int | None = None,
+    local_job_dir: str | None = None,
+    on_progress=None,
+    calculation_type: str | None = None,
+) -> dict:
+    """Launch the same QE resume dispatcher remotely under ``setsid``."""
+    if not remote_job_dir:
+        raise ValueError("resume_qe_job_detached needs the remote QE job directory")
+    machine = remote.get("name") or remote.get("host")
+    if not _remote_qe_resume_installed(remote):
+        if on_progress:
+            on_progress(f"[remote] installing the QE resume engine on {machine} (one-time)…")
+        setup = setup_remote_engine(remote, on_progress=on_progress)
+        if not setup.get("ok"):
+            raise RuntimeError(f"could not install remote resume engine: {setup.get('detail', '')}")
+
+    paths = _remote_engine_paths(remote)
+    control_dir = f"{paths['runs']}/{remote_job_dir.rstrip('/').rsplit('/', 1)[-1]}"
+    target = _ssh_target(remote)
+    ssh_opts = _ssh_options(remote)
+    pid_f, rc_f = f"{control_dir}/pid", f"{control_dir}/rc"
+    command = _remote_qe_resume_command(remote, remote_job_dir.rstrip("/"), cpus, calculation_type)
+    script = "\n".join([
+        "#!/bin/bash", f"echo $$ > {shlex.quote(pid_f)}", command,
+        f"echo $? > {shlex.quote(rc_f)}", "",
+    ])
+    _run_checked(["ssh", "-x", *ssh_opts, target, f"mkdir -p {shlex.quote(control_dir)}"],
+                 "remote mkdir QE resume control")
+    with tempfile.TemporaryDirectory() as tmp:
+        sh = Path(tmp) / "run.sh"
+        sh.write_text(script, encoding="utf-8")
+        _ship_file(sh, target, f"{control_dir}/run.sh", remote, ssh_opts)
+    launch = (
+        f"rm -f {shlex.quote(rc_f)} {shlex.quote(pid_f)}; "
+        f"setsid bash {shlex.quote(control_dir + '/run.sh')} </dev/null >/dev/null 2>&1 & "
+        f"sleep 1; cat {shlex.quote(pid_f)} 2>/dev/null"
+    )
+    out = _run_checked(["ssh", "-x", *ssh_opts, target, launch], "remote QE resume launch")
+    pid = out.strip().splitlines()[-1].strip() if out.strip() else ""
+    result = {
+        "machine": machine, "host": remote.get("host"), "remote_dir": remote_job_dir,
+        "control_dir": control_dir, "pid": pid, "mode": "ssh_detached", "scheduler": "ssh",
+    }
+    if local_job_dir:
+        local = Path(local_job_dir)
+        local.mkdir(parents=True, exist_ok=True)
+        (local / ".remote.json").write_text(json.dumps({
+            **result, "resumed_at": datetime.now().isoformat(timespec="seconds"),
+        }, indent=2), encoding="utf-8")
     return result
 
 
