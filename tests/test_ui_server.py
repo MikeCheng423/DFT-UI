@@ -103,6 +103,18 @@ def test_build_cli_args():
     assert "--kmesh" in args and "--workflow" in args
 
 
+def test_build_cli_args_prepare_dest():
+    body = {"target": "/x/case", "mode": "prepare", "remote": "tlclab",
+            "prepare_dir": "/home/u/vasp/inputs"}
+    args = ui_server.build_cli_args(body)
+    assert "--prepare" in args
+    assert args[args.index("--prepare-dest") + 1] == "/home/u/vasp/inputs"
+    # Local prepare (no machine) keeps the job in the local jobs root.
+    assert "--prepare-dest" not in ui_server.build_cli_args({**body, "remote": None})
+    # The folder only applies to prepare, never to a real run.
+    assert "--prepare-dest" not in ui_server.build_cli_args({**body, "mode": "run"})
+
+
 def test_result_calc_type_detects_convergence(tmp_path):
     # A convergence scan leaves a scf_convergence/ subdir -> type "convergence".
     conv = tmp_path / "H2O"
@@ -241,6 +253,62 @@ def test_existing_folder_ui_enforces_machine_then_folder():
     assert html.index('id="proj-remote"') < html.index('id="proj-dir"')
     assert 'id="proj-dir" placeholder="Select a machine first"' in html
     assert 'source: "existing_folder"' in html
+
+
+def test_property_analysis_ui_supports_remote_jobs():
+    html = (ui_server.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    assert 'onclick="slotPick(\'ana-dir\')"' in html
+    assert 'id="ana-dir-m" class="slot-machine"' in html
+    assert 'slotObj("ana-dir").machine' in html
+    assert "showAnaTool('ana-thermo')" in html
+
+
+def test_imported_structure_runs_without_explicit_save():
+    """Preview, Calculate, and Workflow all materialize an editor-only import
+    into a case; the Save button is only for choosing the folder explicitly."""
+    html = (ui_server.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    ensure = html[html.index("async function ensureCase()"):
+                  html.index("/* Chemical-formula case name", html.index("async function ensureCase()"))]
+    assert "ED && (ED.dirty || !ED.savedPath)" in ensure
+    assert "await writeStructure" in ensure
+    into_editor = html[html.index("async function intoEditor("):
+                       html.index("async function built(")]
+    assert "clearWork();" in into_editor  # a new import cannot retain the previous case
+    for function in ("async function doPreview()", "async function startRun(",
+                     "async function runWorkflow()"):
+        body = html[html.index(function):]
+        assert "await ensureCase()" in body[:1500]
+
+
+def test_every_folder_picker_can_choose_its_machine():
+    """One picker, one rule: 📁 offers a machine dropdown and writes the choice
+    back into the field's own machine control, so a path never outlives the
+    machine it came from. Only the slab source opts out (built locally)."""
+    html = (ui_server.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    # the dropdown is on by default now, not opt-in
+    assert "chooseMachine: opts.chooseMachine !== false" in html
+    assert '[targetId + "-machine", targetId + "-m"].find(id => $(id))' in html
+    # the machine lands before the path (some handlers clear the path field)
+    assert html.index("pickerApplyMachine();") < html.index("if (PICKER.onchoose)")
+    # fields whose machine control is not named after them are wired explicitly
+    for target, sel in (("sv-loc", "wc-machine"), ("i-path", "wc-machine"),
+                        ("cb-path", "wc-machine"), ("proj-dir", "proj-remote"),
+                        ("r-root", "r-machine")):
+        assert f'openPicker("{target}", {{ machineSel: "{sel}"' in html \
+            or f'openPicker("{target}", {{ files: true, machineSel: "{sel}"' in html
+    assert "openPicker('s-source',{files:true,chooseMachine:false})" in html
+
+
+def test_calculate_tab_neb_endpoints_carry_their_machine():
+    """The Calculate-tab NEB endpoints get the same per-endpoint machine
+    dropdowns as the Build-tab card, and api_build reads them (endpoint_machine
+    beats the working machine)."""
+    html = (ui_server.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    for eid in ("cn-init-machine", "cn-final-machine", "nb-init-machine", "nb-final-machine"):
+        assert f'id="{eid}" class="slot-machine ep-machine"' in html
+    assert 'initial_machine: initM ? initM.value : null' in html
+    server_src = Path(ui_server.__file__).read_text(encoding="utf-8")
+    assert 'body.get(f"{endpoint}_machine") or body.get("machine")' in server_src
 
 
 def test_working_machine_direct_roundtrip(tmp_path, monkeypatch, scf_case):

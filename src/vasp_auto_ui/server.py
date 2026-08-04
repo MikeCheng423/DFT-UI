@@ -1943,6 +1943,9 @@ def build_cli_args(body: dict) -> list[str]:
     mode = body.get("mode", "run")
     if mode == "prepare":
         args.append("--prepare")
+        # Folder on the chosen machine to put the prepared job folder in.
+        if body.get("prepare_dir") and body.get("remote"):
+            args += ["--prepare-dest", str(body["prepare_dir"])]
     elif mode == "dry":
         args.append("--dry-run")
     elif mode == "parse":

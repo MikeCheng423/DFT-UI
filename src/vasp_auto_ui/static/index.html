@@ -184,11 +184,12 @@
   <nav>
     <button data-tab="build" class="active" title="Create or import crystal structures">1 · Build</button>
     <button data-tab="calc" title="Choose a calculation type and run it">2 · Calculate</button>
-    <button data-tab="workflow" title="Chain steps: relax → scf → dos">3 · Workflow</button>
-    <button data-tab="results" title="Energies, band gaps, convergence">4 · Results</button>
-    <button data-tab="remote" title="Manage remote machines to run calculations on">5 · Remote</button>
-    <button data-tab="running" title="What is running right now on every machine">6 · Running</button>
-    <button data-tab="analysis" title="Derive physical properties from finished jobs (local or remote, VASP or QE)">7 · Analysis</button>
+    <button data-tab="neb" title="Transition states: build a NEB case from two endpoints and run it">3 · NEB</button>
+    <button data-tab="workflow" title="Chain steps: relax → scf → dos">4 · Workflow</button>
+    <button data-tab="results" title="Energies, band gaps, convergence">5 · Results</button>
+    <button data-tab="remote" title="Manage remote machines to run calculations on">6 · Remote</button>
+    <button data-tab="running" title="What is running right now on every machine">7 · Running</button>
+    <button data-tab="analysis" title="Derive physical properties from finished jobs (local or remote, VASP or QE)">8 · Analysis</button>
   </nav>
   <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
     <span id="exeinfo" style="color:var(--dim);font-size:12px"></span>
@@ -318,7 +319,7 @@
       <div class="card buildfn" id="fn-slab" style="display:none">
         <h3>🪨 Surface slab</h3>
         <p class="sub">Cuts a surface from a bulk crystal and adds vacuum above it. The source can also be a saved case POSCAR (e.g. a TiO₂ prototype) — use 📁.</p>
-        <span class="inline"><label>element or POSCAR path</label><input id="s-source" value="Al"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('s-source',{files:true})" title="Browse for a POSCAR/structure file">📁</button></span>
+        <span class="inline"><label>element or POSCAR path</label><input id="s-source" value="Al"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('s-source',{files:true,chooseMachine:false})" title="Browse for a POSCAR/structure file on this computer — the slab builder reads it locally (import a remote file first)">📁</button></span>
         <span class="inline"><label>miller h k l</label><input id="s-miller" value="1 1 1" style="width:70px" title="Surface orientation, e.g. 1 1 1 or 1 0 0"></span>
         <span class="inline"><label>layers</label><input id="s-layers" value="4" style="width:55px" title="Number of atomic layers in the slab"></span>
         <span class="inline"><label>vacuum (Å)</label><input id="s-vacuum" value="12" style="width:55px" title="Empty space above the surface; 12 Å is a safe default"></span>
@@ -344,8 +345,8 @@
       </div>
       <div class="card buildfn" id="fn-import" style="display:none">
         <h3>📥 Import a structure file</h3>
-        <p class="sub">CIF, XYZ, POSCAR and most other formats. The file is read from the <b>working machine</b> chosen at the top — browse pulls it over SSH for a remote.</p>
-        <span class="inline wide"><label>file path (cif/xyz/…)</label><input id="i-path" placeholder="/path/to/structure.cif"><button class="iconbtn" style="padding:3px 7px" onclick="importBrowse()" title="Browse for a structure file on the working machine">📁</button></span>
+        <p class="sub">CIF, XYZ, POSCAR and most other formats. The file is read from the <b>working machine</b> chosen at the top — browse pulls it over SSH for a remote. 📁 can browse any machine; picking one there switches the working machine to it.</p>
+        <span class="inline wide"><label>file path (cif/xyz/…)</label><input id="i-path" placeholder="/path/to/structure.cif"><button class="iconbtn" style="padding:3px 7px" onclick="importBrowse()" title="Browse for a structure file on any machine — the one you pick becomes the working machine">📁</button></span>
         <button class="act" onclick="importFile()">Import → editor</button>
       </div>
       <div class="card buildfn" id="fn-combine" style="display:none">
@@ -368,10 +369,10 @@
       <div class="card buildfn" id="fn-tss" style="display:none">
         <h3>🛣 Transition state (NEB) case</h3>
         <p class="sub">Give initial and final structures (case folders, finished job folders, or POSCAR files) — each can live on a remote machine; a folder's relaxed <b>CONTCAR</b> is preferred over its POSCAR. Images are interpolated when run with the <b>neb</b> type.</p>
-        <span class="inline wide"><label>initial structure</label><input id="nb-init" placeholder="inputs/state_A"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('nb-init')" title="Browse for the initial-state case">📁</button></span>
-        <span class="inline"><label>on machine</label><select id="nb-init-machine" title="Machine the initial structure lives on"></select></span>
-        <span class="inline wide"><label>final structure</label><input id="nb-final" placeholder="inputs/state_B"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('nb-final')" title="Browse for the final-state case">📁</button></span>
-        <span class="inline"><label>on machine</label><select id="nb-final-machine" title="Machine the final structure lives on"></select></span>
+        <span class="inline wide"><label>initial structure</label><input id="nb-init" placeholder="inputs/state_A"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('nb-init')" title="Browse for the initial-state case, on any machine">📁</button></span>
+        <span class="inline"><label>on machine</label><select id="nb-init-machine" class="slot-machine ep-machine" title="Machine the initial structure lives on"></select></span>
+        <span class="inline wide"><label>final structure</label><input id="nb-final" placeholder="inputs/state_B"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('nb-final')" title="Browse for the final-state case, on any machine">📁</button></span>
+        <span class="inline"><label>on machine</label><select id="nb-final-machine" class="slot-machine ep-machine" title="Machine the final structure lives on"></select></span>
         <span class="inline"><label>case name</label><input id="nb-name" placeholder="A_to_B"></span>
         <br><button class="act" onclick="buildTss()">Create NEB case</button>
       </div>
@@ -437,7 +438,7 @@
         <h3>💾 Save structure <span class="badge warn" id="dirtybadge" style="display:none">unsaved changes</span></h3>
         <p class="sub">Saving is optional — running a calculation auto-saves the structure to a fresh case folder on the <b>working machine</b>. Use Save to pick the name and folder yourself; a name that already exists gets a _2/_3 suffix instead of overwriting. <span id="sv-machine-hint"></span></p>
         <span class="inline wide"><label>case name (a folder) or absolute path</label><input id="sv-name" placeholder="my_structure"></span>
-        <span class="inline wide"><label>location (folder to create it in — blank = default cases folder)</label><input id="sv-loc" placeholder="(default cases folder)"><button class="iconbtn" style="padding:3px 7px" onclick="saveBrowse()" title="Browse for the folder to create the case in, on the working machine">📁</button></span>
+        <span class="inline wide"><label>location (folder to create it in — blank = default cases folder)</label><input id="sv-loc" placeholder="(default cases folder)"><button class="iconbtn" style="padding:3px 7px" onclick="saveBrowse()" title="Browse for the folder to create the case in, on any machine — the one you pick becomes the working machine">📁</button></span>
         <br><button class="act" onclick="saveStructure()">💾 Save as case…</button>
         <button class="ghost" id="sv-over" style="display:none" onclick="saveStructure(true)">Save over original</button>
       </div>
@@ -532,14 +533,7 @@
         <h3>What do you want to calculate?</h3>
         <p class="sub">Each type fills in a tested INCAR template for you. If the case folder has its own INCAR, that one wins.</p>
         <div id="ctypes"></div>
-        <div id="nebendpoints" style="display:none">
-          <p class="sub">A NEB run needs a case with both endpoints. Pick them here (case folders or POSCAR files) — creating the case makes it the working case.</p>
-          <span class="inline wide"><label>initial structure</label><input id="cn-init" placeholder="inputs/state_A"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('cn-init')" title="Browse for the initial-state case">📁</button></span>
-          <span class="inline wide"><label>final structure</label><input id="cn-final" placeholder="inputs/state_B"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('cn-final')" title="Browse for the final-state case">📁</button></span>
-          <span class="inline"><label>case name</label><input id="cn-name" placeholder="A_to_B"></span>
-          <br><button class="act" onclick="buildTss('cn')">Create NEB case</button>
-        </div>
-        <span class="inline" id="nebimgs" style="display:none"><label>NEB images</label><input id="c-neb" placeholder="5" title="Number of intermediate images between initial and final"></span>
+        <p class="sub">Transition states (NEB) have their own tab — <b>3 · NEB</b>.</p>
       </div>
       <div class="card">
         <h3>Spin &amp; magnetism</h3>
@@ -589,7 +583,9 @@
       <div class="card">
         <h3>Go</h3>
         <button class="ghost" onclick="doPreview()" title="Show the INCAR/KPOINTS/POTCAR that would be used — writes nothing">👁 Preview inputs</button>
-        <button class="ghost" onclick="startRun('prepare')" title="Write the job folder but don't start VASP">📁 Prepare only</button>
+        <span class="inline"><label>prepare into folder</label>
+          <select id="c-prepdir" title="Folder on the machine selected above that 📁 Prepare only writes the job folder into"></select></span>
+        <button class="ghost" onclick="startRun('prepare')" title="Write the job folder on the selected machine but don't start VASP">📁 Prepare only</button>
         <button class="act"  onclick="startRun('run')" title="Prepare and run VASP now">▶ Run</button>
         <button class="ghost" onclick="startResume()" title="Resume the latest unfinished job in place from its newest CONTCAR — keeps that job's INCAR/KPOINTS/POTCAR and its job number">⏯ Resume</button>
         <button class="ghost" onclick="startRun('parse')" title="Re-read finished output files and rebuild the Excel summary">📊 Parse results</button>
@@ -616,6 +612,77 @@
         <p class="sub">Click a job chip to follow its log. ✕ stops a running job.</p>
         <div id="jobs"></div>
         <pre class="console" id="console">No job running yet — press ▶ Run.</pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================ NEB ============================ -->
+<div class="tab" id="tab-neb">
+  <div class="row">
+    <div class="grow">
+      <div class="card">
+        <h3>NEB case</h3>
+        <div id="nebendpoints">
+          <p class="sub">A NEB run needs a case with both endpoints. Pick them here (case folders or POSCAR files) — creating the case makes it the working case. Each endpoint can sit on a different machine: 📁 browses whichever machine you pick in the picker.</p>
+          <span class="inline wide"><label>initial structure</label><input id="cn-init" placeholder="inputs/state_A" onchange="previewEndpoint('init')"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('cn-init',{onpick:()=>previewEndpoint('init')})" title="Browse for the initial-state case, on any machine">📁</button></span>
+          <span class="inline"><label>on machine</label><select id="cn-init-machine" class="slot-machine ep-machine" onchange="previewEndpoint('init')" title="Machine the initial structure lives on"></select></span>
+          <span class="inline wide"><label>final structure</label><input id="cn-final" placeholder="inputs/state_B" onchange="previewEndpoint('final')"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('cn-final',{onpick:()=>previewEndpoint('final')})" title="Browse for the final-state case, on any machine">📁</button></span>
+          <span class="inline"><label>on machine</label><select id="cn-final-machine" class="slot-machine ep-machine" onchange="previewEndpoint('final')" title="Machine the final structure lives on"></select></span>
+          <span class="inline"><label>case name</label><input id="cn-name" placeholder="A_to_B"></span>
+          <br><button class="act" onclick="buildTss('cn')">Create NEB case</button>
+        </div>
+      </div>
+      <div class="card">
+        <h3>Endpoints</h3>
+        <p class="sub">Side view (a–c plane) and POSCAR of each endpoint, read from the machine it lives on.</p>
+        <div class="row">
+          <div class="grow">
+            <b style="font-size:13px">Initial structure</b>
+            <div><canvas id="ep-init-canvas" width="340" height="300" style="border:1px solid var(--line);border-radius:6px;max-width:100%"></canvas></div>
+            <div class="sub" id="ep-init-info">no structure yet</div>
+            <textarea id="ep-init-poscar" rows="12" spellcheck="false" readonly style="font-size:11.5px"></textarea>
+          </div>
+          <div class="grow">
+            <b style="font-size:13px">Final structure</b>
+            <div><canvas id="ep-final-canvas" width="340" height="300" style="border:1px solid var(--line);border-radius:6px;max-width:100%"></canvas></div>
+            <div class="sub" id="ep-final-info">no structure yet</div>
+            <textarea id="ep-final-poscar" rows="12" spellcheck="false" readonly style="font-size:11.5px"></textarea>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>INCAR editor <span style="text-transform:none">(optional)</span></h3>
+        <p class="sub">The NEB template covers the common case. A saved case INCAR overrides it.</p>
+        <button class="ghost" onclick="loadIncar(false,'neb-incar','neb')">Load case INCAR</button>
+        <button class="ghost" onclick="loadIncar(true,'neb-incar','neb')">Load NEB template</button>
+        <button class="act" onclick="saveIncar('neb-incar')">Save to case</button>
+        <textarea id="neb-incar" rows="12" spellcheck="false"></textarea>
+      </div>
+      <div class="card">
+        <h3>K-points</h3>
+        <span class="inline"><label>k-points</label>
+          <select id="neb-k-mode" onchange="nebKModeChanged()" title="How to generate the KPOINTS file">
+            <option value="">case default</option><option value="gamma">Γ-centred mesh</option>
+            <option value="mp">Monkhorst-Pack</option><option value="spacing">by density</option>
+          </select></span>
+        <span class="inline nkf nkf-mesh" style="display:none"><label>mesh</label><input id="neb-k-mesh" placeholder="3x3x1" title="Subdivisions along each reciprocal axis"><span class="hint">denser = more accurate, slower</span></span>
+        <span class="inline nkf nkf-spacing" style="display:none"><label>spacing (1/Å)</label><input id="neb-k-spacing" placeholder="0.03" title="Maximum distance between k-points; mesh derived from the lattice"></span>
+      </div>
+    </div>
+    <div class="grow">
+      <div class="card">
+        <h3>Go</h3>
+        <span class="inline"><label>NEB images</label><input id="c-neb" placeholder="5" title="Number of intermediate images between initial and final"></span>
+        <span class="inline"><label>CPU cores (MPI ranks)</label><input id="neb-cpus" placeholder="1" title="Passed to mpirun -np"></span>
+        <span class="inline"><label>run on machine</label>
+          <select id="neb-remote" title="This computer or a saved remote machine (managed in the Remote tab)">
+            <option value="local">💻 Local — this computer</option>
+          </select></span>
+        <br>
+        <button class="ghost" onclick="nebRun('prepare')" title="Write the job folder on the selected machine but don't start VASP">📁 Prepare only</button>
+        <button class="act" onclick="nebRun('run')" title="Interpolate the images and run the band now">▶ Run</button>
+        <pre class="console" id="neb-console">No NEB running yet — press ▶ Run.</pre>
       </div>
     </div>
   </div>
@@ -683,7 +750,7 @@
     <div class="resbar">
       <span class="inline"><label>machine</label>
         <select id="r-machine" onchange="resultsMachineChanged()" title="All machines, this computer, or one remote machine to browse over SSH"></select></span>
-      <span class="inline wide" id="r-localbox"><label>results folder</label><input id="r-root" title="Folder VASP wrote results into (jobs folder, a project, or one job directory)"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('r-root',{onpick:loadResults})" title="Browse for the results folder">📁</button></span>
+      <span class="inline wide" id="r-localbox"><label>results folder</label><input id="r-root" title="Folder VASP wrote results into (jobs folder, a project, or one job directory)"><button class="iconbtn" style="padding:3px 7px" onclick="resultsBrowse()" title="Browse for the results folder on any machine — picking a remote switches the view to it">📁</button></span>
       <span class="inline wide" id="r-remotebox" style="display:none"><label>jobs directory (on the machine)</label><input id="r-rdir" title="Directory on the remote machine to list jobs from (defaults to its work dir)" onkeydown="if(event.key==='Enter')loadResults()"></span>
       <span class="inline"><label>search name</label><input id="r-search" placeholder="filter by case" style="width:150px" oninput="resPage=1;renderResults()" title="Show only cases whose name contains this text"></span>
       <span class="inline"><label>from date</label><input type="date" id="r-from" onchange="resPage=1;renderResults()" title="Only jobs modified on or after this date" style="width:150px"></span>
@@ -720,8 +787,17 @@
       <b>Results</b> row, or use the multi-job tools below. Each slot takes a job folder and its
       machine, so you can mix machines in one analysis (slab on a remote, molecule local).</p>
     <div style="margin-top:6px">
+      <span style="font-size:12px;color:var(--dim);margin-right:6px">single-job analysis:</span>
+      <button class="ghost" onclick="showAnaTool('ana-thermo')">ZPE / Gibbs</button>
+      <button class="ghost" onclick="showAnaTool('ana-dband')">d-band center</button>
+      <button class="ghost" onclick="showAnaTool('ana-workfunction')">Work function</button>
+      <button class="ghost" onclick="showAnaTool('ana-optics')">Absorption</button>
+      <button class="ghost" onclick="showAnaTool('ana-xrd')">XRD pattern</button>
+      <button class="ghost" onclick="showAnaTool('ana-bader')">Bader charges</button>
+    </div>
+    <div style="margin-top:6px">
       <span style="font-size:12px;color:var(--dim);margin-right:6px">multi-job tools:</span>
-      <button class="ghost" onclick="toggleResTool('adscard')" title="Adsorption energy from a slab+adsorbate, a clean slab and a gas-molecule job">🧗 Adsorption energy</button>
+      <button class="ghost" onclick="toggleResTool('adscard')" title="Adsorption energy from a slab+adsorbate, a clean slab and a gas-molecule job">Adsorption energy</button>
       <button class="ghost" onclick="toggleResTool('surfcard')" title="Surface energy γ from a slab job and a bulk job">▦ Surface energy</button>
       <button class="ghost" onclick="toggleResTool('chgdiffcard')" title="Charge-density difference Δρ between a combined job and its fragments">Δρ Charge-density difference</button>
       <button class="ghost" onclick="toggleResTool('gdiagcard')" title="Free-energy diagram and overpotential (computational hydrogen electrode)">📊 Free-energy diagram</button>
@@ -800,46 +876,46 @@
     <canvas id="volslice" width="320" height="300"></canvas>
   </div>
   <div class="card" id="chgdiffcard" style="display:none">
-    <h3>Charge-density difference Δρ
+    <h3>Charge-density difference 
       <button class="ghost" onclick="$('chgdiffcard').style.display='none'">close</button></h3>
-    <p class="sub">Δρ = ρ(total) − ρ(part 1) − ρ(part 2): where electrons go when fragments bond (e.g. slab+molecule − slab − molecule). All three jobs must use the <b>same cell and grid</b> — run the fragments in the combined cell with frozen positions, calc type <b>charge</b>. Writes CHGCAR_diff next to the total.</p>
+    <p class="sub"> = ρ(total) − ρ(part 1) − ρ(part 2): where electrons go when fragments bond (e.g. slab+molecule − slab − molecule). All three jobs must use the <b>same cell and grid</b> — run the fragments in the combined cell with frozen positions, calc type <b>charge</b>. Writes CHGCAR_diff next to the total.</p>
     <span class="inline wide"><label>total (job with CHGCAR)</label><input id="cd-total" list="jobdirs"><button class="iconbtn" style="padding:3px 7px" onclick="slotPick('cd-total')">📁</button><select id="cd-total-m" class="slot-machine"></select></span>
     <span class="inline wide"><label>part 1</label><input id="cd-p1" list="jobdirs"><button class="iconbtn" style="padding:3px 7px" onclick="slotPick('cd-p1')">📁</button><select id="cd-p1-m" class="slot-machine"></select></span>
     <span class="inline wide"><label>part 2 (optional)</label><input id="cd-p2" list="jobdirs"><button class="iconbtn" style="padding:3px 7px" onclick="slotPick('cd-p2')">📁</button><select id="cd-p2-m" class="slot-machine"></select></span>
     <datalist id="jobdirs"></datalist>
     <br><button class="act" onclick="computeChgDiff()">Compute Δρ → plot</button>
   </div>
-  <div class="card" id="anacard" style="display:none">
-    <h3>🧪 Property analysis — <span id="anacase" style="text-transform:none">pick a job</span>
+  <div class="card" id="anacard">
+    <h3> Property analysis — <span id="anacase" style="text-transform:none">pick a job</span>
       <button class="ghost" onclick="exportAnaPng()" id="ana-png" style="display:none">⬇ PNG</button>
       <button class="ghost" onclick="exportAnaCsv()" id="ana-export" style="display:none">⬇ CSV</button>
       <button class="ghost" onclick="$('anacard').style.display='none'">close</button></h3>
-    <p class="sub"><b>Derive physical properties from a finished job.</b> Opened by the 🧪 button
-      on a result row. Each button computes one property from that job's output files and needs a
+    <p class="sub"><b>Derive physical properties from a finished job.</b> Pick a job folder here or
+      open one with the button on a result row. Each button computes one property from that job's output files and needs a
       matching calculation type — pick the analysis that fits how the job was run:
       vibrational thermochemistry (ZPE/Gibbs, from a <code>freq</code> job),
       d-band centre (<code>dos</code> with LORBIT), work function (<code>workfunction</code>),
       optical absorption (<code>optics</code>), Bader atomic charges (<code>charge</code>),
       or a simulated powder XRD pattern (any job with a relaxed structure).
       Same maths as the CLI's <code>--thermo</code>/<code>--d-band</code>/<code>--work-function</code>/<code>--optics-parse</code>/<code>--bader</code>/<code>--xrd</code>.</p>
-    <span class="inline wide"><label>job folder</label><input id="ana-dir" list="jobdirs" oninput="ANA_MACHINE=null"><button class="iconbtn" style="padding:3px 7px" onclick="openPicker('ana-dir')">📁</button></span>
+    <span class="inline wide"><label>job folder</label><input id="ana-dir" list="jobdirs"><button class="iconbtn" style="padding:3px 7px" onclick="slotPick('ana-dir')">📁</button><select id="ana-dir-m" class="slot-machine"></select></span>
     <br>
-    <button class="ghost" onclick="anaThermo()" title="ZPE + thermal corrections from vibrational modes (calc type: freq)">🌡 ZPE / Gibbs</button>
+    <button class="ghost" id="ana-thermo" onclick="anaThermo()" title="ZPE + thermal corrections from vibrational modes (calc type: freq)">ZPE / Gibbs</button>
     <span class="inline"><label>T (K)</label><input id="ana-T" value="298.15" style="width:60px"></span>
-    <button class="ghost" onclick="anaDband()" title="d-band center of the selected atoms (calc type: dos, LORBIT=11)">🎯 d-band center</button>
+    <button class="ghost" id="ana-dband" onclick="anaDband()" title="d-band center of the selected atoms (calc type: dos, LORBIT=11)">d-band center</button>
     <span class="inline"><label>atoms</label><input id="ana-atoms" placeholder="1-4 or z>0.5" style="width:110px" title="Which atoms to project on — usually the surface metal atoms"></span>
     <span class="inline"><label>E max (eV)</label><input id="ana-emax" placeholder="whole grid" style="width:75px" title="Upper integration limit vs E_F; 0 = occupied states only"></span>
     <br>
-    <button class="ghost" onclick="anaWorkfunction()" title="W = V_vacuum − E_Fermi from the LOCPOT planar average (calc type: workfunction)">⚡ Work function</button>
+    <button class="ghost" id="ana-workfunction" onclick="anaWorkfunction()" title="W = V_vacuum − E_Fermi from the LOCPOT planar average (calc type: workfunction)">Work function</button>
     <span class="inline"><label>axis</label><select id="ana-axis" style="width:50px"><option>a</option><option>b</option><option selected>c</option></select></span>
-    <button class="ghost" onclick="anaOptics()" title="Absorption coefficient α(E) from the dielectric function (calc type: optics)">🌈 Absorption α(E)</button>
-    <button class="ghost" onclick="anaXrd()" title="Simulated powder XRD pattern (Cu Kα) from the relaxed structure (CONTCAR, else POSCAR)">💠 XRD pattern</button>
-    <button class="ghost" onclick="anaBader()" title="Bader atomic charges — needs the Henkelman 'bader' binary on PATH and a CHGCAR (calc type: charge)">🧲 Bader charges</button>
+    <button class="ghost" id="ana-optics" onclick="anaOptics()" title="Absorption coefficient α(E) from the dielectric function (calc type: optics)">Absorption α(E)</button>
+    <button class="ghost" id="ana-xrd" onclick="anaXrd()" title="Simulated powder XRD pattern (Cu Kα) from the relaxed structure (CONTCAR, else POSCAR)">XRD pattern</button>
+    <button class="ghost" id="ana-bader" onclick="anaBader()" title="Bader atomic charges — needs the Henkelman 'bader' binary on PATH and a CHGCAR (calc type: charge)">Bader charges</button>
     <pre class="console" id="ana-out" style="height:auto;max-height:260px;margin-top:8px">Pick a job folder, then choose an analysis.</pre>
     <canvas id="anachart" width="760" height="280" style="display:none"></canvas>
   </div>
   <div class="card" id="adscard" style="display:none">
-    <h3>🧗 Adsorption energy
+    <h3>Adsorption energy
       <button class="ghost" onclick="$('adscard').style.display='none'">close</button></h3>
     <p class="sub">E<sub>ads</sub> = E(slab+adsorbate) − E(slab) − scale·E(molecule), from three finished jobs
       (VASP or QE). Use scale 0.5 with an H₂ reference for atomic H. Negative = binds.</p>
@@ -851,7 +927,7 @@
     <pre class="console" id="ads-out" style="height:auto;max-height:160px;margin-top:8px;display:none"></pre>
   </div>
   <div class="card" id="surfcard" style="display:none">
-    <h3>▦ Surface energy
+    <h3>Surface energy
       <button class="ghost" onclick="$('surfcard').style.display='none'">close</button></h3>
     <p class="sub">γ = (E<sub>slab</sub> − (N<sub>slab</sub>/N<sub>bulk</sub>)·E<sub>bulk</sub>) / (2A),
       A = the slab cell face ⟂ the chosen axis. Two jobs: a relaxed slab and the bulk reference
@@ -863,7 +939,7 @@
     <pre class="console" id="surf-out" style="height:auto;max-height:160px;margin-top:8px;display:none"></pre>
   </div>
   <div class="card" id="gdiagcard" style="display:none">
-    <h3>📊 Free-energy diagram + overpotential
+    <h3>Free-energy diagram + overpotential
       <button class="ghost" onclick="exportCanvas('gdiagchart','free_energy_diagram.png')">⬇ PNG</button>
       <button class="ghost" onclick="$('gdiagcard').style.display='none'">close</button></h3>
     <p class="sub">Computational hydrogen electrode: each step's ΔG = ΔE (a typed number, in eV)
@@ -881,7 +957,7 @@
     <canvas id="gdiagchart" width="760" height="300" style="display:none"></canvas>
   </div>
   <div class="card" id="magcard" style="display:none">
-    <h3>🧲 Magnetic moments — <span id="magcase" style="text-transform:none"></span>
+    <h3>Magnetic moments — <span id="magcase" style="text-transform:none"></span>
       <button class="ghost" onclick="exportMagCsv()" id="mag-export" style="display:none">⬇ CSV</button>
       <button class="ghost" onclick="$('magcard').style.display='none'">close</button></h3>
     <p class="sub">Per-atom magnetic moments from the last <code>magnetization (x)</code> table in
@@ -1097,6 +1173,7 @@ document.querySelectorAll("nav button").forEach(btn => btn.onclick = () => {
   document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
   btn.classList.add("active");
   $("tab-" + btn.dataset.tab).classList.add("active");
+  if (btn.dataset.tab === "neb") initNebTab();
   if (btn.dataset.tab === "results") loadResults();
   if (btn.dataset.tab === "remote") loadRemotes();
   if (btn.dataset.tab === "running") runningLoop();
@@ -1137,22 +1214,17 @@ async function init() {
   pollJobs();
   setInterval(() => { if ($("r-auto").checked && $("tab-results").classList.contains("active")) loadResults(); }, 5000);
 }
+/* NEB lives on its own tab, so it is not offered as a Calculate type. */
 function renderCalcTypes() {
-  $("ctypes").innerHTML = META.calc_types.map(t =>
+  if (calcType === "neb") calcType = "scf";
+  $("ctypes").innerHTML = META.calc_types.filter(t => t !== "neb").map(t =>
     `<div class="ctype${t === calcType ? " sel" : ""}" data-t="${t}" onclick="pickType('${t}')">
        <b>${t}</b><small>${META.calc_type_info[t] || ""}</small></div>`).join("");
-}
-/* The Calculate-tab endpoints block: shown when the neb type is picked but the
-   working case is not yet a TSS (initial/final) case. */
-function updateNebBlock() {
-  const el = $("nebendpoints");
-  if (el) el.style.display = (calcType === "neb" && currentCaseType() !== "tss") ? "block" : "none";
 }
 function pickType(t) {
   const changed = t !== calcType;
   calcType = t;
   renderCalcTypes();
-  updateNebBlock();
   if (t === "bands" && !$("k-mode").value) { $("k-mode").value = "line"; kModeChanged(); }
   if (changed) {
     syncIncarToType();
@@ -1196,9 +1268,6 @@ function caseBody(obj) {
 function setWork(path, type, machine) {
   WORK = { path: path || "", type: type || "single", machine: machine || "local" };
   updateWorkStatus();
-  const isTss = currentCaseType() === "tss";
-  $("nebimgs").style.display = isTss ? "inline-block" : "none";
-  updateNebBlock();
   // A case on a remote machine runs there in place — point the Calculate
   // "run on machine" selector at it so the UI matches what the server does.
   const rm = currentCaseMachine();
@@ -1226,6 +1295,9 @@ function workingMachineChanged() {
   }
   if ($("sv-machine-hint")) $("sv-machine-hint").textContent =
     m === "local" ? "" : `Cases are created on ${m} (nothing is kept on this computer).`;
+  // NEB endpoints usually sit on the machine you just moved to; 📁 or the
+  // dropdown still overrides either of them.
+  document.querySelectorAll("select.ep-machine").forEach(s => { s.value = m; });
   clearWork();
 }
 
@@ -1296,7 +1368,7 @@ function regroup(symbols) {
   return [els, counts];
 }
 
-let ED = null;                // working structure (in-memory, saved explicitly)
+let ED = null;                // working structure (auto-saved to a case when run)
 let SEL = new Set();          // selected atom indices, 0-based
 let TOOL = "rotate";
 let OPTS = { bonds: true, labels: false, cell: true, axes: true, images: false };
@@ -1745,17 +1817,18 @@ function updateInfo() {
   updateSelInfo();
 }
 function fmtCoord(x) { return (x < 0 ? "" : " ") + x.toFixed(9); }
-function poscarText() {
-  if (!ED) return "";
-  const [els, counts] = regroup(ED.symbols);
-  const lines = [ED.comment, "1.0"];
-  for (const row of ED.lattice) lines.push("  " + row.map(fmtCoord).join(" "));
+/* Serialise the editor model — or any /api/structure payload, same fields. */
+function poscarText(s = ED) {
+  if (!s) return "";
+  const [els, counts] = regroup(s.symbols);
+  const lines = [s.comment, "1.0"];
+  for (const row of s.lattice) lines.push("  " + row.map(fmtCoord).join(" "));
   lines.push("  " + els.join("  "), "  " + counts.join("  "));
-  if (ED.selective) lines.push("Selective dynamics");
+  if (s.selective) lines.push("Selective dynamics");
   lines.push("Direct");
-  ED.frac.forEach((c, i) => {
+  s.frac.forEach((c, i) => {
     let line = "  " + c.map(fmtCoord).join(" ");
-    if (ED.selective) line += "  " + ED.flags[i].join(" ");
+    if (s.selective) line += "  " + s.flags[i].join(" ");
     lines.push(line);
   });
   return lines.join("\n") + "\n";
@@ -2055,15 +2128,10 @@ async function saveStructure(overwrite) {
   const loc = $("sv-loc").value.trim();
   writeStructure({ name, root: loc || defaultCasesRoot() || undefined });
 }
-/* Browse for the folder to create the case in, on the working machine — local
-   picker, or the remote one over SSH (mirrors importBrowse, folder mode). */
+/* Browse for the folder to create the case in. The case is written to the
+   working machine, so choosing another machine in the picker switches that. */
 function saveBrowse() {
-  const m = workingMachine(), r = REMOTES.find(x => x.name === m);
-  if (m && m !== "local") {
-    openPicker("sv-loc", { machine: m, root: (r && r.remote_root) || "", what: "a folder to save into" });
-  } else {
-    openPicker("sv-loc", { what: "a folder to save into" });
-  }
+  openPicker("sv-loc", { machineSel: "wc-machine", what: "a folder to save into" });
 }
 async function writeStructure(loc) {
   const machine = workingMachine();
@@ -2100,12 +2168,14 @@ function autoCaseName() {
 /* ---------- builders (all load into the editor; Save creates the case) ---------- */
 async function intoEditor(data, nameHint) {
   edFromPayload(data.structure, null);
+  clearWork();
   if (nameHint) $("sv-name").value = nameHint;
   banner("Loaded into the editor — run a calculation directly (it saves automatically) or 💾 Save to choose the folder.", "info");
 }
 async function built(data) {      // for builders that do write folders (NEB, ML relax)
   setWork(data.case, data.type || "single", data.machine || "local");
   banner(data.remote ? `Created on ${data.machine}: ${data.remote_dir}` : ("Created " + data.case), "info");
+  if (currentCaseType() === "tss") previewCaseEndpoints();
 }
 /* ---------- AI builder: any OpenAI-compatible provider ---------- */
 let AI_PROVIDERS = {};
@@ -2226,15 +2296,10 @@ function importFile() {
   api("/api/build", { action: "import", to_editor: true, source: $("i-path").value, machine: workingMachine() })
     .then(d => intoEditor(d, $("i-path").value.trim().split("/").pop().replace(/\.[^.]+$/, "")));
 }
-/* Browse for the import file on the working machine — local picker, or the
-   remote one over SSH. */
+/* Browse for the import file. It is read from the working machine, so choosing
+   another machine in the picker switches that. */
 function importBrowse() {
-  const m = workingMachine(), r = REMOTES.find(x => x.name === m);
-  if (m && m !== "local") {
-    openPicker("i-path", { files: true, machine: m, root: (r && r.remote_root) || "" });
-  } else {
-    openPicker("i-path", { files: true });
-  }
+  openPicker("i-path", { files: true, machineSel: "wc-machine" });
 }
 function buildTss(prefix) {
   const p = prefix || "nb";
@@ -2265,15 +2330,10 @@ function combineBody() {
   body.guest = guestPath;
   return body;
 }
-/* Browse for the guest case on the working machine — local picker, or the
-   remote one over SSH. */
+/* Browse for the guest case. Host and guest are read from the working machine,
+   so choosing another machine in the picker switches that. */
 function combineBrowse() {
-  const m = workingMachine(), r = REMOTES.find(x => x.name === m);
-  if (m && m !== "local") {
-    openPicker("cb-path", { machine: m, root: (r && r.remote_root) || "", what: "the guest case folder" });
-  } else {
-    openPicker("cb-path");
-  }
+  openPicker("cb-path", { machineSel: "wc-machine", what: "the guest case folder" });
 }
 function combineStructures(extra) {
   const body = combineBody();
@@ -2577,6 +2637,7 @@ function runPayload(mode) {
     cpus: $("c-cpus").value || null, parallel: $("c-par").value || null,
     scheduler: $("c-sched").value,
     remote: $("c-remote").value !== "local" ? $("c-remote").value : null,
+    prepare_dir: mode === "prepare" ? ($("c-prepdir").value || null) : null,
     spin: $("c-spin").checked || null,
     magmom: $("c-magmom").value || null,
     auto_retry: $("c-retry").checked ? 2 : null,
@@ -2613,8 +2674,8 @@ async function doPreview() {
     p.INCAR + "\n--- KPOINTS ---\n" + p.KPOINTS;
 }
 async function startRun(mode, consoleId) {
-  if (calcType === "neb" && currentCaseType() !== "tss") {
-    banner("NEB needs a case with initial and final structures — create one in the block under the calculation types."); return;
+  if (currentCaseType() === "tss") {
+    banner("This is a NEB / transition-state case — run it from the NEB tab."); return;
   }
   if (!(await ensureCase())) { banner("Nothing to run — build or import a structure in the Build tab first."); return; }
   if (calcType === "bands" && $("k-mode").value === "line" && !$("k-path").value) {
@@ -2625,6 +2686,91 @@ async function startRun(mode, consoleId) {
   activeConsole = consoleId || "console";
   $(activeConsole).textContent = "starting…";
 }
+/* ---------- NEB tab ---------- */
+/* Side view (a–c plane) of one endpoint, same projection as the NEB thumbnails. */
+function drawEndpointStruct(cv, s) {
+  const ctx = cv.getContext("2d"), W = cv.width, H = cv.height, pad = 16;
+  chartBg(ctx, W, H);
+  const pts = s.cartesian || [];
+  if (!pts.length) return;
+  const xs = pts.map(p => p[0]), zs = pts.map(p => p[2]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  const z0 = Math.min(...zs), z1 = Math.max(...zs);
+  const sc = Math.min((W - 2*pad) / (x1 - x0 || 1), (H - 2*pad) / (z1 - z0 || 1));
+  // depth-sort along b so nearer atoms draw on top
+  pts.map((p, k) => [p, s.symbols[k]]).sort((a, b) => a[0][1] - b[0][1])
+    .forEach(([p, el]) => {
+      const X = pad + (p[0] - x0) * sc + (W - 2*pad - (x1 - x0) * sc) / 2;
+      const Y = H - pad - (p[2] - z0) * sc - (H - 2*pad - (z1 - z0) * sc) / 2;
+      ctx.beginPath(); ctx.arc(X, Y, (RADII[el] || 1.0) * sc * 0.9 + 1.5, 0, 2*Math.PI);
+      ctx.fillStyle = colorOf(el); ctx.fill();
+      ctx.strokeStyle = "rgba(0,0,0,.35)"; ctx.stroke();
+    });
+}
+/* Fill one endpoint window ("init"/"final"). Without a path it reads the
+   cn-… field; a missing/unreadable structure is a dim note, never a throw. */
+async function previewEndpoint(which, path, machine) {
+  if (path === undefined) {
+    path = $("cn-" + which).value.trim();
+    machine = $("cn-" + which + "-machine").value;
+  }
+  const cv = $("ep-" + which + "-canvas"), info = $("ep-" + which + "-info");
+  const ta = $("ep-" + which + "-poscar");
+  cv.getContext("2d").clearRect(0, 0, cv.width, cv.height);
+  ta.value = "";
+  if (!path) { info.textContent = "no structure yet"; return; }
+  info.textContent = "loading…";
+  let s;
+  try {
+    s = await api("/api/structure?path=" + encodeURIComponent(path) +
+      (machine && machine !== "local" ? "&machine=" + encodeURIComponent(machine) : ""),
+      null, true);
+  } catch (e) { info.textContent = "no structure to show here yet"; return; }
+  info.textContent = `${s.comment} — ` +
+    Object.entries(s.counts).map(([e, n]) => e + n).join(" ") + ` — ${s.natoms} atoms`;
+  ta.value = poscarText(s);
+  drawEndpointStruct(cv, s);
+}
+/* Show the working NEB case's own initial/ and final/ folders. */
+function previewCaseEndpoints() {
+  const dir = currentCase().replace(/\/+$/, ""), m = currentCaseMachine() || "local";
+  previewEndpoint("init", dir + "/initial", m);
+  previewEndpoint("final", dir + "/final", m);
+}
+function initNebTab() {
+  if (currentCaseType() === "tss" && !$("ep-init-poscar").value) previewCaseEndpoints();
+}
+/* NEB-tab copy of the Accuracy & resources k-points generator (no line mode). */
+function nebKModeChanged() {
+  const mode = $("neb-k-mode").value;
+  document.querySelectorAll(".nkf").forEach(e => e.style.display = "none");
+  if (mode === "gamma" || mode === "mp")
+    document.querySelectorAll(".nkf-mesh").forEach(e => e.style.display = "inline-block");
+  else if (mode === "spacing")
+    document.querySelectorAll(".nkf-spacing").forEach(e => e.style.display = "inline-block");
+}
+function nebKSpec() {
+  const mode = $("neb-k-mode").value;
+  if (!mode) return null;
+  return { mode, mesh: $("neb-k-mesh").value || null, spacing: $("neb-k-spacing").value || null };
+}
+async function nebRun(mode) {
+  if (currentCaseType() !== "tss") {
+    banner("Create or select a NEB case first — give both endpoints above."); return;
+  }
+  const data = await api("/api/run", caseBody({
+    target: currentCase(), mode, engine: "vasp", calc_type: "neb",
+    kpoints: nebKSpec(),
+    cpus: $("neb-cpus").value || null,
+    scheduler: $("c-sched") ? $("c-sched").value : "local",
+    remote: $("neb-remote").value !== "local" ? $("neb-remote").value : null,
+    neb_images: $("c-neb").value || null,
+  }));
+  activeToken = data.token;
+  activeConsole = "neb-console";
+  $(activeConsole).textContent = "starting…";
+}
+
 function askResumeCpus() {
   // Blank = reuse the previous run's rank count (read from its OUTCAR).
   const v = prompt("CPU cores for the resume (leave blank to reuse the previous run's count):",
@@ -2806,10 +2952,12 @@ async function loadRemotes() {
   renderRemotes();
   refreshRemoteSelect();
   refreshWorkflowRemoteSelect();
+  refreshWorkflowRemoteSelect("neb-remote");
   refreshResultMachineSelect();
   refreshRunningMachineSelect();
   refreshWorkingMachineSelect();
   refreshProjRemoteSelect();
+  fillSlotMachines();   // every per-field machine dropdown (NEB endpoints, analysis slots)
 }
 /* Populate the "Run an existing folder" machine dropdown; mirrors refreshRemoteSelect. */
 function refreshProjRemoteSelect() {
@@ -2861,18 +3009,10 @@ function refreshWorkingMachineSelect() {
   sel.innerHTML = "<option value='local'>💻 Local — this computer</option>";
   for (const r of REMOTES) sel.add(new Option(`🖥 ${r.name} — ${r.host}`, r.name));
   sel.value = REMOTES.some(r => r.name === keep) ? keep : "local";
-  // The NEB card's per-endpoint machine dropdowns share the same option list.
-  for (const id of ["nb-init-machine", "nb-final-machine"]) {
-    const ep = $(id); if (!ep) continue;
-    const prev = ep.value;
-    ep.innerHTML = "<option value='local'>💻 local</option>";
-    for (const r of REMOTES) ep.add(new Option(`🖥 ${r.name}`, r.name));
-    ep.value = REMOTES.some(r => r.name === prev) ? prev : "local";
-  }
 }
-/* Populate the Workflow tab's "run on machine" dropdown. */
-function refreshWorkflowRemoteSelect() {
-  const sel = $("w-remote"); if (!sel) return;
+/* Populate a plain "run on machine" dropdown (Workflow tab, NEB tab). */
+function refreshWorkflowRemoteSelect(id = "w-remote") {
+  const sel = $(id); if (!sel) return;
   const keep = sel.value;
   sel.innerHTML = "<option value='local'>💻 Local — this computer</option>";
   for (const r of REMOTES) {
@@ -2904,6 +3044,28 @@ function refreshRemoteSelect() {
   // reflect the selected machine's default cores in the placeholder (no clobber)
   const def = sel.value !== "local" ? machineCpus(sel.value) : null;
   $("c-cpus").placeholder = def ? String(def) : "1";
+  loadPrepDirs();
+}
+/* Folders offered by "prepare into folder" for the machine in c-remote: the
+   machine's standard folders plus whatever else sits under its remote_root.
+   Local prepares always land in the local jobs root, so there is nothing to pick. */
+async function loadPrepDirs() {
+  const sel = $("c-prepdir"); if (!sel) return;
+  const keep = sel.value;
+  const r = REMOTES.find(x => x.name === $("c-remote").value);
+  const root = r ? (r.remote_root || "").replace(/\/+$/, "") : "";
+  if (!root) {
+    sel.innerHTML = `<option value="">${r ? "no remote_root set for this machine" : "jobs/ on this computer"}</option>`;
+    return;
+  }
+  const std = [[`${root}/results`, `${root}/results (default)`], [`${root}/inputs`, `${root}/inputs`], [root, root]];
+  sel.innerHTML = std.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join("");
+  try {
+    const data = await api("/api/remote/files", { machine: r.name, dir: root });
+    for (const e of (data.entries || []))
+      if (e.is_dir && !std.some(s => s[0] === e.path)) sel.add(new Option(e.path, e.path));
+  } catch (e) { /* machine unreachable — the standard folders are still offered */ }
+  if ([...sel.options].some(o => o.value === keep)) sel.value = keep;
 }
 /* When the machine changes, pre-fill CPU cores from the machine's default
    (remembering whatever was set for local so it survives a round-trip). */
@@ -2919,6 +3081,7 @@ function machineChanged() {
     cpusEl.placeholder = def ? String(def) : "1";
   }
   prevMachine = sel.value;
+  loadPrepDirs();
 }
 function renderRemotes() {
   const box = $("remotelist");
@@ -3045,16 +3208,18 @@ async function setupRemote(name) {
 
 /* ---------- INCAR editor ---------- */
 let incarTemplateText = null;  // textarea content as last loaded from a template; null = case INCAR or user content
-async function loadIncar(fromTemplate) {
+/* taId picks the editor (the Calculate tab's, or the NEB tab's); only the
+   Calculate one tracks incarTemplateText, since only it follows the type. */
+async function loadIncar(fromTemplate, taId = "incar", type) {
   if (fromTemplate) {
-    const text = (await api("/api/template?type=" + (calcType || "scf"))).text;
-    $("incar").value = text;
-    incarTemplateText = text;
+    const text = (await api("/api/template?type=" + (type || calcType || "scf"))).text;
+    $(taId).value = text;
+    if (taId === "incar") incarTemplateText = text;
   } else {
     if (!currentCase()) { banner("No working case yet — build or import a structure in the Build tab and 💾 Save it."); return; }
     const data = await api(`/api/file?dir=${encodeURIComponent(currentCase())}&name=INCAR` + caseQS());
-    $("incar").value = data.exists ? data.text : "(no INCAR in this case — load a template, edit, then save)";
-    incarTemplateText = null;
+    $(taId).value = data.exists ? data.text : "(no INCAR in this case — load a template, edit, then save)";
+    if (taId === "incar") incarTemplateText = null;
   }
 }
 async function syncIncarToType() {
@@ -3077,10 +3242,10 @@ async function incarFromOther(dir, machine = "local") {
   const source = machine === "local" ? dir : `${machine}:${dir}`;
   banner(`INCAR loaded from ${source} — review it, then “Save to case” to use it.`, "info");
 }
-async function saveIncar() {
+async function saveIncar(taId = "incar") {
   if (!currentCase()) { banner("No working case yet — build or import a structure in the Build tab and 💾 Save it."); return; }
-  await api("/api/file", caseBody({ dir: currentCase(), name: "INCAR", text: $("incar").value }));
-  incarTemplateText = null;
+  await api("/api/file", caseBody({ dir: currentCase(), name: "INCAR", text: $(taId).value }));
+  if (taId === "incar") incarTemplateText = null;
   banner("INCAR saved to the case — it now overrides templates.", "info");
 }
 
@@ -3254,17 +3419,13 @@ function kpMeshFromText(text) {                            // 4th line holds "a 
   return line ? line.split(/\s+/).join("x") : "";
 }
 
-/* Browse for the folder to run, on the machine picked above — local picker,
-   or the remote one over SSH (mirrors saveBrowse, folder mode). */
+/* Browse for the folder to run, on the machine picked above — switching machine
+   in the picker moves the dropdown above with it. */
 function projBrowse() {
   const m = $("proj-remote").value;
   if (!m) { banner("Select a machine first."); return; }
-  const r = REMOTES.find(x => x.name === m);
-  if (m && m !== "local") {
-    openPicker("proj-dir", { machine: m, root: (r && r.remote_root) || "", what: "a folder (or project folder) on " + m, onpick: projFolderChanged });
-  } else {
-    openPicker("proj-dir", { onpick: projFolderChanged });
-  }
+  openPicker("proj-dir", { machineSel: "proj-remote", onpick: projFolderChanged,
+                           what: "a folder (or project folder)" });
 }
 /* Run a folder as-is, bypassing the working-case builder flow: the CLI's own
    target scan (target_utils.inspect_target) decides whether it's a single
@@ -3342,6 +3503,15 @@ function resultsMachineChanged() {
   closeAnalysisCards();
   resPage = 1;
   loadResults();
+}
+/* Browse for the results folder on any machine — a remote's path belongs in the
+   remote jobs-directory box, which switching the machine dropdown reveals. */
+function resultsBrowse() {
+  openPicker("r-root", { machineSel: "r-machine", what: "the results folder",
+    onchoose: (path, machine) => {
+      $(machine === "local" ? "r-root" : "r-rdir").value = path;
+      loadResults();
+    } });
 }
 function normalizeLocalRow(r) {
   return { ...r, loc: "local", remote: false, name: r.case,
@@ -4226,15 +4396,19 @@ async function computeChgDiff() {
 
 /* ---------- catalysis analysis card ---------- */
 let ANA = null;  // last result, for CSV export
-let ANA_MACHINE = null;  // remote machine of the row 🧪 was opened from; typing/picking a folder clears it
 function showAnalysis(i) {
   gotoAnalysis();
   const r = RESULTS[i];
   $("ana-dir").value = r.remote ? r.path : r.job_dir;
-  ANA_MACHINE = r.remote ? r.machine : null;
+  $("ana-dir-m").value = r.remote ? r.machine : "local";
   $("anacase").textContent = r.case;
   $("anacard").style.display = "block";
   $("anacard").scrollIntoView({ behavior: "smooth" });
+}
+function showAnaTool(id) {
+  $("anacard").style.display = "block";
+  $(id).scrollIntoView({ behavior: "smooth", block: "center" });
+  $(id).focus();
 }
 function anaDir() {
   const dir = $("ana-dir").value.trim();
@@ -4244,7 +4418,8 @@ function anaDir() {
 }
 /* query-string form of anaDir, carrying the remote machine when set */
 function anaQS(dir) {
-  return encodeURIComponent(dir) + (ANA_MACHINE ? "&machine=" + encodeURIComponent(ANA_MACHINE) : "");
+  const machine = slotObj("ana-dir").machine;
+  return encodeURIComponent(dir) + (machine !== "local" ? "&machine=" + encodeURIComponent(machine) : "");
 }
 function anaShow(kind, name, data, lines) {
   ANA = { kind, name, data };
@@ -4358,7 +4533,7 @@ async function anaXrd() {
 async function anaBader() {
   const dir = anaDir();
   banner("Running the bader binary — can take a while on fine grids…", "info");
-  const d = await api("/api/bader", { path: dir, machine: ANA_MACHINE });
+  const d = await api("/api/bader", { path: dir, machine: slotObj("ana-dir").machine });
   const lines = [
     d.used_aeccar_reference ? "reference    : AECCAR0+AECCAR2 (all-electron)" :
                               "reference    : CHGCAR only (no AECCARs found)",
@@ -4395,7 +4570,7 @@ function exportAnaPng() {
   if (!ANA) return;
   exportCanvas("anachart", ANA.name + "_" + ANA.kind + ".png");
 }
-/* ---------- machine-aware job slots (multi-job analysis cards) ---------- */
+/* ---------- machine-aware analysis job slots ---------- */
 function slotMachineHTML() {
   let html = "<option value='local'>💻 local</option>";
   for (const r of REMOTES) html += `<option value="${esc(r.name)}">🖥 ${esc(r.name)}</option>`;
@@ -4414,15 +4589,10 @@ function slotObj(inputId) {
   const sel = $(inputId + "-m");
   return { path, machine: sel ? sel.value : "local" };
 }
-/* Browse for a slot's folder — on the remote it points at, when one is chosen. */
-function slotPick(inputId) {
-  const sel = $(inputId + "-m");
-  const machine = sel ? sel.value : "local";
-  if (machine === "local") { openPicker(inputId); return; }
-  const r = REMOTES.find(x => x.name === machine);
-  openPicker(inputId, { machine, root: (r && r.remote_root) || "" });
-}
+/* Browse for a slot's folder — the picker's machine dropdown drives its ⋯-m select. */
+function slotPick(inputId) { openPicker(inputId); }
 function initAnalysisTab() {
+  $("anacard").style.display = "block";
   fillSlotMachines();
   if (!$("gdiag-steps").children.length) { addGdiagStep(); addGdiagStep(); }
   refreshAnaCache();
@@ -4562,11 +4732,19 @@ function drawGdiagram(d) {
 let PICKER = { target: null, files: false, onpick: null };
 let PICKER_ENTRIES = [];
 let PICKER_LAST = null;  // last browsed folder — picking related paths in a row stays put
+/* Every browse can pick the machine the path lives on. The picker's dropdown is
+   tied to the machine control the field already has — opts.machineSel, or
+   "<id>-machine"/"<id>-m" by convention — so choosing there sets that control
+   too and the path never outlives the machine it belongs to. Only fields the
+   local engine must read itself pass chooseMachine:false. */
 function openPicker(targetId, opts = {}) {
+  const machineSel = opts.machineSel !== undefined ? opts.machineSel
+    : (targetId && [targetId + "-machine", targetId + "-m"].find(id => $(id))) || null;
   PICKER = { target: targetId, files: !!opts.files, onpick: opts.onpick || null,
              onchoose: opts.onchoose || null,
-             chooseMachine: !!opts.chooseMachine,
-             machine: opts.machine || null, root: opts.root || null };
+             chooseMachine: opts.chooseMachine !== false, machineSel,
+             machine: opts.machine || (machineSel && $(machineSel).value) || null,
+             root: opts.root || null };
   $("pickerwhat").textContent = PICKER.files ? "a file" : (opts.what || "a folder");
   $("pickerchoose").style.display = PICKER.files ? "none" : "inline-block";
   $("pickermachinebox").style.display = PICKER.chooseMachine ? "block" : "none";
@@ -4583,8 +4761,20 @@ function openPicker(targetId, opts = {}) {
   $("pickermodal").style.display = "block";
   const current = (targetId && $(targetId).value.trim()) || opts.start || "";
   const start = current && current.startsWith("/") ? current
-              : (PICKER.machine ? (PICKER.root || "") : PICKER_LAST);
+              : (pickerRemote() ? (PICKER.root || "") : PICKER_LAST);
   pickerGo(start);
+}
+function pickerRemote() { return !!PICKER.machine && PICKER.machine !== "local"; }
+/* Write the machine chosen in the picker back to the field's own machine
+   control, before the path lands — some of those handlers clear the path field
+   when the machine changes (Run an existing folder does). */
+function pickerApplyMachine() {
+  const sel = PICKER.machineSel && $(PICKER.machineSel);
+  const machine = PICKER.machine || "local";
+  if (!sel || sel.value === machine) return;
+  if (![...sel.options].some(o => o.value === machine)) return;
+  sel.value = machine;
+  sel.dispatchEvent(new Event("change"));
 }
 function pickerMachineChanged() {
   const machine = $("pickermachine").value || "local";
@@ -4599,7 +4789,7 @@ $("jobdetailmodal").onclick = e => { if (e.target === $("jobdetailmodal")) close
 async function pickerGo(path) {
   let data;
   try {
-    if (PICKER.machine && PICKER.machine !== "local") {
+    if (pickerRemote()) {
       // Browse a remote machine over SSH and reshape into the picker's format.
       const rd = await api("/api/remote/files", { machine: PICKER.machine, dir: path || PICKER.root });
       data = { path: rd.path, parent: rd.parent,
@@ -4611,7 +4801,7 @@ async function pickerGo(path) {
                        (path ? "&path=" + encodeURIComponent(path) : ""));
     }
   } catch (e) { return; }
-  if (!(PICKER.machine && PICKER.machine !== "local")) PICKER_LAST = data.path;
+  if (!pickerRemote()) PICKER_LAST = data.path;
   $("pickerpath").value = data.path;
   $("pickerroots").innerHTML = data.roots.map((r, i) =>
     `<span class="chip" onclick="pickerGo(PICKER_ROOTS[${i}])">${r.name}</span>`).join("");
@@ -4639,11 +4829,18 @@ async function pickerGo(path) {
 function pickerNav(i) {
   const entry = PICKER_ENTRIES[i];
   if (entry.kind === "dir") pickerGo(entry.path);
-  else { $(PICKER.target).value = entry.path; closePicker(); if (PICKER.onpick) PICKER.onpick(); }
+  else {
+    closePicker();
+    pickerApplyMachine();
+    if (PICKER.onchoose) { PICKER.onchoose(entry.path, PICKER.machine || "local"); return; }
+    $(PICKER.target).value = entry.path;
+    if (PICKER.onpick) PICKER.onpick();
+  }
 }
 function pickerChoose() {
   const chosen = $("pickerpath").value;
   closePicker();
+  pickerApplyMachine();
   if (PICKER.onchoose) { PICKER.onchoose(chosen, PICKER.machine || "local"); return; }
   $(PICKER.target).value = chosen;
   $(PICKER.target).dispatchEvent(new Event("input"));  // run the field's oninput

@@ -170,6 +170,12 @@ def parse_args():
         help="Prepare jobs only, do not run VASP.",
     )
     parser.add_argument(
+        "--prepare-dest",
+        help="With --prepare and --remote-config: folder on that machine to put the "
+             "prepared job folder in (it is created if missing). Without it, prepared "
+             "jobs stay in the local jobs root.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Show the full input set (INCAR/KPOINTS/POTCAR) without writing job files.",
@@ -2800,8 +2806,14 @@ def main():
         _write_excel_summary(excel_path, all_results)
         return
 
+    # --prepare --prepare-dest: build the inputs locally, then place the finished
+    # job folder in the folder the user picked on the chosen machine.
+    prepare_remote = remote_cfg if (args.prepare and args.prepare_dest) else None
+    if args.prepare_dest and not prepare_remote:
+        raise SystemExit("--prepare-dest needs --prepare and a machine (--remote-config/--remote).")
+
     def process(case_dir):
-        return _process_case(
+        case_info, rows = _process_case(
             case_dir,
             args=args,
             base_config=config,
@@ -2812,6 +2824,15 @@ def main():
             calc_type=calc_type,
             kpoints_spec=kpoints_spec,
         )
+        if prepare_remote:
+            from vasp_auto.runner import ship_job_dir
+            dest = ship_job_dir(case_info["job_dir"], prepare_remote, args.prepare_dest)
+            machine = prepare_remote.get("name") or prepare_remote.get("host")
+            print(f"Prepared  : {case_dir.name} -> {machine}:{dest}")
+            for row in rows:
+                row["machine"] = machine
+                row["remote_dir"] = dest
+        return case_info, rows
 
     if args.parallel > 1 and len(case_dirs) > 1:
         with ThreadPoolExecutor(max_workers=args.parallel) as pool:

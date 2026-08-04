@@ -561,6 +561,23 @@ def _transfer_dir(local_dir: Path, target: str, remote_dir: str, remote: dict) -
     _run_checked(cmd, "scp")
 
 
+def ship_job_dir(job_dir, remote: dict, dest_dir: str) -> str:
+    """Copy a prepared job directory into ``<dest_dir>/<job name>`` on a machine.
+
+    Used by ``--prepare --prepare-dest``: the inputs are built locally and then
+    placed in the folder the user picked on that machine, without running.
+    """
+    job_dir = Path(job_dir).resolve()
+    remote_dir = f"{str(dest_dir).rstrip('/')}/{job_dir.name}"
+    target = _ssh_target(remote)
+    _run_checked(
+        ["ssh", "-x", *_ssh_options(remote), target, f"mkdir -p {shlex.quote(remote_dir)}"],
+        "remote mkdir",
+    )
+    _transfer_dir(job_dir, target, remote_dir, remote)
+    return remote_dir
+
+
 # Run modes that mean "execute directly over SSH" rather than submit to a queue.
 SSH_RUN_MODES = {"ssh", "direct", "none", "local", ""}
 
