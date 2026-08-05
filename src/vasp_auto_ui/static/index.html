@@ -114,6 +114,11 @@
   .steps li { margin: 5px 0; }
   .steps button { margin-left: 4px; padding: 0 8px; }
   .grow { flex: 1 1 380px; min-width: 340px; }
+  /* Two panels that stay side by side however narrow the column gets — .row would
+     wrap them once .grow's 340px minimum stops fitting. min-width:0 lets the
+     canvas and POSCAR box shrink instead of forcing the grid wider. */
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+  .pair > * { min-width: 0; }
   /* calc-type cards */
   #ctypes { display: grid; grid-template-columns: repeat(auto-fill, minmax(215px, 1fr)); gap: 8px; }
   .ctype { border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px;
@@ -220,17 +225,24 @@
   <span id="wc-status" class="badge dim">No working structure yet — build or import one in the Build tab, then just run it.</span>
 </div>
 
-<div class="card">
-  <h3>Run an existing folder</h3>
+<details class="card" id="folderrun" style="display:none" ontoggle="folderModeChanged()">
+  <summary style="cursor:pointer"><b>Run an existing folder</b> — inputs are already written, skip the builder</summary>
   <p class="sub">Point at a folder that already has ready-made inputs — one case (POSCAR/INCAR), or a project folder holding several case subfolders, each with its own POSCAR/INCAR (e.g. <code>inputs/00_refs</code>). Every case folder found gets run. Pick the machine the folder lives on first — 📁 then browses that machine (local or a saved remote, over SSH).</p>
+  <p class="sub">While this is open the INCAR editor on this tab reads and writes <b>the folder</b>, not the working case. Close it to go back to the working case. The folder runs with the files it already has, so the tab's k-points controls do not apply — its KPOINTS is edited verbatim below.</p>
   <span class="inline"><label>machine</label><select id="proj-remote" onchange="projMachineChanged()" title="Select the machine that already contains the folder."></select></span>
   <span class="inline wide"><label>folder</label><input id="proj-dir" placeholder="Select a machine first" oninput="projFolderChanged()" disabled><button id="proj-browse" class="iconbtn" style="padding:3px 7px" onclick="projBrowse()" title="Choose a folder on the selected machine" disabled>📁</button></span>
   <span class="inline"><label>CPU cores (MPI ranks)</label><input id="proj-cpus" placeholder="1" title="Passed to mpirun -np"></span>
   <span class="inline"><label>cases in parallel</label><input id="proj-par" placeholder="1" title="Run up to N cases at once when the folder has several"></span>
   <span class="inline"><label>scheduler</label><select id="proj-sched" title="local runs mpirun here; slurm/pbs submit to a queue"><option>local</option><option>slurm</option><option>pbs</option></select></span>
-  <button class="act" id="proj-run" onclick="runProjectFolder()" disabled>▶ Run all cases</button>
+  <div id="proj-kp-wrap" style="display:none;margin-top:10px">
+    <label>KPOINTS in this folder <span id="proj-kp-where" class="hint" style="display:inline;max-width:none"></span></label>
+    <textarea id="proj-kpoints" rows="7" spellcheck="false" style="font-size:11.5px"></textarea>
+    <button class="ghost" onclick="loadFolderKpoints()" title="Re-read KPOINTS from the folder, discarding edits here">↻ Reload</button>
+    <button class="act" onclick="saveFolderKpoints()" title="Write this text back to the folder's KPOINTS">Save KPOINTS to folder</button>
+  </div>
+  <button class="act" id="proj-run" onclick="runProjectFolder()" disabled style="margin-top:10px">▶ Run all cases</button>
   <pre class="console" id="proj-console" style="display:none;margin-top:8px"></pre>
-</div>
+</details>
 
 <!-- ============================ BUILD ============================ -->
 <div class="tab active" id="tab-build">
@@ -596,7 +608,8 @@
         <button class="ghost" onclick="loadIncar(false)">Load case INCAR</button>
         <button class="ghost" onclick="loadIncar(true)">Load template for selected type</button>
         <button class="ghost" onclick="openPicker(null,{what:'the case or job folder to copy the INCAR from',chooseMachine:true,onchoose:incarFromOther})" title="Copy the INCAR of another local or remote case/job into the editor">Load from another work…</button>
-        <button class="act" onclick="saveIncar()">Save to case</button>
+        <button class="act" id="incar-save" onclick="saveIncar()">Save to case</button>
+        <div class="sub" id="incar-target"></div>
         <details id="incar-guided" style="margin:8px 0" ontoggle="if(this.open)renderIncarForm()">
           <summary style="cursor:pointer">⚙ Guided settings — pick in plain language, no VASP tags</summary>
           <p class="sub">Each choice writes its VASP tag into the editor below. Load a template first to start from a full INCAR, or build one from scratch.</p>
@@ -636,14 +649,17 @@
       <div class="card">
         <h3>Endpoints</h3>
         <p class="sub">Side view (a–c plane) and POSCAR of each endpoint, read from the machine it lives on.</p>
-        <div class="row">
-          <div class="grow">
+        <p class="sub">Endpoints relaxed separately often list their atoms in different orders, which aborts the band. <b>Match atom order</b> re-indexes the final structure onto the initial one and overwrites it, keeping the original as <code>.before_reindex</code>. Check the reported displacements before you run — one species far above the rest either really does move in the reaction, or was paired wrong.</p>
+        <button class="ghost" onclick="matchAtomOrder()" title="Re-index the final endpoint's atoms onto the initial endpoint's ordering">⇄ Match atom order</button>
+        <div class="sub" id="ep-order-msg"></div>
+        <div class="pair">
+          <div>
             <b style="font-size:13px">Initial structure</b>
             <div><canvas id="ep-init-canvas" width="340" height="300" style="border:1px solid var(--line);border-radius:6px;max-width:100%"></canvas></div>
             <div class="sub" id="ep-init-info">no structure yet</div>
             <textarea id="ep-init-poscar" rows="12" spellcheck="false" readonly style="font-size:11.5px"></textarea>
           </div>
-          <div class="grow">
+          <div>
             <b style="font-size:13px">Final structure</b>
             <div><canvas id="ep-final-canvas" width="340" height="300" style="border:1px solid var(--line);border-radius:6px;max-width:100%"></canvas></div>
             <div class="sub" id="ep-final-info">no structure yet</div>
@@ -656,7 +672,8 @@
         <p class="sub">The NEB template covers the common case. A saved case INCAR overrides it.</p>
         <button class="ghost" onclick="loadIncar(false,'neb-incar','neb')">Load case INCAR</button>
         <button class="ghost" onclick="loadIncar(true,'neb-incar','neb')">Load NEB template</button>
-        <button class="act" onclick="saveIncar('neb-incar')">Save to case</button>
+        <button class="act" id="neb-incar-save" onclick="saveIncar('neb-incar')">Save to case</button>
+        <div class="sub" id="neb-incar-target"></div>
         <textarea id="neb-incar" rows="12" spellcheck="false"></textarea>
       </div>
       <div class="card">
@@ -1173,6 +1190,8 @@ document.querySelectorAll("nav button").forEach(btn => btn.onclick = () => {
   document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
   btn.classList.add("active");
   $("tab-" + btn.dataset.tab).classList.add("active");
+  // "Run an existing folder" only belongs where there is something to run.
+  folderRunVisibility(btn.dataset.tab);
   if (btn.dataset.tab === "neb") initNebTab();
   if (btn.dataset.tab === "results") loadResults();
   if (btn.dataset.tab === "remote") loadRemotes();
@@ -1188,6 +1207,7 @@ function gotoAnalysis() {
 async function init() {
   META = await api("/api/meta");
   $("exeinfo").textContent = META.config.vasp_executable + " · " + META.config.scheduler;
+  folderRunVisibility(document.querySelector("nav button.active").dataset.tab);
   renderCalcTypes();
   $("w-type").add(new Option("converge (auto ENCUT/SIGMA/k-mesh)", "converge"));
   for (const t of META.calc_types) if (t !== "neb") $("w-type").add(new Option(t, t));
@@ -1268,6 +1288,7 @@ function caseBody(obj) {
 function setWork(path, type, machine) {
   WORK = { path: path || "", type: type || "single", machine: machine || "local" };
   updateWorkStatus();
+  updateIncarTargets();
   // A case on a remote machine runs there in place — point the Calculate
   // "run on machine" selector at it so the UI matches what the server does.
   const rm = currentCaseMachine();
@@ -2677,6 +2698,13 @@ async function startRun(mode, consoleId) {
   if (currentCaseType() === "tss") {
     banner("This is a NEB / transition-state case — run it from the NEB tab."); return;
   }
+  // Folder mode retargets the editors; the tab's own Run still acts on the working
+  // case, so say which one is about to run rather than silently doing the other.
+  if (folderMode() && !confirm(
+        `The "Run an existing folder" panel is open and points at ${folderTarget().dir}.\n\n` +
+        `This button runs the working case (${currentCase() || "none"}) instead.\n` +
+        `Use "\u25b6 Run all cases" in that panel to run the folder.\n\nRun the working case anyway?`))
+    return;
   if (!(await ensureCase())) { banner("Nothing to run — build or import a structure in the Build tab first."); return; }
   if (calcType === "bands" && $("k-mode").value === "line" && !$("k-path").value) {
     banner("Band structures need a k-path — pick a preset (fcc, bcc, …) in the k-path field."); return;
@@ -2731,6 +2759,27 @@ async function previewEndpoint(which, path, machine) {
   ta.value = poscarText(s);
   drawEndpointStruct(cv, s);
 }
+/* Re-index the final endpoint onto the initial one. Never automatic: the pairing
+   is a judgement call, so the displacements come back for the user to sanity-check. */
+async function matchAtomOrder() {
+  const msg = $("ep-order-msg");
+  const initial = $("cn-init").value.trim(), final = $("cn-final").value.trim();
+  if (!initial || !final) { msg.textContent = "Pick both endpoints first."; return; }
+  msg.textContent = "matching…";
+  let r;
+  try {
+    r = await api("/api/atom_order", {
+      initial, final,
+      initial_machine: $("cn-init-machine").value,
+      final_machine: $("cn-final-machine").value,
+    });
+  } catch (e) { msg.textContent = "could not match: " + e.message; return; }
+  if (!r.changed) { msg.textContent = r.message; return; }
+  msg.innerHTML = `Re-indexed <b>${r.path}</b> (original kept as ${r.backup}). ` +
+    "Largest displacement per species: " +
+    r.moves.map(m => `${m.element} ${m.max_displacement.toFixed(2)} Å`).join(", ");
+  previewEndpoint("final");
+}
 /* Show the working NEB case's own initial/ and final/ folders. */
 function previewCaseEndpoints() {
   const dir = currentCase().replace(/\/+$/, ""), m = currentCaseMachine() || "local";
@@ -2758,6 +2807,13 @@ async function nebRun(mode) {
   if (currentCaseType() !== "tss") {
     banner("Create or select a NEB case first — give both endpoints above."); return;
   }
+  // Folder mode retargets the editors; the tab's own Run still acts on the working
+  // case, so say which one is about to run rather than silently doing the other.
+  if (folderMode() && !confirm(
+        `The "Run an existing folder" panel is open and points at ${folderTarget().dir}.\n\n` +
+        `This button runs the working case (${currentCase() || "none"}) instead.\n` +
+        `Use "\u25b6 Run all cases" in that panel to run the folder.\n\nRun the working case anyway?`))
+    return;
   const data = await api("/api/run", caseBody({
     target: currentCase(), mode, engine: "vasp", calc_type: "neb",
     kpoints: nebKSpec(),
@@ -2961,16 +3017,9 @@ async function loadRemotes() {
 }
 /* Populate the "Run an existing folder" machine dropdown; mirrors refreshRemoteSelect. */
 function refreshProjRemoteSelect() {
-  const sel = $("proj-remote"); if (!sel) return;
-  const keep = sel.value;
-  sel.innerHTML = "<option value=''>Select machine…</option>" +
-                  "<option value='local'>💻 Local — this computer</option>";
-  for (const r of REMOTES) {
-    const cores = r.cpus ? ` · ${r.cpus} cores` : "";
-    sel.add(new Option(`🖥 ${r.name} — ${r.host}${cores}`, r.name));
-  }
-  const valid = keep === "local" || REMOTES.some(r => r.name === keep);
-  sel.value = valid ? keep : "";
+  if (!$("proj-remote")) return;
+  fillMachineSelect($("proj-remote"),
+    { extra: "<option value=''>Select machine…</option>", cores: true, fallback: "" });
   projMachineChanged();
 }
 /* A folder path belongs to one machine. Changing machines invalidates it. */
@@ -2989,37 +3038,127 @@ function projMachineChanged() {
   cpusEl.placeholder = def ? String(def) : "1";
   projFolderChanged();
 }
+let projLoadTimer = null;
 function projFolderChanged() {
   $("proj-run").disabled = !$("proj-remote").value || !$("proj-dir").value.trim();
+  updateIncarTargets();
+  // The field fires per keystroke; only fetch the folder's files once typing pauses.
+  clearTimeout(projLoadTimer);
+  projLoadTimer = setTimeout(() => { if (folderMode()) loadFolderInputs(); }, 400);
+}
+
+/* ---------- "Run an existing folder" mode ----------
+   The card lives outside the tabs (one instance, shared by Calculate and NEB) and
+   is only shown on those two. Opening the <details> is the activation: while it is
+   open the INCAR editor and k-points controls of the active tab read and write the
+   chosen folder instead of the working case, so a folder that already has inputs
+   can be reviewed and tweaked before it runs. Closing it hands the editors back. */
+function folderRunVisibility(tab) {
+  const on = tab === "calc" || tab === "neb";
+  $("folderrun").style.display = on ? "" : "none";
+  if (!on && $("folderrun").open) $("folderrun").open = false;   // fires folderModeChanged
+  else updateIncarTargets();
+}
+/* Folder mode is active only with the panel open AND a folder actually chosen —
+   an open-but-empty panel must not hijack the working case's editors. */
+function folderMode() {
+  return $("folderrun").open && !!$("proj-dir").value.trim();
+}
+function folderTarget() {
+  return { dir: $("proj-dir").value.trim(), machine: $("proj-remote").value || "local" };
+}
+/* Where the INCAR editor and k-points controls currently read and write. */
+function editTarget() {
+  if (folderMode()) {
+    const f = folderTarget();
+    return { dir: f.dir, machine: f.machine, folder: true };
+  }
+  return { dir: currentCase(), machine: currentCaseMachine() || "local", folder: false };
+}
+async function folderModeChanged() {
+  if ($("folderrun").open) {
+    if (folderMode()) await loadFolderInputs();
+    else banner("Pick a machine and folder — the INCAR and k-points controls switch to it.", "info");
+  } else {
+    // Back to the working case: reload its INCAR so a folder's file is never left
+    // sitting in the editor where "Save to case" would write it to the wrong place.
+    for (const ta of ["incar", "neb-incar"]) if ($(ta).value.trim()) {
+      if (currentCase()) await loadIncar(false, ta);
+      else { $(ta).value = ""; if (ta === "incar") incarTemplateText = null; }
+    }
+    $("proj-kp-wrap").style.display = "none";
+    banner("Back to the working case — the editors no longer point at the folder.", "info");
+  }
+  updateIncarTargets();
+}
+/* Pull the folder's own INCAR and KPOINTS into the active tab's controls. */
+async function loadFolderInputs() {
+  const t = folderTarget(), neb = $("tab-neb").classList.contains("active");
+  const ta = neb ? "neb-incar" : "incar";
+  const qs = `&dir=${encodeURIComponent(t.dir)}` +
+             (t.machine !== "local" ? `&machine=${encodeURIComponent(t.machine)}` : "");
+  const notes = [];
+
+  const inc = await api("/api/file?name=INCAR" + qs);
+  $(ta).value = inc.exists ? inc.text : "";
+  if (ta === "incar") incarTemplateText = null;
+  notes.push(inc.exists ? "INCAR loaded" : "no INCAR in the folder");
+
+  notes.push(await loadFolderKpoints());
+  banner(`${t.dir}: ${notes.join(", ")}.`, "info");
+}
+/* The folder's KPOINTS verbatim. Deliberately raw text and not the tab's k-points
+   controls: the folder runs with the files it already has (runProjectFolder sends
+   no kpoints spec), and line mode or an explicit k-point list has no equivalent in
+   those controls anyway. Returns a note for the caller's banner. */
+async function loadFolderKpoints() {
+  const t = folderTarget();
+  $("proj-kp-wrap").style.display = t.dir ? "" : "none";
+  if (!t.dir) return "";
+  const kp = await api(`/api/file?name=KPOINTS&dir=${encodeURIComponent(t.dir)}` +
+    (t.machine !== "local" ? `&machine=${encodeURIComponent(t.machine)}` : ""));
+  $("proj-kpoints").value = kp.exists ? kp.text : "";
+  $("proj-kpoints").placeholder = kp.exists ? "" : "(no KPOINTS in this folder — type one here and save)";
+  $("proj-kp-where").textContent =
+    (t.machine !== "local" ? `${t.machine}:` : "") + t.dir + "/KPOINTS";
+  return kp.exists ? "KPOINTS loaded" : "no KPOINTS in the folder";
+}
+async function saveFolderKpoints() {
+  const t = folderTarget();
+  if (!t.dir) { banner("Pick a folder first."); return; }
+  await api("/api/file", {
+    dir: t.dir, name: "KPOINTS", text: $("proj-kpoints").value,
+    ...(t.machine !== "local" ? { machine: t.machine } : {}),
+  });
+  banner(`KPOINTS saved into ${t.dir} — that folder runs with it.`, "info");
+}
+/* Say plainly which folder the INCAR editor writes to — the whole conflict between
+   a working case and a picked folder is that "Save to case" is otherwise ambiguous. */
+function updateIncarTargets() {
+  const t = editTarget();
+  const where = t.dir
+    ? (t.machine !== "local" ? `${t.machine}:${t.dir}` : t.dir)
+    : "no working case yet";
+  for (const [box, btn] of [["incar-target", "incar-save"], ["neb-incar-target", "neb-incar-save"]]) {
+    if (!$(box)) continue;
+    $(box).innerHTML = t.folder
+      ? `Editing the existing folder <b>${where}</b> — not the working case.`
+      : `Editing the working case <b>${where}</b>.`;
+    if ($(btn)) $(btn).textContent = t.folder ? "Save to folder" : "Save to case";
+  }
 }
 /* Populate the Running tab's machine dropdown: All + Local + each remote. */
 function refreshRunningMachineSelect() {
-  const sel = $("run-machine"); if (!sel) return;
-  const keep = sel.value;
-  sel.innerHTML = "<option value='all'>🌐 All machines</option>" +
-                  "<option value='local'>💻 Local — this computer</option>";
-  for (const r of REMOTES) sel.add(new Option(`🖥 ${r.name} — ${r.host}`, r.name));
-  const valid = keep === "all" || keep === "local" || REMOTES.some(r => r.name === keep);
-  sel.value = valid ? keep : "all";
+  fillMachineSelect($("run-machine"),
+    { extra: "<option value='all'>🌐 All machines</option>", fallback: "all" });
 }
 /* Populate the Working-case "working machine" dropdown (local + saved remotes). */
 function refreshWorkingMachineSelect() {
-  const sel = $("wc-machine"); if (!sel) return;
-  const keep = sel.value;
-  sel.innerHTML = "<option value='local'>💻 Local — this computer</option>";
-  for (const r of REMOTES) sel.add(new Option(`🖥 ${r.name} — ${r.host}`, r.name));
-  sel.value = REMOTES.some(r => r.name === keep) ? keep : "local";
+  fillMachineSelect($("wc-machine"));
 }
 /* Populate a plain "run on machine" dropdown (Workflow tab, NEB tab). */
 function refreshWorkflowRemoteSelect(id = "w-remote") {
-  const sel = $(id); if (!sel) return;
-  const keep = sel.value;
-  sel.innerHTML = "<option value='local'>💻 Local — this computer</option>";
-  for (const r of REMOTES) {
-    const cores = r.cpus ? ` · ${r.cpus} cores` : "";
-    sel.add(new Option(`🖥 ${r.name} — ${r.host}${cores}`, r.name));
-  }
-  sel.value = REMOTES.some(r => r.name === keep) ? keep : "local";
+  fillMachineSelect($(id), { cores: true });
 }
 /* Pre-fill the workflow CPU field from a machine's default core count. */
 function wMachineChanged() {
@@ -3031,15 +3170,22 @@ function machineCpus(name) {
   const r = REMOTES.find(m => m.name === name);
   return r && r.cpus ? r.cpus : null;
 }
+/* Rebuild a machine <select> — optional leading options, then local + each saved
+   remote — keeping the current choice when it still exists. The one list builder
+   behind every machine dropdown; per-dropdown wrappers only add side effects. */
+function fillMachineSelect(sel, { extra = "", cores = false, fallback = "local" } = {}) {
+  if (!sel) return;
+  const keep = sel.value;
+  sel.innerHTML = extra + "<option value='local'>💻 Local — this computer</option>";
+  for (const r of REMOTES) {
+    const c = cores && r.cpus ? ` · ${r.cpus} cores` : "";
+    sel.add(new Option(`🖥 ${r.name} — ${r.host}${c}`, r.name));
+  }
+  sel.value = [...sel.options].some(o => o.value === keep) ? keep : fallback;
+}
 function refreshRemoteSelect() {
   const sel = $("c-remote");
-  const keep = sel.value;
-  sel.innerHTML = "<option value='local'>💻 Local — this computer</option>";
-  for (const r of REMOTES) {
-    const cores = r.cpus ? ` · ${r.cpus} cores` : "";
-    sel.add(new Option(`🖥 ${r.name} — ${r.host}${cores}`, r.name));
-  }
-  sel.value = REMOTES.some(r => r.name === keep) ? keep : "local";
+  fillMachineSelect(sel, { cores: true });
   prevMachine = sel.value;
   // reflect the selected machine's default cores in the placeholder (no clobber)
   const def = sel.value !== "local" ? machineCpus(sel.value) : null;
@@ -3216,9 +3362,14 @@ async function loadIncar(fromTemplate, taId = "incar", type) {
     $(taId).value = text;
     if (taId === "incar") incarTemplateText = text;
   } else {
-    if (!currentCase()) { banner("No working case yet — build or import a structure in the Build tab and 💾 Save it."); return; }
-    const data = await api(`/api/file?dir=${encodeURIComponent(currentCase())}&name=INCAR` + caseQS());
-    $(taId).value = data.exists ? data.text : "(no INCAR in this case — load a template, edit, then save)";
+    const t = editTarget();
+    if (!t.dir) { banner("No working case yet — build or import a structure in the Build tab and 💾 Save it."); return; }
+    const data = await api(`/api/file?dir=${encodeURIComponent(t.dir)}&name=INCAR` +
+      (t.folder
+        ? (t.machine !== "local" ? "&machine=" + encodeURIComponent(t.machine) : "")
+        : caseQS()));
+    $(taId).value = data.exists ? data.text
+      : `(no INCAR in this ${t.folder ? "folder" : "case"} — load a template, edit, then save)`;
     if (taId === "incar") incarTemplateText = null;
   }
 }
@@ -3243,10 +3394,17 @@ async function incarFromOther(dir, machine = "local") {
   banner(`INCAR loaded from ${source} — review it, then “Save to case” to use it.`, "info");
 }
 async function saveIncar(taId = "incar") {
-  if (!currentCase()) { banner("No working case yet — build or import a structure in the Build tab and 💾 Save it."); return; }
-  await api("/api/file", caseBody({ dir: currentCase(), name: "INCAR", text: $(taId).value }));
+  const t = editTarget();
+  if (!t.dir) { banner("No working case yet — build or import a structure in the Build tab and 💾 Save it."); return; }
+  const body = t.folder
+    ? { dir: t.dir, name: "INCAR", text: $(taId).value,
+        ...(t.machine !== "local" ? { machine: t.machine } : {}) }
+    : caseBody({ dir: t.dir, name: "INCAR", text: $(taId).value });
+  await api("/api/file", body);
   if (taId === "incar") incarTemplateText = null;
-  banner("INCAR saved to the case — it now overrides templates.", "info");
+  banner(t.folder
+    ? `INCAR saved into ${t.dir} — that folder runs with it.`
+    : "INCAR saved to the case — it now overrides templates.", "info");
 }
 
 /* ---------- guided INCAR settings (from the option catalog) ---------- */
@@ -3475,15 +3633,9 @@ let resSel = new Map(); // key -> action payload {job_dir,[machine]}; survives p
 
 /* Populate the Results machine dropdown: All machines + Local + each remote. */
 function refreshResultMachineSelect() {
-  const sel = $("r-machine"); if (!sel) return;
-  const keep = sel.value;
-  let html = "";
-  if (REMOTES.length) html += "<option value='all'>🌐 All machines</option>";
-  html += "<option value='local'>💻 Local — this computer</option>";
-  sel.innerHTML = html;
-  for (const r of REMOTES) sel.add(new Option(`🖥 ${r.name} — ${r.host}`, r.name));
-  const valid = keep === "all" || keep === "local" || REMOTES.some(r => r.name === keep);
-  sel.value = valid ? keep : "local";
+  if (!$("r-machine")) return;
+  fillMachineSelect($("r-machine"),
+    { extra: REMOTES.length ? "<option value='all'>🌐 All machines</option>" : "" });
   showResControls();
 }
 /* Show only the controls that apply to the chosen machine scope. */
@@ -4750,8 +4902,7 @@ function openPicker(targetId, opts = {}) {
   $("pickermachinebox").style.display = PICKER.chooseMachine ? "block" : "none";
   if (PICKER.chooseMachine) {
     const sel = $("pickermachine");
-    sel.innerHTML = "<option value='local'>💻 Local — this computer</option>";
-    for (const r of REMOTES) sel.add(new Option(`🖥 ${r.name} — ${r.host}`, r.name));
+    fillMachineSelect(sel);
     sel.value = PICKER.machine && REMOTES.some(r => r.name === PICKER.machine)
       ? PICKER.machine : "local";
     PICKER.machine = sel.value;

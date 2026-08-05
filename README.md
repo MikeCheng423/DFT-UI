@@ -114,6 +114,29 @@ Each run is written to a **numbered job folder** (`jobs/<project>/0001_Fe`,
 `0002_Si`, …) using one global counter, so re-running never overwrites an earlier
 result. `--retry-failed` and `--parse-only` act on the latest numbered run.
 
+### Transition states (NEB)
+
+A `tss` case holds its two endpoints as `initial/POSCAR` and `final/POSCAR`;
+`--prepare` interpolates the images between them.
+
+Endpoints that came from **separate relaxations** usually do not share one atom
+ordering — ASE and pymatgen sort species alphabetically, VASP keeps whatever
+order it was handed — and a band built from mismatched endpoints is rejected
+before it runs. Re-index the final endpoint onto the initial one first:
+
+```bash
+python -m vasp_auto.atom_order inputs/A_to_B/initial/POSCAR \
+                               inputs/A_to_B/final/POSCAR
+# largest displacement per species: Au 0.58 A, C 0.66 A, O 3.11 A, H 3.72 A
+```
+
+It matches atoms per species by minimum-image distance and rewrites the target
+in place (pass a third path to write elsewhere). **Read the reported
+displacements**: one species far above the rest either genuinely moves in the
+reaction — the O and H above are an OH group leaving a carbon — or was paired
+wrong. Nothing re-indexes automatically for exactly that reason; in the web UI
+the same repair is the NEB tab's **⇄ Match atom order** button.
+
 ### Automatic SCF convergence
 
 Scan `NELM`, then `KPOINTS` using the best `NELM`:
@@ -141,6 +164,14 @@ Trials and a `scf_convergence_report.md` / `.csv` are written under
 - **AI builder** — describe a structure in plain words and a (Groq) LLM turns it
   into an exact ASE-built structure. Bring your own free Groq API key (pasted in
   the UI, kept in your browser). See [docs](docs/).
+- **NEB tab** — pick both endpoints (each can live on a different machine), see
+  them side by side, and repair mismatched atom ordering with **⇄ Match atom
+  order** before building the band.
+- **Run an existing folder** (Calculate and NEB tabs) — point at a folder that
+  already has inputs and run it as-is, skipping the builder. While that panel is
+  open the tab's INCAR editor and a verbatim KPOINTS box read and write *that
+  folder* rather than the working case; the editors say which one they target,
+  and closing the panel hands them back.
 - **Workflow builder, run console, results table** — with remote offload and a
   live remote job/file browser.
 

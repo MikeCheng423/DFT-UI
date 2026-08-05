@@ -343,7 +343,10 @@ def _validate_interpolation_inputs(initial, final, initial_path: Path, final_pat
     if initial["elements"] != final["elements"] or initial["counts"] != final["counts"]:
         raise ValueError(
             "initial/POSCAR and final/POSCAR must have the same element order "
-            f"and atom counts: {initial_path}, {final_path}"
+            f"and atom counts: {initial_path}, {final_path}. Endpoints from "
+            "separate relaxations often differ — re-index them with the NEB tab's "
+            "'Match atom order' button, or "
+            f"python -m vasp_auto.atom_order {initial_path} {final_path}"
         )
 
     if initial["coord_mode"].strip().lower()[0] != final["coord_mode"].strip().lower()[0]:

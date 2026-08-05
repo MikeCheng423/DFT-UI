@@ -17,9 +17,8 @@ summary. The same engine is driven three ways:
 The engine (`src/vasp_auto/`) is the single source of truth; both the CLI and
 the web UI call the same functions, so they behave identically.
 
-For the authoritative, always-current module-by-module description and the
-list of known problems / next jobs, see CLAUDE.md in this directory. This file
-is the directory map; CLAUDE.md is the narrative.
+This file is the directory map. For what each feature does and how to drive
+it, see README.md at the repository root and docs/ beside it.
 
 ----------------------------------------------------------------------------
 Top-level tree
@@ -40,7 +39,6 @@ vasp_auto/
 |   |   |-- __init__.py
 |   |   `-- static/index.html  single dependency-free HTML/JS front end
 |   `-- docs/                  developer / code-structure docs (this folder)
-|       |-- CLAUDE.md          architecture, conventions, work loop (canonical)
 |       |-- FILE_STRUCTURE.txt  this file
 |       |-- VASP_AUTO_CAPABILITIES.md
 |       `-- VASP_AUTO_COMMAND_AND_STRUCTURE.txt
@@ -105,5 +103,5 @@ Notes
 - inputs/ is authored by the user; jobs/ is generated output (never committed).
 - POTCAR/ is proprietary: never commit it, never print its contents.
 - .venv/, venv/, __pycache__/, *.egg-info/ and logs are local/generated.
-- Keep this map and CLAUDE.md in sync whenever modules are added or moved.
+- Keep this map in sync whenever modules are added or moved.
 ============================================================================

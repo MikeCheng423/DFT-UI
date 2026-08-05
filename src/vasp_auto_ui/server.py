@@ -604,11 +604,13 @@ def _output_dir(body, default: Path) -> Path:
     return default
 
 
-def _endpoint_structure_bytes(source_text: str, machine, endpoint: str) -> bytes:
+def _endpoint_structure(source_text: str, machine, endpoint: str) -> tuple[bytes, str]:
     """A NEB endpoint structure, local or on a named remote machine.
 
-    A directory source prefers the relaxed CONTCAR over POSCAR, so a finished
-    relax job can be given directly as an endpoint."""
+    Returns ``(contents, resolved_path)`` — the path is the file the bytes came
+    from, which callers writing a corrected structure back need to know. A
+    directory source prefers the relaxed CONTCAR over POSCAR, so a finished relax
+    job can be given directly as an endpoint."""
     if machine and machine != "local":
         remote = _resolve_remote(machine)
         base = str(source_text).rstrip("/")
@@ -621,17 +623,70 @@ def _endpoint_structure_bytes(source_text: str, machine, endpoint: str) -> bytes
                 except Exception:
                     continue
                 if local.exists() and local.stat().st_size:
-                    return local.read_bytes()
+                    return local.read_bytes(), candidate
             raise FileNotFoundError(
                 f"No CONTCAR or POSCAR for the {endpoint} state on {machine}: {source_text}")
     source = Path(source_text).expanduser().resolve()
     if source.is_file():
-        return source.read_bytes()
+        return source.read_bytes(), str(source)
     for name in ("CONTCAR", "POSCAR"):
         candidate = source / name
         if candidate.exists() and candidate.stat().st_size:
-            return candidate.read_bytes()
+            return candidate.read_bytes(), str(candidate)
     raise FileNotFoundError(f"No CONTCAR or POSCAR for the {endpoint} state: {source}")
+
+
+def api_atom_order(_query, body):
+    """Re-index the final endpoint's atoms onto the initial endpoint's ordering.
+
+    Explicitly user-triggered from the NEB tab — nothing in the run path does this
+    on its own, because the pairing is a judgement call: a species whose largest
+    displacement dwarfs the others either genuinely moves in the reaction or was
+    paired wrong, and only the person who built the endpoints can say which.
+
+    Writes the corrected structure back over the final endpoint (local or remote),
+    keeping the original alongside it as ``<name>.before_reindex``.
+    """
+    import shlex
+
+    from vasp_auto.atom_order import reindex_poscar_text
+    from vasp_auto.runner import _ship_file, _ssh_options, _ssh_target
+
+    initial_text, _ = _endpoint_structure(
+        str(body["initial"]), body.get("initial_machine"), "initial")
+    final_text, final_path = _endpoint_structure(
+        str(body["final"]), body.get("final_machine"), "final")
+
+    with tempfile.TemporaryDirectory(prefix="vasp_auto_order_") as tmp:
+        fixed, moves = reindex_poscar_text(
+            initial_text.decode("utf-8", "replace"),
+            final_text.decode("utf-8", "replace"),
+            Path(tmp),
+        )
+        if moves is None:
+            return {"changed": False, "path": final_path,
+                    "message": "Endpoints already share one atom ordering — nothing to do."}
+
+        machine = body.get("final_machine")
+        backup = final_path + ".before_reindex"
+        local_copy = Path(tmp) / "fixed_POSCAR"
+        local_copy.write_text(fixed, encoding="utf-8")
+        if machine and machine != "local":
+            remote = _resolve_remote(machine)
+            remote_command(remote, f"cp -n {shlex.quote(final_path)} {shlex.quote(backup)}")
+            _ship_file(local_copy, _ssh_target(remote), shlex.quote(final_path),
+                       remote, _ssh_options(remote))
+        else:
+            shutil.copy2(final_path, backup)
+            shutil.copy2(local_copy, final_path)
+
+    return {
+        "changed": True,
+        "path": final_path,
+        "backup": backup,
+        "poscar": fixed,
+        "moves": [{"element": element, "max_displacement": dist} for element, dist in moves],
+    }
 
 
 def api_build(_query, body):
@@ -791,7 +846,7 @@ def api_build(_query, body):
         case_dir = _output_dir(body, inputs / (body.get("output") or "neb_case"))
         for endpoint, source_text in (("initial", body["initial"]), ("final", body["final"])):
             machine = body.get(f"{endpoint}_machine") or body.get("machine")
-            data = _endpoint_structure_bytes(str(source_text), machine, endpoint)
+            data, _ = _endpoint_structure(str(source_text), machine, endpoint)
             target = case_dir / endpoint / "POSCAR"
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
@@ -2777,6 +2832,7 @@ POST_ROUTES = {
     "/api/nl_build": api_nl_build,
     "/api/nl_agent": api_nl_agent,
     "/api/match": api_match,
+    "/api/atom_order": api_atom_order,
     "/api/chgdiff": api_chgdiff,
     "/api/adsorption": api_adsorption,
     "/api/surface": api_surface,
