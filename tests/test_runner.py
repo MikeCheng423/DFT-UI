@@ -666,6 +666,8 @@ def test_test_remote_connection_all_ok():
         joined = " ".join(cmd)
         if "echo vasp_auto_ok" in joined:
             return subprocess.CompletedProcess(cmd, 0, "vasp_auto_ok\n", "")
+        if "echo writable" in joined:  # the remote_root probe
+            return subprocess.CompletedProcess(cmd, 0, "writable\n", "")
         return subprocess.CompletedProcess(cmd, 0, "yes\n", "")  # all test -x/-d/command -v pass
 
     with patch("subprocess.run", side_effect=fake_run):
@@ -673,6 +675,37 @@ def test_test_remote_connection_all_ok():
     assert res["ok"] is True
     names = {c["name"]: c["ok"] for c in res["checks"]}
     assert names["ssh"] and names["vasp_executable"] and names["slurm"]
+    assert names["remote_root"] is True
+
+
+def test_remote_connection_offload_checks_engine_mpirun_potcar():
+    """An offload machine is only ready if VASP, MPI, POTCARs and the engine are there."""
+    remote = {"host": "c.edu", "remote_root": "/scratch", "run_mode": "ssh_detached",
+              "vasp_executable": "/opt/vasp_std", "potcar_root": "/opt/potpaw",
+              "env_setup": "source /opt/intel/setvars.sh"}
+
+    def fake_run(cmd, **kwargs):
+        joined = " ".join(cmd)
+        if "echo vasp_auto_ok" in joined:
+            return subprocess.CompletedProcess(cmd, 0, "vasp_auto_ok\n", "")
+        if "echo writable" in joined:
+            return subprocess.CompletedProcess(cmd, 0, "writable\n", "")
+        if "mpirun" in joined:  # only visible after env_setup is sourced
+            assert "setvars.sh" in joined, "mpirun probe must source env_setup"
+            return subprocess.CompletedProcess(cmd, 0, "/opt/intel/bin/mpirun\n", "")
+        if "venv/bin/vasp-auto" in joined:  # remote_engine_installed
+            return subprocess.CompletedProcess(cmd, 0, "no\n", "")
+        return subprocess.CompletedProcess(cmd, 0, "yes\n", "")
+
+    with patch("subprocess.run", side_effect=fake_run):
+        res = check_remote_connection(remote)
+    names = {c["name"]: c["ok"] for c in res["checks"]}
+    assert names["mpirun"] and names["potcar_root"] and names["offload prerequisites"]
+    mpirun = next(c for c in res["checks"] if c["name"] == "mpirun")
+    assert "/opt/intel/bin/mpirun" in mpirun["detail"]  # reports which one a run picks
+    assert names["offload engine"] is False
+    # A missing engine is informational (first offload installs it), so not fatal.
+    assert res["ok"] is True
 
 
 def test_test_remote_connection_ssh_fails():

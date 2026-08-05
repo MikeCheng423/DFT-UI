@@ -3347,8 +3347,13 @@ async function setupRemote(name) {
   banner(`Setting up offload engine on "${name}"… (this can take a minute)`, "info");
   try {
     const res = await api("/api/remote/setup", { name });
-    if (res.ok) banner(`"${name}": offload engine ready — detached runs can now power off the laptop.`, "info");
-    else banner(`"${name}": engine setup failed — ${(res.detail || "").slice(-200)}`, "");
+    if (!res.ok) { banner(`"${name}": engine setup failed — ${(res.detail || "").slice(-200)}`, ""); return; }
+    // Engine installed: show the readiness checks (VASP binary, mpirun, POTCAR, rsync…).
+    renderRemoteChecks({ ...res, ok: res.ready });
+    document.querySelector('nav button[data-tab="remote"]').click();
+    banner(res.ready ? `"${name}": offload engine ready — detached runs can now power off the laptop.`
+                     : `"${name}": engine installed, but some checks failed — see the Remote tab.`,
+           res.ready ? "info" : "");
   } catch (e) { /* banner already shown */ }
 }
 

@@ -1451,7 +1451,20 @@ def setup_remote_engine(remote: dict, timeout: int = 600, on_progress=None) -> d
 
     ok = res.returncode == 0 and "ENGINE_OK" in res.stdout
     detail = (res.stdout + res.stderr).strip()
-    return {"ok": ok, "vasp_auto": paths["vasp_auto"], "detail": detail[-2000:]}
+    result = {"ok": ok, "vasp_auto": paths["vasp_auto"], "detail": detail[-2000:]}
+    if ok:
+        # Installing the engine is only half of "is this machine ready?" — report
+        # the binary/MPI/POTCAR/transfer checks too, so a machine that installs
+        # fine but cannot actually run VASP says so here instead of at submit time.
+        log("checking machine readiness…")
+        report = check_remote_connection(remote)
+        result["checks"] = report["checks"]
+        result["ready"] = report["ok"]
+        result["message"] = ("Engine installed, machine ready" if report["ok"]
+                             else "Engine installed, but some checks failed")
+    else:
+        result["message"] = "Engine install failed"
+    return result
 
 
 def remote_engine_installed(remote: dict) -> bool:
@@ -1853,10 +1866,23 @@ def check_remote_connection(remote: dict) -> dict:
 
     root = remote.get("remote_root")
     if root:
-        res = remote_command(remote, f"test -d {shlex.quote(root)} && echo yes || echo no")
-        ok = "yes" in res.stdout
-        checks.append({"name": "remote_root", "ok": True,
-                       "detail": f"{root} exists" if ok else f"{root} will be created on submit"})
+        # Writable matters, not just present: every mode creates inputs/, results/
+        # and the engine home under it. A read-only root fails at submit time.
+        quoted = shlex.quote(root)
+        res = remote_command(
+            remote,
+            f"if [ -d {quoted} ]; then test -w {quoted} && echo writable || echo readonly; "
+            f"elif test -w \"$(dirname {quoted})\"; then echo creatable; else echo blocked; fi",
+        )
+        state = res.stdout.strip()
+        detail = {
+            "writable": f"{root} exists and is writable",
+            "readonly": f"{root} exists but is not writable",
+            "creatable": f"{root} will be created on submit",
+            "blocked": f"{root} does not exist and its parent is not writable",
+        }.get(state, f"could not check {root}")
+        checks.append({"name": "remote_root", "ok": state in ("writable", "creatable"),
+                       "detail": detail})
 
     if remote.get("vasp_executable"):
         exe = _remote_vasp_exe(remote)  # resolves a bin directory to <dir>/vasp_std
@@ -1864,6 +1890,19 @@ def check_remote_connection(remote: dict) -> dict:
         ok = "yes" in res.stdout
         checks.append({"name": "vasp_executable", "ok": ok,
                        "detail": f"{exe} found" if ok else f"{exe} not found or not executable"})
+
+    # The machine's own POTCAR library (offload builds POTCARs there instead of
+    # shipping one). VASP counterpart of the pseudo_dir check below.
+    if remote.get("potcar_root"):
+        potcar_root = remote["potcar_root"]
+        res = remote_command(
+            remote, f"find {shlex.quote(potcar_root)} -maxdepth 2 -name POTCAR -print -quit "
+                    "2>/dev/null | grep -q . && echo yes || echo no",
+        )
+        ok = "yes" in res.stdout
+        checks.append({"name": "potcar_root", "ok": ok,
+                       "detail": f"POTCAR library found in {potcar_root}" if ok
+                       else f"no <element>/POTCAR files under {potcar_root}"})
 
     if remote.get("qe_executable"):
         qe = remote["qe_executable"]
@@ -1901,12 +1940,24 @@ def check_remote_connection(remote: dict) -> dict:
                        "detail": f"UPF files found in {pseudo_dir}" if ok
                        else f"no UPF files found in {pseudo_dir}"})
 
-    # ssh run mode launches mpirun directly; scheduler modes need their submit cmd.
-    if remote_run_mode(remote) == "ssh":
-        res = remote_command(remote, "command -v mpirun >/dev/null 2>&1 && echo yes || echo no")
-        ok = "yes" in res.stdout
+    # ssh and offload modes launch mpirun directly; scheduler modes need their
+    # submit cmd (mpirun there comes from the batch script, not the login node).
+    mode = remote_run_mode(remote)
+    if mode in ("ssh", "ssh_detached"):
+        # Sourced exactly like a real run does, or a machine whose MPI only
+        # appears after env_setup reports a false negative.
+        env_setup = _remote_env_setup(remote)
+        prefix = f"{{ {env_setup} ; }} >/dev/null 2>&1; " if env_setup else ""
+        res = remote_command(remote, prefix + "command -v mpirun || true")
+        # The path matters, not just presence: a distro /usr/bin/mpirun shadowing
+        # the build VASP was linked against runs N serial jobs instead of one
+        # parallel one, silently. Report which mpirun a real run would pick up.
+        found = res.stdout.strip().splitlines()[-1].strip() if res.stdout.strip() else ""
+        ok = found.startswith("/")
         checks.append({"name": "mpirun", "ok": ok,
-                       "detail": "mpirun available" if ok else "mpirun not on PATH"})
+                       "detail": f"{found} (as a run resolves it)" if ok else
+                       ("mpirun not on PATH, even after env_setup" if env_setup
+                        else "mpirun not on PATH — set env_setup if it needs a module/setvars")})
     else:
         scheduler = remote.get("scheduler", "slurm")
         submit_cmd = SCHEDULER_COMMANDS.get(scheduler)
@@ -1923,8 +1974,36 @@ def check_remote_connection(remote: dict) -> dict:
                        "detail": (f"up to {remote_concurrency_limit(remote)} jobs at once"
                                   if ok else "flock is required for the max-jobs setting")})
 
-    # remote_root is allowed to be missing (created on submit); everything else must pass.
-    overall = all(c["ok"] for c in checks if c["name"] != "remote_root")
+    # Offload runs the whole engine on the remote: it needs python3 + setsid, and
+    # the venv that setup_remote_engine installs (auto-installed on first submit,
+    # so a missing engine is reported but does not fail the machine).
+    if mode == "ssh_detached":
+        res = remote_command(
+            remote, "command -v setsid >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 "
+                    "&& python3 -c 'import venv' 2>/dev/null && echo yes || echo no")
+        ok = "yes" in res.stdout
+        checks.append({"name": "offload prerequisites", "ok": ok,
+                       "detail": "setsid + python3 with venv available" if ok
+                       else "needs setsid and python3 with the venv module (python3-venv)"})
+        installed = remote_engine_installed(remote)
+        checks.append({"name": "offload engine", "ok": installed,
+                       "detail": f"installed at {_remote_engine_paths(remote)['vasp_auto']}"
+                       if installed else
+                       "not installed yet — 'Set up offload engine', or automatic on first run"})
+
+    # Inputs are shipped and results fetched with rsync whenever the local host
+    # has it; rsync must then exist on both ends.
+    if shutil.which("rsync"):
+        res = remote_command(remote, "command -v rsync >/dev/null 2>&1 && echo yes || echo no")
+        ok = "yes" in res.stdout
+        checks.append({"name": "rsync", "ok": ok,
+                       "detail": "rsync available" if ok
+                       else "rsync not on the remote PATH; install it or transfers fail"})
+
+    # A missing remote_root is created on submit, and the offload engine installs
+    # itself on first run; neither blocks the machine. Everything else must pass.
+    informational = {"offload engine"}
+    overall = all(c["ok"] for c in checks if c["name"] not in informational)
     return {
         "ok": overall,
         "host": remote.get("host"),
