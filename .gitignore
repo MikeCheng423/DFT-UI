@@ -41,3 +41,8 @@ ase-gui
 src/CRASH
 src/MEMO.txt
 src/input_tmp.in
+
+# Knowledge-graph output (`graphify`): regenerated from the source it indexes and
+# rewritten on every query, so committing it is churn. Matches at any depth —
+# there is a second tree under src/vasp_auto/.
+graphify-out/
