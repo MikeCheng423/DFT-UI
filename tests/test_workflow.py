@@ -1,4 +1,5 @@
 from vasp_auto.workflow import (
+    _is_calc_process,
     _neb_image_energy,
     build_row,
     count_ionic_steps,
@@ -309,3 +310,23 @@ def test_run_one_case_scheduler_remote_still_submits(finished_job, monkeypatch):
     )
     assert row["status"] == "submitted"
     assert row["job_id"] == "99"
+
+
+def test_only_calculation_processes_count_as_running(tmp_path):
+    """A shell parked in a case folder must not make it read as "running".
+
+    Regression: an interactive bash left cd'd into inputs/<case> showed that
+    case as a running job on the board (and the stop button would have killed
+    the shell).
+    """
+    def proc(name):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "comm").write_text(name + "\n", encoding="utf-8")
+        return d
+
+    for name in ("vasp_std_vtst", "vasp_gam", "mpirun", "pw.x", "projwfc.x", "python3"):
+        assert _is_calc_process(proc(name)), name
+    for name in ("bash", "zsh", "sshd", "vim", "tail"):
+        assert not _is_calc_process(proc(name)), name
+    assert not _is_calc_process(tmp_path / "no_such_pid")  # unreadable /proc entry

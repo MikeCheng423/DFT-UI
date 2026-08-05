@@ -1592,6 +1592,10 @@ def submit_job_detached(
         # The engine writes the real (numbered) job root here, so the submitting host
         # can later resolve exactly where the job lives on this machine.
         f"export VASP_AUTO_JOBDIR_FILE={shlex.quote(jobdir_f)}",
+        # run.log is a file, so Python would block-buffer into it and leave the
+        # log empty for hours on a long run — exactly what makes a healthy job
+        # look dead. vasp-auto is a console script, so -u is not an option here.
+        "export PYTHONUNBUFFERED=1",
         f"{{ {env_line} ; }} >/dev/null 2>&1 || true",
         "ulimit -s unlimited 2>/dev/null || true",
         f"{shlex.quote(paths['vasp_auto'])} {shlex.quote('inputs/' + case_name)} "
@@ -2111,9 +2115,13 @@ def list_remote_jobs(remote: dict, root: str) -> list[dict]:
     # parse_outcar_summary semantics so remote rows fill the same columns.
     script = (
         f"r={rq}; "
-        # One snapshot of every visible process's cwd, shared by all dirs below
-        # (only this user's /proc entries are readable — VASP runs as this user).
-        'cw=$(readlink /proc/[0-9]*/cwd 2>/dev/null); '
+        # One snapshot of every visible *calculation* process's cwd, shared by all
+        # dirs below (only this user's /proc entries are readable — VASP runs as
+        # this user). Shells are excluded to match workflow.proc_cwds: an ssh
+        # session left sitting in a case folder is not a running job.
+        'cw=$(for p in /proc/[0-9]*; do case "$(cat "$p/comm" 2>/dev/null)" in '
+        'vasp*|mpirun*|mpiexec*|orterun*|prterun*|srun*|python*|*.x) '
+        'readlink "$p/cwd" 2>/dev/null;; esac; done); '
         'isjob() { [ -e "$1/OUTCAR" ] || [ -e "$1/vasprun.xml" ] || '
         '[ -e "$1/OSZICAR" ] || [ -e "$1/INCAR" ] || [ -e "$1/POSCAR" ] || '
         '[ -e "$1/pw.in" ]; }; '

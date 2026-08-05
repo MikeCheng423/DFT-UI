@@ -500,6 +500,8 @@ def test_submit_job_detached_ships_launches_and_marks(tmp_path):
     assert "--converge-encut" in shipped["run_sh"]
     # the engine records its real (numbered) job root here for later resolution
     assert "export VASP_AUTO_JOBDIR_FILE=/work/.vasp_auto/runs/H2O/job_dir" in shipped["run_sh"]
+    # run.log is a file: without this it block-buffers and a live job looks dead
+    assert "export PYTHONUNBUFFERED=1" in shipped["run_sh"]
     # marker tags the machine, control dir and pid for later polling
     marker = json.loads((local_job / ".remote.json").read_text())
     assert marker["machine"] == "wkstn"

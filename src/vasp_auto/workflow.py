@@ -397,20 +397,46 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
+# Process names that mean "a calculation is working here". Deliberately not
+# shells: an interactive bash left sitting in a case folder used to make that
+# folder read as "running" on the job board. QE's programs all end in ".x".
+# ponytail: a name list, so an exotic launcher (ibrun, aprun) reads as idle;
+# add it here if a machine ever uses one. A recorded .pid still covers those.
+_CALC_PROC_PREFIXES = ("vasp", "mpirun", "mpiexec", "orterun", "prterun",
+                       "srun", "python")
+
+
+def _is_calc_process(proc_dir: Path) -> bool:
+    """True if /proc/<pid> belongs to a DFT calculation, not a shell or editor."""
+    try:
+        comm = (proc_dir / "comm").read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return False  # other users' processes aren't readable — fine
+    return comm.startswith(_CALC_PROC_PREFIXES) or comm.endswith(".x")
+
+
+def _calc_proc_cwds() -> list[tuple[int, str]]:
+    """(pid, cwd) of every live calculation process we can inspect."""
+    found: list[tuple[int, str]] = []
+    for link in Path("/proc").glob("[0-9]*/cwd"):
+        if not _is_calc_process(link.parent):
+            continue
+        try:
+            found.append((int(link.parent.name), os.readlink(link)))
+        except (OSError, ValueError):
+            pass
+    return found
+
+
 def proc_cwds() -> set[str]:
-    """Working directories of every process we can inspect (via /proc).
+    """Working directories of every live calculation process (via /proc).
 
     The real "is something running here" signal: mpirun/vasp/pw.x execute with
     cwd inside the job directory, so a job dir with a live process under it is
-    genuinely running whatever files it has or hasn't written yet.
+    genuinely running whatever files it has or hasn't written yet. Shells are
+    excluded — parking a terminal in a folder is not a running job.
     """
-    cwds: set[str] = set()
-    for link in Path("/proc").glob("[0-9]*/cwd"):
-        try:
-            cwds.add(os.readlink(link))
-        except OSError:
-            pass  # other users' processes aren't readable — fine
-    return cwds
+    return {cwd for _, cwd in _calc_proc_cwds()}
 
 
 def dir_active(job_dir, cwds: set[str] | None = None) -> bool:
@@ -425,17 +451,10 @@ def dir_active(job_dir, cwds: set[str] | None = None) -> bool:
 def pids_in_dir(job_dir) -> list[int]:
     """PIDs of every live process whose cwd is inside ``job_dir`` — the kill-side
     counterpart of :func:`dir_active`, so anything the board shows as "running"
-    can also be terminated, even without a recorded ``.pid``."""
+    can also be terminated, even without a recorded ``.pid``. Same calculation-
+    only filter, so the stop button can never kill a shell parked in the dir."""
     d = str(Path(job_dir))
-    pids: list[int] = []
-    for link in Path("/proc").glob("[0-9]*/cwd"):
-        try:
-            c = os.readlink(link)
-        except OSError:
-            continue
-        if c == d or c.startswith(d + "/"):
-            pids.append(int(link.parent.name))
-    return pids
+    return [pid for pid, c in _calc_proc_cwds() if c == d or c.startswith(d + "/")]
 
 
 def _read_pid(job_dir: Path) -> int | None:
