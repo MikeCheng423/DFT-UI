@@ -16,6 +16,24 @@ def test_job_log_finished(finished_job):
     assert "RESULTS" in text and "Final energy" in text
 
 
+def test_job_log_relaxation_hitting_nsw_is_not_converged(tmp_path):
+    # A relaxation that ran out of ionic steps: every step converged
+    # electronically ("EDIFF is reached") but the ionic criterion
+    # ("reached required accuracy") never appeared → not converged.
+    (tmp_path / "INCAR").write_text("IBRION = 2\nNSW = 60\n", encoding="utf-8")
+    (tmp_path / "OUTCAR").write_text(
+        "   NSW    =     60    number of steps for IOM\n"
+        + "  aborting loop because EDIFF is reached\n"
+          "  free  energy   TOTEN  =       -10.00000000 eV\n" * 60
+        + " General timing and accounting informations for this run:\n",
+        encoding="utf-8",
+    )
+    text = build_job_log(tmp_path, case_name="relax")
+    assert "Status       : finished" in text
+    assert "Converged    : no" in text
+    assert "did not converge" in text
+
+
 def test_job_log_failed(tmp_path):
     # No OUTCAR/energy + a fatal error signature → a 'failed' summary that still
     # surfaces the problem, so a failure leaves a readable result behind.

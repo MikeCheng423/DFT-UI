@@ -2158,8 +2158,12 @@ def list_remote_jobs(remote: dict, root: str) -> list[dict]:
         'y=s; [ -d "$d/scf_convergence" ] && y=c; '
         '{ [ -e "$d/initial/POSCAR" ] && [ -e "$d/final/POSCAR" ]; } && y=n; '
         '{ [ -d "$d/00" ] && [ -d "$d/01" ]; } && y=n; '
-        'c=0; grep -q -e "reached required accuracy" '
-        '-e "aborting loop because EDIFF is reached" "$d/OUTCAR" 2>/dev/null && c=1; '
+        # c: converged. "EDIFF is reached" is electronic SCF only, so it counts
+        # just for a static run (NSW = 0); a relaxation needs the ionic marker.
+        'c=0; if grep -q "reached required accuracy" "$d/OUTCAR" 2>/dev/null; then c=1; '
+        'elif grep -q "aborting loop because EDIFF is reached" "$d/OUTCAR" 2>/dev/null && '
+        '{ grep -q "NSW *= *0 *number of steps" "$d/OUTCAR" 2>/dev/null || '
+        '! grep -q "number of steps for IOM" "$d/OUTCAR" 2>/dev/null; }; then c=1; fi; '
         "e=$(awk '$4==\"E0=\"{x=$5} END{print x}' \"$d/OSZICAR\" 2>/dev/null); "
         '[ -n "$e" ] || e=-; '
         'printf "%s\\t%s%s%s%s%s%s%s%s\\t%s%s\\t%s\\t%s\\t%s\\n" "$n" "$o" "$v" "$z" "$g" "$k" "$p" "$a" "$q" "$y" "$c" "$e" "$pd" "$d"; }; '
