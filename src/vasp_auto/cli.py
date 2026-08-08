@@ -2232,6 +2232,11 @@ def _bundle_tss_inputs(case_dir: Path, bundle: Path, case_name: str) -> Path:
         (bundle / "final").mkdir()
         shutil.copy2(initial, bundle / "initial" / "POSCAR")
         shutil.copy2(final, bundle / "final" / "POSCAR")
+        for endpoint in ("initial", "final"):
+            # Carries the endpoint energies, which the remote turns into EFIRST/ELAST.
+            oszicar = case_dir / endpoint / "OSZICAR"
+            if oszicar.exists():
+                shutil.copy2(oszicar, bundle / endpoint / "OSZICAR")
         potcar_src = bundle / "initial" / "POSCAR"
     elif image_dirs:
         for image_dir in image_dirs:

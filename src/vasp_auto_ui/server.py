@@ -341,7 +341,9 @@ def _fetch_remote_case(marker: dict, dest: Path, names=None) -> Path:
     remote_dir = str(marker["remote_dir"]).rstrip("/")
     dest.mkdir(parents=True, exist_ok=True)
     if marker.get("type") == "tss":
-        wanted = ["initial/POSCAR", "final/POSCAR", "INCAR", "KPOINTS"]
+        # The endpoint OSZICARs are optional but carry EFIRST/ELAST into the run.
+        wanted = ["initial/POSCAR", "final/POSCAR", "initial/OSZICAR", "final/OSZICAR",
+                  "INCAR", "KPOINTS"]
         required = {"initial/POSCAR", "final/POSCAR"}
     else:
         wanted = list(names or ["POSCAR", "INCAR", "KPOINTS", "workflow.yaml"])
@@ -636,6 +638,28 @@ def _endpoint_structure(source_text: str, machine, endpoint: str) -> tuple[bytes
     raise FileNotFoundError(f"No CONTCAR or POSCAR for the {endpoint} state: {source}")
 
 
+def _endpoint_oszicar(source_text: str, machine) -> bytes | None:
+    """The endpoint run's OSZICAR, when the source is a finished run folder.
+
+    It carries the relaxed endpoint energy into the case, where preparing the NEB
+    turns it into EFIRST/ELAST — VASP never computes images 00/NN itself, so
+    without them it treats both endpoints as 0 eV. None when the source is a bare
+    structure file or an unfinished run."""
+    base = str(source_text).rstrip("/")
+    if machine and machine != "local":
+        remote = _resolve_remote(machine)
+        with tempfile.TemporaryDirectory(prefix="vasp_auto_oz_") as tmp:
+            local = Path(tmp) / "OSZICAR"
+            try:
+                fetch_remote_file(remote, f"{base}/OSZICAR", local)
+            except Exception:
+                return None
+            return local.read_bytes() if local.exists() and local.stat().st_size else None
+    source = Path(base).expanduser().resolve()
+    oszicar = (source.parent if source.is_file() else source) / "OSZICAR"
+    return oszicar.read_bytes() if oszicar.is_file() and oszicar.stat().st_size else None
+
+
 def api_atom_order(_query, body):
     """Re-index the final endpoint's atoms onto the initial endpoint's ordering.
 
@@ -850,6 +874,9 @@ def api_build(_query, body):
             target = case_dir / endpoint / "POSCAR"
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
+            oszicar = _endpoint_oszicar(str(source_text), machine)
+            if oszicar:
+                (target.parent / "OSZICAR").write_bytes(oszicar)
         case_dir = case_dir.resolve()
         return _finalize_built_case(
             {"case": str(case_dir), "poscar": str(case_dir / "initial" / "POSCAR")},

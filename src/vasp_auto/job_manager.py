@@ -11,7 +11,7 @@ _JOB_NUMBER_RE = re.compile(r"^(\d+)_(.*)$")
 _JOB_NUMBER_WIDTH = 4
 
 from vasp_auto.ase_tools import interpolate_neb_with_ase
-from vasp_auto.incar import apply_spin_to_incar, spin_incar_text
+from vasp_auto.incar import apply_spin_to_incar, set_incar_value, spin_incar_text
 from vasp_auto.kpoints import kpoints_text_from_spec
 from vasp_auto.potcar_finder import build_potcar, get_elements_from_poscar, map_potcar_dirs
 from vasp_auto.target_utils import get_case_type
@@ -254,6 +254,33 @@ def _copy_or_build_potcar(case_dir: Path, job_dir: Path, poscar_path: Path, potc
         )
 
 
+def _apply_endpoint_energies(case_dir: Path, incar_path: Path):
+    """Fill EFIRST/ELAST from the endpoints' OSZICARs, or say why they are missing.
+
+    VASP does not compute images 00/NN and does not read their OUTCARs: with
+    EFIRST/ELAST unset it treats both endpoints as E = 0 eV, wrecking the
+    terminal tangents and the climbing-image pick. The energies are here whenever
+    the endpoints were brought in with ``python -m vasp_auto.neb_endpoints`` or
+    the NEB tab's endpoint pickers, both of which leave the OSZICARs in the case.
+    """
+    from vasp_auto.neb_endpoints import endpoint_energies
+
+    energies = endpoint_energies(case_dir)
+    if None not in energies.values():
+        set_incar_value(incar_path, "EFIRST", energies["initial"])
+        set_incar_value(incar_path, "ELAST", energies["final"])
+        return
+
+    text = incar_path.read_text(encoding="utf-8")
+    if all(re.search(rf"(?mi)^\s*{tag}\s*=", text) for tag in ("EFIRST", "ELAST")):
+        return  # set by hand in the case INCAR — leave them alone
+    print(
+        f"Note      : {case_dir.name} has no endpoint energies, so EFIRST/ELAST are "
+        "unset and VASP will treat both endpoints as 0 eV. Fix with: "
+        "python -m vasp_auto.neb_endpoints CASE INITIAL_RUN FINAL_RUN"
+    )
+
+
 def _write_neb_incar(case_dir: Path, job_dir: Path, neb_images: int):
     template_path = case_dir / "INCAR.neb"
     if not template_path.exists():
@@ -275,6 +302,8 @@ def _write_neb_incar(case_dir: Path, job_dir: Path, neb_images: int):
     else:
         default_text = load_incar_template("neb") + f"IMAGES = {neb_images}\n"
         (job_dir / "INCAR").write_text(default_text, encoding="utf-8")
+
+    _apply_endpoint_energies(case_dir, job_dir / "INCAR")
 
 
 def _select_incar_text(case_dir: Path, calc_type: str | None) -> str:
