@@ -690,7 +690,7 @@
     <div class="grow">
       <div class="card">
         <h3>Go</h3>
-        <span class="inline"><label>NEB images</label><input id="c-neb" placeholder="5" title="Number of intermediate images between initial and final"></span>
+        <span class="inline"><label>NEB images</label><input id="c-neb" placeholder="required" title="Number of intermediate images between initial and final (no default)"></span>
         <span class="inline"><label>CPU cores (MPI ranks)</label><input id="neb-cpus" placeholder="1" title="Passed to mpirun -np"></span>
         <span class="inline"><label>run on machine</label>
           <select id="neb-remote" title="This computer or a saved remote machine (managed in the Remote tab)">
@@ -2677,7 +2677,7 @@ async function doPreview() {
   const p0 = runPayload();
   const data = await api("/api/preview", caseBody({
     target: currentCase(), calc_type: p0.calc_type, kpoints: kSpec(), spin: p0.spin,
-    engine: p0.engine, pseudo_dir: p0.pseudo_dir }));
+    engine: p0.engine, pseudo_dir: p0.pseudo_dir, neb_images: p0.neb_images }));
   const p = data.previews[0];
   activeConsole = "console";
   if (p.engine === "qe") {

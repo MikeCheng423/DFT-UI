@@ -59,7 +59,6 @@ def default_config(base_dir: Path | None = None) -> dict:
         "pseudo_dir": os.environ.get("QE_PSEUDO_DIR"),
         "jobs_root": str(base_dir / "jobs"),
         "potcar_root": str(base_dir / "POTCAR"),
-        "neb_images": 5,
     }
 
 

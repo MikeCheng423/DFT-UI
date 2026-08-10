@@ -112,6 +112,13 @@ def test_create_job_from_case_tss_interpolates_images(tss_case, potcar_library, 
     assert (job_dir / "POTCAR").exists()
 
 
+def test_create_job_from_case_tss_requires_image_count(tss_case, potcar_library, tmp_path):
+    """No default image count: an interpolating NEB has to be told how many."""
+    case_info = make_case_info(tss_case, tmp_path / "jobs", single_mode=True)
+    with pytest.raises(ValueError, match="image count"):
+        create_job_from_case(case_info, potcar_root=str(potcar_library))
+
+
 # ----------------------------------------------------- numbered job folders
 
 def test_make_case_info_new_allocates_sequential(scf_case, tmp_path):

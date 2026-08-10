@@ -273,7 +273,8 @@ def parse_args():
         "--neb-images",
         type=int,
         default=None,
-        help="Number of intermediate images for TSS/NEB preparation. Default: config neb_images or 5.",
+        help="Number of intermediate images for TSS/NEB preparation. "
+        "Required for TSS cases unless config.yaml sets neb_images; there is no default.",
     )
     parser.add_argument(
         "--spin",
@@ -2750,8 +2751,17 @@ def main():
     mode = info["mode"]
     project_name = info["project_name"]
     case_dirs = filter_case_dirs(info["case_dirs"], args.cases)
-    neb_images = args.neb_images or int(config.get("neb_images", 5))
+    neb_images = args.neb_images or config.get("neb_images")
+    neb_images = int(neb_images) if neb_images else None
     calc_type = parse_calc_type(args.calc_type) if args.calc_type else None
+    if "tss" in info["case_types"].values() and not neb_images:
+        raise SystemExit(
+            "NEB/TSS cases need an image count: pass --neb-images N or set "
+            "neb_images in config.yaml."
+        )
+    # The offload path forwards args.neb_images to the remote engine, so a count
+    # that came from config.yaml has to land there too.
+    args.neb_images = neb_images
     kpoints_spec = _kpoints_spec_from_args(args)
     scheduler = args.scheduler or config.get("scheduler", "local")
 

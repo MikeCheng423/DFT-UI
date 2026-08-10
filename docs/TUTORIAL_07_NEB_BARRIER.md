@@ -16,8 +16,8 @@ surface reactions, or any other activated process.
 - A relaxed Pt(111) slab with H adsorbed in two distinct hollow sites (the two
   endpoints). See Tutorial 08 for the slab-building and Tutorial 04 for
   relaxation.
-- `config.yaml` with `vasp_executable`, `potcar_root`, and optionally
-  `neb_images: 5`.
+- `config.yaml` with `vasp_executable`, `potcar_root`, and `neb_images: 5`
+  (or pass `--neb-images` on every run — there is no default image count).
 
 ---
 

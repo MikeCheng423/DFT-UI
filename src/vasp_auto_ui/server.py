@@ -1083,6 +1083,7 @@ def _preview_for_target(target: Path, body):
             potcar_map=config.get("potcar_map"),
             calc_type=body.get("calc_type") or None,
             kpoints_spec=kpoints,
+            neb_images=body.get("neb_images") or config.get("neb_images"),
             spin=bool(body.get("spin")),
             magmom_map=config.get("magmom_map"),
             engine=engine,

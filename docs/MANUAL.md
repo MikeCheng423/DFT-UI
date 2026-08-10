@@ -131,7 +131,7 @@ overlays the global one (global → project → case).
 vasp_executable: /home/vv/src/vasp.6.4.2/bin/vasp_std
 jobs_root: /home/vv/vasp_auto/jobs
 potcar_root: /home/vv/vasp_auto/POTCAR
-neb_images: 5
+neb_images: 5        # NEB image count — no default, set here or --neb-images
 
 potcar_map:            # pseudopotential variants per element
   Fe: Fe_pv

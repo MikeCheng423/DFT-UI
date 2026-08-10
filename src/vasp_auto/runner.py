@@ -1538,7 +1538,8 @@ def submit_job_detached(
 
     with tempfile.TemporaryDirectory() as tmp:
         cfg = Path(tmp) / "config.yaml"
-        cfg_lines = [f"jobs_root: {results_base}", "neb_images: 5"]
+        # No neb_images here: the local run forwards --neb-images to the remote.
+        cfg_lines = [f"jobs_root: {results_base}"]
         if engine == "qe":
             cfg_lines.append(f"qe_executable: {exe}")
             # The machine's own UPF library, if it has one; otherwise the caller
