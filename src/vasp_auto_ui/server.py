@@ -1180,6 +1180,32 @@ def api_results(query, _body):
     return {"project": info["project_name"], "rows": rows, "excel": excel}
 
 
+def api_parse_result(_query, body):
+    """Re-parse one Results-row job and rebuild its Excel summary."""
+    source = str(body["job_dir"])
+    machine = body.get("machine")
+    job_dir = _analysis_dir(source, machine)
+    if not _job_has_output(job_dir):
+        raise FileNotFoundError(f"No calculation output found in {source}")
+
+    case_name = Path(str(body.get("case") or Path(source.rstrip("/")).name)).name or "job"
+    case_info = _job_dir_case_info(job_dir)
+    case_info["case_name"] = case_name
+    row = _result_row(job_dir.parent.name, "single", case_info)
+
+    from vasp_auto.excel_writer import write_results_to_excel
+    excel = job_dir / f"{case_name}.xlsx"
+    write_results_to_excel(str(excel), [row])
+
+    result_path = str(excel)
+    if _is_remote_machine(machine):
+        from vasp_auto.runner import _ship_file, _ssh_options, _ssh_target
+        remote = _resolve_remote(machine)
+        result_path = f"{source.rstrip('/')}/{excel.name}"
+        _ship_file(excel, _ssh_target(remote), result_path, remote, _ssh_options(remote))
+    return {"row": row, "excel": result_path}
+
+
 def api_template(query, _body):
     return {"text": load_incar_template(query["type"][0])}
 
@@ -2868,6 +2894,7 @@ POST_ROUTES = {
     "/api/cache_clear": api_cache_clear,
     "/api/bader": api_bader,
     "/api/preview": api_preview,
+    "/api/parse_result": api_parse_result,
     "/api/incar_apply": api_incar_apply,
     "/api/run": api_run,
     "/api/resume": api_resume,
@@ -2917,11 +2944,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_json(self, payload, status=200):
         data = json.dumps(payload).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the browser left; the API action has already completed
 
     def _dispatch(self, routes, body):
         parsed = urlparse(self.path)

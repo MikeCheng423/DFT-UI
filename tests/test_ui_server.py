@@ -31,6 +31,16 @@ def _post(base, path, payload):
         return json.loads(response.read())
 
 
+def test_json_response_ignores_disconnected_browser():
+    class DisconnectedHandler:
+        _send_json = ui_server.Handler._send_json
+
+        def send_response(self, _status):
+            raise BrokenPipeError
+
+    DisconnectedHandler()._send_json({"token": "already-started"})
+
+
 def test_meta_lists_calc_types(ui_base):
     meta = _get(ui_base, "/api/meta")
     assert "scf" in meta["calc_types"]
@@ -42,6 +52,7 @@ def test_index_served(ui_base):
     with urllib.request.urlopen(ui_base + "/") as response:
         page = response.read().decode()
     assert "vasp_auto" in page and "Structure editor" in page
+    assert 'id="reportmodal"' in page and 'id="reportcard"' not in page
 
 
 def test_structure_endpoint(ui_base, scf_case):
@@ -856,6 +867,19 @@ def test_results_single_job_dir(ui_base, tmp_path, monkeypatch):
     data = _get(ui_base, "/api/results?target=" + str(jobs / "Si"))
     assert [r["case"] for r in data["rows"]] == ["Si"]
     assert data["rows"][0]["job_dir"] == str(jobs / "Si")
+
+
+def test_parse_result_rebuilds_job_excel(ui_base, tmp_path):
+    job = tmp_path / "0001_Si"
+    job.mkdir()
+    (job / "OUTCAR").write_text(
+        "  aborting loop because EDIFF is reached\n"
+        "  free  energy   TOTEN  =       -5.25000000 eV\n",
+        encoding="utf-8",
+    )
+    data = _post(ui_base, "/api/parse_result", {"job_dir": str(job), "case": "Si"})
+    assert data["row"]["energy_eV"] == -5.25
+    assert Path(data["excel"]).is_file()
 
 
 def test_neb_endpoint(ui_base, tmp_path):

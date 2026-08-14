@@ -83,6 +83,8 @@ def parse_outcar_summary(outcar_path: Path) -> dict:
     summary = {
         "energy_eV": None,
         "converged": False,
+        "geometry_converged": False,
+        "electronic_converged": False,
         "energy_without_entropy_eV": None,
         "magmom_total": None,
     }
@@ -90,7 +92,7 @@ def parse_outcar_summary(outcar_path: Path) -> dict:
         return summary
 
     ionic_ok = False   # "reached required accuracy" — the ionic criterion
-    ediff_ok = False   # electronic SCF only, printed once per ionic step
+    ediff_ok = False   # electronic SCF status for the current ionic step
     nsw = None
     with open(outcar_path, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
@@ -100,6 +102,8 @@ def parse_outcar_summary(outcar_path: Path) -> dict:
                     summary["energy_eV"] = float(parts[4])
                 except (IndexError, ValueError):
                     pass
+                summary["electronic_converged"] = ediff_ok
+                ediff_ok = False
             elif "energy  without entropy" in line:
                 try:
                     summary["energy_without_entropy_eV"] = float(line.split("=")[1].split()[0])
@@ -122,7 +126,9 @@ def parse_outcar_summary(outcar_path: Path) -> dict:
     # A relaxation counts as converged only when VASP reports the ionic
     # criterion; EDIFF alone is electronic convergence of one ionic step.
     # NSW unknown (no OUTCAR header) → fall back to the old, lenient rule.
-    summary["converged"] = ionic_ok or (ediff_ok and not nsw)
+    summary["geometry_converged"] = ionic_ok
+    summary["electronic_converged"] = ediff_ok or summary["electronic_converged"]
+    summary["converged"] = ionic_ok or (summary["electronic_converged"] and not nsw)
     return summary
 
 
