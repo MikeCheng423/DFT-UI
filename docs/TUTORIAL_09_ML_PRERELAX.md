@@ -62,7 +62,7 @@ done
 To use the production OMat24 model (requires fairchem-core and a GPU):
 
 ```bash
-vasp-auto --ml-energy inputs/Si_bulk --ml-model uma-s-1p1 --ml-task omat
+vasp-auto --ml-energy inputs/Si_bulk --ml-model uma-s-1p2 --ml-task omat
 ```
 
 `--ml-task` selects the UMA task head:
@@ -71,15 +71,16 @@ vasp-auto --ml-energy inputs/Si_bulk --ml-model uma-s-1p1 --ml-task omat
 |------|----------|
 | `omat` | Inorganic bulk materials (default) |
 | `oc20` | Adsorbates on metal surfaces (catalysis) |
-| `omol` | Molecules |
-| `odac` | Metal–organic frameworks |
+| `oc22` | Oxide catalysis (`uma-s-1p2` only) |
+| `oc25` | (Electro)catalysis (`uma-s-1p2` only) |
+| `odac` | Metal–organic frameworks / direct air capture |
 
 ---
 
 ## Step 2 — MLIP pre-relaxation + VASP refinement
 
 ```bash
-# Step 2a: pre-relax with the EMT demo potential (or uma-s-1p1 for real work):
+# Step 2a: pre-relax with the EMT demo potential (or uma-s-1p2 for real work):
 vasp-auto inputs/Si_bulk \
   --ml-relax \
   --ml-model emt \
@@ -107,7 +108,7 @@ Flag details:
 | Flag | Meaning |
 |------|---------|
 | `--ml-relax` | Run MLIP pre-relaxation before any VASP calculation. |
-| `--ml-model emt` | MLIP model name. Use `uma-s-1p1` for production work. |
+| `--ml-model emt` | MLIP model name. Use `uma-s-1p2` for production work. |
 | `--ml-fmax 0.05` | Force convergence in eV/Å. Default: 0.05. |
 | `--ml-steps 200` | Maximum MLIP ionic steps. Default: 200. |
 | `--ml-relax-cell` | Also relax the unit cell (shape + volume) during ML pre-relax. |
@@ -177,7 +178,7 @@ vasp-auto inputs/Si_bulk --ml-relax --ml-model emt \
           --calc-type relax --kmesh 6 --cpus 8
 
 # Relax cell shape/volume with MLIP too:
-vasp-auto inputs/Si_bulk --ml-relax --ml-relax-cell --ml-model uma-s-1p1
+vasp-auto inputs/Si_bulk --ml-relax --ml-relax-cell --ml-model uma-s-1p2
 
 # Use a local checkpoint:
 vasp-auto inputs/Si_bulk --ml-relax --ml-checkpoint /data/models/eqV2_OMat24.pt

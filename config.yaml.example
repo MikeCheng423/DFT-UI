@@ -45,6 +45,11 @@ pseudo_map:                             # pick a specific UPF per element
 # Postprocessing calc types also need the QE companion executables beside pw.x:
 # neb.x, ph.x, dynmat.x, dos.x, projwfc.x, bands.x, pp.x, average.x, epsilon.x.
 
+# Machine-learning pre-relax / single-point screen (fairchem UMA; the weights
+# live in the gated Hugging Face repo facebook/UMA).
+# ml_model: uma-s-1p2   # every task head; uma-s-1p1 / uma-m-1p1 have no oc22/oc25
+# ml_task: omat         # omat bulk | oc20 adsorbates | oc22 oxides | oc25 (electro)cat | odac MOFs
+
 # Remote submission (used with `vasp-auto <target> --remote`).
 # All input files (INCAR, KPOINTS, POSCAR, POTCAR, submit.sh) are copied to the
 # remote machine and submitted to its queue over SSH, so this host can be turned

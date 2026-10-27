@@ -534,9 +534,11 @@ huggingface-cli login                  # accept the licence on Hugging Face
 ```
 
 Flags / config keys: `--ml-model` (`ml_model:` in config.yaml; default
-`uma-s-1p1`; `emt` = ASE demo potential for simple metals, no install),
-`--ml-task` (`omat` materials default, `oc20` catalysis, `omol` molecules,
-`odac` MOFs), `--ml-checkpoint` (a downloaded fairchem 1.x OMat24 eqV2
+`uma-s-1p2`, the only UMA checkpoint with every task head; `emt` = ASE demo
+potential for simple metals, no install), `--ml-task` (`omat` materials
+default, `oc20` adsorbates on metals, `oc22` oxide catalysis, `oc25`
+(electro)catalysis, `odac` MOFs — `oc22`/`oc25` need `uma-s-1p2`),
+`--ml-checkpoint` (a downloaded fairchem 1.x OMat24 eqV2
 checkpoint file), `--ml-fmax` (default 0.05 eV/Å), `--ml-steps` (default
 200), `--ml-relax-cell` (also relax the cell), `--ml-only` (stop after ML).
 
@@ -549,7 +551,7 @@ UI's 🎞 animation works on it. The same feature is in the UI Build tab
 
 ```bash
 vasp-auto --ml-energy inputs/Al --ml-model emt        # quick energy + max|F|
-vasp-auto --ml-energy inputs/Fe2O3 --ml-model uma-s-1p1 # OMat24 screen (needs fairchem)
+vasp-auto --ml-energy inputs/Fe2O3 --ml-model uma-s-1p2 --ml-task oc22 # UMA screen (needs fairchem)
 ```
 
 `--ml-energy TARGET` is a read-only screen: it reads the POSCAR in TARGET (a

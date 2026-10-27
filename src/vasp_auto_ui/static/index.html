@@ -403,8 +403,12 @@
         <p class="sub">Relax the <i>working case</i> with an MLIP before VASP, writing a new <code>_ml</code> case.
           <b>emt</b> works out of the box (simple metals). The <b>uma-*</b> models need
           <code>pip install fairchem-core</code> <i>and</i> a Hugging Face login with access to
-          <code>facebook/UMA</code> — otherwise the download fails with a gated-repo error.</p>
-        <span class="inline"><label>model</label><select id="ml-model" style="width:230px"></select></span>
+          <code>facebook/UMA</code> — otherwise the download fails with a gated-repo error.
+          The <b>task</b> picks the UMA head: <code>omat</code> bulk crystals, <code>oc20</code> adsorbates
+          on metals, <code>oc22</code> oxide catalysis, <code>oc25</code> electrocatalysis, <code>odac</code> MOFs.</p>
+        <span class="inline"><label>model</label><select id="ml-model" style="width:230px" onchange="mlModelChanged()"></select></span>
+        <span class="inline"><label>task</label><select id="ml-task" style="width:260px"
+          title="UMA task head — pick the one matching the chemistry. oc22/oc25 only exist in uma-s-1p2; emt ignores the task."></select></span>
         <span class="inline"><label>fmax (eV/Å)</label><input id="ml-fmax" placeholder="0.05" style="width:55px"></span>
         <span class="inline"><label>max steps</label><input id="ml-steps" placeholder="200" style="width:55px"></span>
         <br><button class="act" onclick="mlRelax()">ML relax → new case</button>
@@ -1214,8 +1218,12 @@ async function init() {
   for (const p of META.kpath_presets) $("kpaths").appendChild(new Option(p, p));
   const mlSel = $("ml-model");
   for (const m of (META.ml_models || [])) mlSel.add(new Option(m.label || m.name, m.name));
-  // default to the configured/engine default if it's installable here, else the first (emt)
+  // default to the configured/engine default if it's offered here, else the first entry
   if ([...mlSel.options].some(o => o.value === META.ml_model_default)) mlSel.value = META.ml_model_default;
+  const taskSel = $("ml-task");
+  for (const t of (META.ml_tasks || [])) taskSel.add(new Option(t.label || t.name, t.name));
+  if ([...taskSel.options].some(o => o.value === META.ml_task_default)) taskSel.value = META.ml_task_default;
+  mlModelChanged();
   initAiProviders();
   mpKeyStatus();
   $("c-sched").value = META.config.scheduler || "local";
@@ -2572,14 +2580,27 @@ async function adsorptionBuild() {
   afterChange();
   banner("Adsorbate placed — save the structure, then run a 'relax' on it.", "info");
 }
+// Grey out task heads the chosen model does not carry (oc22/oc25 are uma-s-1p2
+// only); emt has no task heads at all.
+function mlModelChanged() {
+  const model = $("ml-model").value, taskSel = $("ml-task");
+  taskSel.disabled = (model === "emt");
+  for (const t of (META.ml_tasks || [])) {
+    const opt = [...taskSel.options].find(o => o.value === t.name);
+    if (opt) opt.disabled = !!(t.models && !t.models.includes(model));
+  }
+  if (taskSel.selectedOptions[0] && taskSel.selectedOptions[0].disabled) taskSel.value = "omat";
+}
 function mlRelax() {
   if (!currentCase()) { banner("ML relax runs on a saved case — 💾 Save the structure in the Build tab first."); return; }
   banner("ML relaxation running… (first use of a fairchem model downloads weights)", "info");
   api("/api/mlrelax", { case: currentCase(), model: $("ml-model").value || null,
+    task: $("ml-task").value || null,
     fmax: $("ml-fmax").value || null, steps: $("ml-steps").value || null })
     .then(async r => {
       await built({ case: r.case_dir });
-      banner(`ML relaxed in ${r.steps} steps (${r.model}): E = ${r.energy_eV.toFixed(4)} eV, ` +
+      banner(`ML relaxed in ${r.steps} steps (${r.model}${r.task ? "/" + r.task : ""}): ` +
+             `E = ${r.energy_eV.toFixed(4)} eV, ` +
              `max|F| = ${r.max_force_eV_A.toFixed(3)} eV/Å` +
              (r.converged ? "" : " — NOT converged, raise max steps"), r.converged ? "info" : "warn");
     });

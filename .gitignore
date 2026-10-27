@@ -7,6 +7,19 @@
 # VASP pseudopotentials — proprietary, licensed; users supply their own.
 POTCAR/
 
+# MLIP weights and dataset shards — Meta owns the UMA/OMat24/OC20/OC22/OC25/ODAC
+# licence (gated repo facebook/UMA); each user downloads their own after being
+# granted access. They normally live in ~/.cache/fairchem, outside the repo —
+# these rules only stop a stray copy or a repo-local cache from being published.
+.cache/
+fairchem_cache/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.lmdb
+*.aselmdb
+
 # Calculation inputs/outputs and run artifacts (large, machine-specific).
 jobs/
 inputs/

@@ -8,8 +8,11 @@ magnitude.
 
 MLIP backends (all optional, imported lazily):
 
-- ``uma-*`` / other fairchem 2.x names: ``pretrained_mlip.get_predict_unit``
-  + ``FAIRChemCalculator`` (``omat`` task for inorganic materials).
+- ``uma-*`` (fairchem 2.x): ``pretrained_mlip.get_predict_unit`` +
+  ``FAIRChemCalculator``.  One checkpoint, several task heads — pick the one
+  matching the chemistry: ``omat`` (bulk inorganic), ``oc20`` (adsorbates on
+  metals), ``oc22`` (oxide catalysis), ``oc25`` (electrocatalysis), ``odac``
+  (MOFs).  ``oc22``/``oc25`` exist only in ``uma-s-1p2``.
   Install: ``pip install fairchem-core`` (UMA checkpoints are gated on
   Hugging Face — ``huggingface-cli login`` once).
 - ``--ml-checkpoint`` file: fairchem 1.x ``OCPCalculator`` with a downloaded
@@ -30,17 +33,31 @@ from pathlib import Path
 
 from vasp_auto.ase_tools import require_ase
 
-DEFAULT_ML_MODEL = "uma-s-1p1"
+DEFAULT_ML_MODEL = "uma-s-1p2"
 DEFAULT_ML_TASK = "omat"
 
 # Selectable MLIP backends, in UI-presentation order. ``gated`` marks models
 # whose weights need fairchem-core + a Hugging Face login (facebook/UMA access);
 # ``emt`` runs out of the box with no download (simple metals only).
 ML_MODELS = [
+    {"name": "uma-s-1p2", "label": "uma-s-1p2 — UMA small v1.2, all tasks", "gated": True},
+    {"name": "uma-s-1p1", "label": "uma-s-1p1 — UMA small v1.1 (no oc22/oc25)", "gated": True},
+    {"name": "uma-m-1p1", "label": "uma-m-1p1 — UMA medium, slower (no oc22/oc25)", "gated": True},
     {"name": "emt", "label": "emt — demo, no install (simple metals)", "gated": False},
-    {"name": "uma-s-1p1", "label": "uma-s-1p1 — UMA small (fairchem + HF login)", "gated": True},
-    {"name": "uma-s-1p2", "label": "uma-s-1p2 — UMA small v1.2 (fairchem + HF login)", "gated": True},
-    {"name": "uma-m-1p1", "label": "uma-m-1p1 — UMA medium (fairchem + HF login)", "gated": True},
+]
+
+# UMA task heads relevant to this group's work, in UI-presentation order.
+# ``models`` restricts a head to the checkpoints that carry it; absent means
+# every UMA model has it. The omol (molecules) and omc (molecular crystals)
+# heads exist in fairchem but are deliberately not exposed here.
+ML_TASKS = [
+    {"name": "omat", "label": "omat — inorganic materials, bulk crystals"},
+    {"name": "oc20", "label": "oc20 — catalysis, adsorbates on metal surfaces"},
+    {"name": "oc22", "label": "oc22 — oxide catalysis (uma-s-1p2 only)",
+     "models": ["uma-s-1p2"]},
+    {"name": "oc25", "label": "oc25 — (electro)catalysis (uma-s-1p2 only)",
+     "models": ["uma-s-1p2"]},
+    {"name": "odac", "label": "odac — MOFs, direct air capture"},
 ]
 
 # Available structure databases, in UI-presentation order.
@@ -63,7 +80,7 @@ _INSTALL_HINT = (
     "models: pip install fairchem-core. The UMA weights live in the GATED "
     "Hugging Face repo facebook/UMA — request access there, then authenticate "
     "(`huggingface-cli login` or export HF_TOKEN). Current UMA model names are "
-    "uma-s-1p1 / uma-s-1p2 / uma-m-1p1 (the old 'uma-s-1' was renamed). For a "
+    "uma-s-1p2 (default, all task heads) / uma-s-1p1 / uma-m-1p1. For a "
     "dependency-free demo use --ml-model emt (ASE effective-medium, simple metals)."
 )
 
@@ -75,6 +92,35 @@ _MP_INSTALL_HINT = (
 
 # Path to the local mp-api source tree so it can be used without a system install.
 _LOCAL_MP_API = Path(__file__).parents[4] / "api"
+
+
+def _reported_task(model: str, task: str, checkpoint: str | None) -> str | None:
+    """The UMA head a result came from — None when the backend has no heads.
+
+    Energies from different heads are on different references, so every result
+    records which one produced it.
+    """
+    return None if checkpoint or model.lower() == "emt" else task
+
+
+def check_ml_task(model: str, task: str) -> None:
+    """Raise ValueError if ``task`` is not a head of UMA model ``model``.
+
+    fairchem only reports an unknown task after downloading the checkpoint
+    (multi-GB on first use), so the pairing is checked up front.
+    """
+    known = {t["name"]: t for t in ML_TASKS}
+    entry = known.get(task)
+    if entry is None:
+        raise ValueError(
+            f"Unknown ML task {task!r}. Available: {', '.join(known)}."
+        )
+    models = entry.get("models")
+    if models and model not in models:
+        raise ValueError(
+            f"UMA model {model!r} has no {task!r} head — use "
+            f"{' or '.join(models)} for this task."
+        )
 
 
 def get_ml_calculator(
@@ -98,6 +144,7 @@ def get_ml_calculator(
             raise ImportError(_INSTALL_HINT) from exc
         return OCPCalculator(checkpoint_path=str(checkpoint), cpu=(device != "cuda"))
 
+    check_ml_task(model, task)
     try:
         from fairchem.core import FAIRChemCalculator, pretrained_mlip
     except ImportError as exc:
@@ -495,6 +542,7 @@ def ml_relax_case(
         "steps": len(frames) - 1,
         "converged": bool(converged),
         "model": "checkpoint" if checkpoint else model,
+        "task": _reported_task(model, task, checkpoint),
     }
 
 
@@ -521,4 +569,5 @@ def ml_energy(
         "energy_eV": float(atoms.get_potential_energy()),
         "max_force_eV_A": float(max_force),
         "model": "checkpoint" if checkpoint else model,
+        "task": _reported_task(model, task, checkpoint),
     }

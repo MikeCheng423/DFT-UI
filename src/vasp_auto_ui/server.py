@@ -132,7 +132,7 @@ def _config() -> dict:
 def api_meta(_query, _body):
     from vasp_auto.ai_providers import DEFAULT_PROVIDER, provider_catalog
     from vasp_auto.ase_engine import ASE_CALCULATORS, ASE_SUPPORTED_CALC_TYPES
-    from vasp_auto.ml_tools import ML_MODELS
+    from vasp_auto.ml_tools import DEFAULT_ML_TASK, ML_MODELS, ML_TASKS
     from vasp_auto.qe_tools import QE_ALL_CALC_TYPES, QE_COMPANION_PROGRAMS
 
     config = _config()
@@ -141,6 +141,7 @@ def api_meta(_query, _body):
         "calc_type_info": {t.value: CALC_TYPE_INFO.get(t, "") for t in CalcType},
         "kpath_presets": sorted(KPATH_PRESETS),
         "ml_models": ML_MODELS,
+        "ml_tasks": ML_TASKS,
         "ai_providers": provider_catalog(),
         "ai_provider_default": DEFAULT_PROVIDER,
         "ase_calculators": list(ASE_CALCULATORS),
@@ -150,6 +151,7 @@ def api_meta(_query, _body):
         # UI default: the user's configured model if set, else 'emt' (always runs,
         # no download) — the gated UMA models would otherwise fail on first click.
         "ml_model_default": config.get("ml_model") or "emt",
+        "ml_task_default": config.get("ml_task") or DEFAULT_ML_TASK,
         "repo_root": str(REPO_ROOT),
         "inputs_root": str(REPO_ROOT / "inputs"),
         "config": {
