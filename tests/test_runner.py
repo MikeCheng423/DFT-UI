@@ -783,16 +783,19 @@ def test_list_remote_jobs_parses_and_sorts():
         "1700008000\t1000011\ts0\t-5.5\t12345\t/work/Cu_live\n"      # PID alive -> running
         "1700008200\t0010001\ts0\t-7.7\t-\t/work/Ni_cwd\n"           # live proc in dir -> running
         "1700008500\t1000010\ts0\t-6.6\t999999\t/work/Zn_stalled\n"  # PID dead -> stalled
+        "1700009000\t10110001\ts1\t-8.8\t-\t/work/Queued_resume\n"  # old output + queued resume
         "garbage line without tabs\n"
     )
     with patch("vasp_auto.runner.remote_command",
-               return_value=subprocess.CompletedProcess([], 0, out, "")):
+               return_value=subprocess.CompletedProcess([], 0, out, "")) as command:
         rows = list_remote_jobs(remote, "/work")
 
+    assert "/work/.vasp_auto/runs" in command.call_args.args[1]
     st = {r["name"]: r["status"] for r in rows}
     assert st == {"Fe2O3_scf": "stalled", "Zn_stalled": "stalled", "Cu_live": "running",
                   "Ni_cwd": "running", "CoO_killed": "terminated",
-                  "NiO_prepared": "prepared", "Au13_relax": "done"}
+                  "NiO_prepared": "prepared", "Au13_relax": "done",
+                  "Queued_resume": "pending"}
     assert rows[0]["modified_ts"] == 1700009999  # newest first
     done = next(r for r in rows if r["name"] == "Au13_relax")
     assert done["has_outcar"] is True and done["converged"] is True

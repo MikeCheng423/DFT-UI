@@ -195,7 +195,7 @@ Speeds up VASP relaxation by starting from an MLIP-relaxed geometry.
 vasp-auto --ml-energy inputs/Al --ml-model emt
 
 # Pre-relax with Meta OMat24/UMA, then continue to DFT
-vasp-auto inputs/Al --ml-relax --ml-model uma-s-1p1 --calc-type relax
+vasp-auto inputs/Al --ml-relax --ml-model uma-s-1p2 --calc-type relax
 
 # Pre-relax only (no VASP), EMT demo backend (no fairchem needed)
 vasp-auto inputs/Al --ml-relax --ml-model emt --ml-only
@@ -337,7 +337,7 @@ potcar_map:               # pseudopotential variants
 magmom_map:               # default magnetic moments
   Fe: 5.0
   Ni: 5.0
-ml_model: uma-s-1p1       # MLIP model
+ml_model: uma-s-1p2       # MLIP model (omat/oc20/oc22/oc25/odac task heads)
 bader_executable: bader   # Henkelman binary
 workflow: "relax,scf,dos" # default chain when --workflow not given
 remote:                   # default SSH remote machine

@@ -173,6 +173,7 @@
   #tab-results #restable a { color: var(--accent); font-weight: 600; text-decoration: none; }
   #tab-results #restable a:hover { text-decoration: underline; }
   .actbtn { margin: 0 2px; padding: 3px 9px; font-size: 13px; line-height: 1.2; }
+  .result-actions { width: 150px; padding: 4px 8px; }
   .pager { display: flex; gap: 10px; align-items: center; margin-top: 12px;
            font-size: 13px; color: var(--dim); flex-wrap: wrap; }
   .pager button[disabled] { opacity: .4; cursor: default; }
@@ -402,8 +403,12 @@
         <p class="sub">Relax the <i>working case</i> with an MLIP before VASP, writing a new <code>_ml</code> case.
           <b>emt</b> works out of the box (simple metals). The <b>uma-*</b> models need
           <code>pip install fairchem-core</code> <i>and</i> a Hugging Face login with access to
-          <code>facebook/UMA</code> — otherwise the download fails with a gated-repo error.</p>
-        <span class="inline"><label>model</label><select id="ml-model" style="width:230px"></select></span>
+          <code>facebook/UMA</code> — otherwise the download fails with a gated-repo error.
+          The <b>task</b> picks the UMA head: <code>omat</code> bulk crystals, <code>oc20</code> adsorbates
+          on metals, <code>oc22</code> oxide catalysis, <code>oc25</code> electrocatalysis, <code>odac</code> MOFs.</p>
+        <span class="inline"><label>model</label><select id="ml-model" style="width:230px" onchange="mlModelChanged()"></select></span>
+        <span class="inline"><label>task</label><select id="ml-task" style="width:260px"
+          title="UMA task head — pick the one matching the chemistry. oc22/oc25 only exist in uma-s-1p2; emt ignores the task."></select></span>
         <span class="inline"><label>fmax (eV/Å)</label><input id="ml-fmax" placeholder="0.05" style="width:55px"></span>
         <span class="inline"><label>max steps</label><input id="ml-steps" placeholder="200" style="width:55px"></span>
         <br><button class="act" onclick="mlRelax()">ML relax → new case</button>
@@ -595,12 +600,7 @@
       <div class="card">
         <h3>Go</h3>
         <button class="ghost" onclick="doPreview()" title="Show the INCAR/KPOINTS/POTCAR that would be used — writes nothing">👁 Preview inputs</button>
-        <span class="inline"><label>prepare into folder</label>
-          <select id="c-prepdir" title="Folder on the machine selected above that 📁 Prepare only writes the job folder into"></select></span>
-        <button class="ghost" onclick="startRun('prepare')" title="Write the job folder on the selected machine but don't start VASP">📁 Prepare only</button>
         <button class="act"  onclick="startRun('run')" title="Prepare and run VASP now">▶ Run</button>
-        <button class="ghost" onclick="startResume()" title="Resume the latest unfinished job in place from its newest CONTCAR — keeps that job's INCAR/KPOINTS/POTCAR and its job number">⏯ Resume</button>
-        <button class="ghost" onclick="startRun('parse')" title="Re-read finished output files and rebuild the Excel summary">📊 Parse results</button>
       </div>
       <div class="card">
         <h3>INCAR editor <span style="text-transform:none">(optional)</span></h3>
@@ -690,7 +690,7 @@
     <div class="grow">
       <div class="card">
         <h3>Go</h3>
-        <span class="inline"><label>NEB images</label><input id="c-neb" placeholder="5" title="Number of intermediate images between initial and final"></span>
+        <span class="inline"><label>NEB images</label><input id="c-neb" placeholder="required" title="Number of intermediate images between initial and final (no default)"></span>
         <span class="inline"><label>CPU cores (MPI ranks)</label><input id="neb-cpus" placeholder="1" title="Passed to mpirun -np"></span>
         <span class="inline"><label>run on machine</label>
           <select id="neb-remote" title="This computer or a saved remote machine (managed in the Remote tab)">
@@ -785,12 +785,6 @@
       <button class="ghost" onclick="toggleResTool('adscard')" title="Adsorption energy from a slab+adsorbate, a clean slab and a gas-molecule job">🧗 Adsorption energy</button>
       <button class="ghost" onclick="toggleResTool('chgdiffcard')" title="Charge-density difference Δρ between a combined job and its fragments">Δρ Charge-density difference</button>
     </div>
-  </div>
-  <div class="card" id="reportcard" style="display:none">
-    <h3>Report — <span id="reportcase" style="text-transform:none"></span>
-      <a id="reportdl" style="color:var(--accent);margin-left:8px" href="#">⬇ download report.md</a>
-      <button class="ghost" onclick="$('reportcard').style.display='none'">close</button></h3>
-    <pre class="console" id="reportview" style="height:auto;max-height:420px"></pre>
   </div>
 </div>
 
@@ -1085,6 +1079,16 @@ ssh user@host 'echo ok'      # must print ok with no password</pre>
     <div style="margin-top:8px;font-size:12.5px;color:var(--dim)">click a file name to view it · ⬇ downloads it · click a 📁 folder to open it (convergence trials, NEB images…).</div>
   </div>
 </div>
+<div id="reportmodal" role="dialog" aria-modal="true" aria-labelledby="reporttitle" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:50">
+  <div style="background:var(--panel);max-width:900px;margin:30px auto;border:1px solid var(--line);border-radius:10px;padding:14px 16px;max-height:88vh;display:flex;flex-direction:column">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <button class="ghost" id="reportclose" style="padding:3px 10px" onclick="closeReport()">← back</button>
+      <h3 id="reporttitle" style="margin:0;font-size:16px;flex:1;text-transform:none;letter-spacing:0;color:var(--text)">Report — <span id="reportcase"></span></h3>
+      <a id="reportdl" class="iconbtn" href="#" download style="text-decoration:none;padding:3px 10px">⬇ download report.md</a>
+    </div>
+    <pre class="console" id="reportview" style="height:74vh;margin:0">Loading report…</pre>
+  </div>
+</div>
 <!-- INCAR spreadsheet shown before a resume -->
 <div id="incarmodal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:60">
   <div style="background:var(--panel);max-width:620px;margin:40px auto;border:1px solid var(--line);border-radius:10px;padding:14px 16px;max-height:85vh;display:flex;flex-direction:column">
@@ -1214,8 +1218,12 @@ async function init() {
   for (const p of META.kpath_presets) $("kpaths").appendChild(new Option(p, p));
   const mlSel = $("ml-model");
   for (const m of (META.ml_models || [])) mlSel.add(new Option(m.label || m.name, m.name));
-  // default to the configured/engine default if it's installable here, else the first (emt)
+  // default to the configured/engine default if it's offered here, else the first entry
   if ([...mlSel.options].some(o => o.value === META.ml_model_default)) mlSel.value = META.ml_model_default;
+  const taskSel = $("ml-task");
+  for (const t of (META.ml_tasks || [])) taskSel.add(new Option(t.label || t.name, t.name));
+  if ([...taskSel.options].some(o => o.value === META.ml_task_default)) taskSel.value = META.ml_task_default;
+  mlModelChanged();
   initAiProviders();
   mpKeyStatus();
   $("c-sched").value = META.config.scheduler || "local";
@@ -2572,14 +2580,27 @@ async function adsorptionBuild() {
   afterChange();
   banner("Adsorbate placed — save the structure, then run a 'relax' on it.", "info");
 }
+// Grey out task heads the chosen model does not carry (oc22/oc25 are uma-s-1p2
+// only); emt has no task heads at all.
+function mlModelChanged() {
+  const model = $("ml-model").value, taskSel = $("ml-task");
+  taskSel.disabled = (model === "emt");
+  for (const t of (META.ml_tasks || [])) {
+    const opt = [...taskSel.options].find(o => o.value === t.name);
+    if (opt) opt.disabled = !!(t.models && !t.models.includes(model));
+  }
+  if (taskSel.selectedOptions[0] && taskSel.selectedOptions[0].disabled) taskSel.value = "omat";
+}
 function mlRelax() {
   if (!currentCase()) { banner("ML relax runs on a saved case — 💾 Save the structure in the Build tab first."); return; }
   banner("ML relaxation running… (first use of a fairchem model downloads weights)", "info");
   api("/api/mlrelax", { case: currentCase(), model: $("ml-model").value || null,
+    task: $("ml-task").value || null,
     fmax: $("ml-fmax").value || null, steps: $("ml-steps").value || null })
     .then(async r => {
       await built({ case: r.case_dir });
-      banner(`ML relaxed in ${r.steps} steps (${r.model}): E = ${r.energy_eV.toFixed(4)} eV, ` +
+      banner(`ML relaxed in ${r.steps} steps (${r.model}${r.task ? "/" + r.task : ""}): ` +
+             `E = ${r.energy_eV.toFixed(4)} eV, ` +
              `max|F| = ${r.max_force_eV_A.toFixed(3)} eV/Å` +
              (r.converged ? "" : " — NOT converged, raise max steps"), r.converged ? "info" : "warn");
     });
@@ -2658,7 +2679,6 @@ function runPayload(mode) {
     cpus: $("c-cpus").value || null, parallel: $("c-par").value || null,
     scheduler: $("c-sched").value,
     remote: $("c-remote").value !== "local" ? $("c-remote").value : null,
-    prepare_dir: mode === "prepare" ? ($("c-prepdir").value || null) : null,
     spin: $("c-spin").checked || null,
     magmom: $("c-magmom").value || null,
     auto_retry: $("c-retry").checked ? 2 : null,
@@ -2677,7 +2697,7 @@ async function doPreview() {
   const p0 = runPayload();
   const data = await api("/api/preview", caseBody({
     target: currentCase(), calc_type: p0.calc_type, kpoints: kSpec(), spin: p0.spin,
-    engine: p0.engine, pseudo_dir: p0.pseudo_dir }));
+    engine: p0.engine, pseudo_dir: p0.pseudo_dir, neb_images: p0.neb_images }));
   const p = data.previews[0];
   activeConsole = "console";
   if (p.engine === "qe") {
@@ -2879,23 +2899,6 @@ async function editIncarBeforeResume(dir, machine) {
   if (text !== f.text)
     await api("/api/file", { dir, machine: machine || "local", name: "INCAR", text });
   return true;
-}
-async function startResume(consoleId) {
-  if (!currentCase()) { banner("No working case yet — Resume picks up the latest job of a case that has already run."); return; }
-  const cpus = askResumeCpus();
-  if (cpus === undefined) return;
-  // Resume the latest existing job directory in place from its newest CONTCAR,
-  // reusing that job's own KPOINTS/POTCAR (no new job number), with a chance to
-  // edit its INCAR first. Works on the working machine — local, or the chosen
-  // remote, where it restarts in place.
-  const payload = { target: currentCase(), machine: workingMachine(),
-                    case_type: currentCaseType() || "single", cpus };
-  const prev = await api("/api/resume", { ...payload, preview: true });
-  if (!(await editIncarBeforeResume(prev.job_dir, prev.machine))) return;
-  const data = await api("/api/resume", payload);
-  activeToken = data.token;
-  activeConsole = consoleId || "console";
-  $(activeConsole).textContent = "resuming latest job…";
 }
 function fmtElapsed(s) {
   return s >= 3600 ? `${(s/3600).toFixed(1)} h` : s >= 60 ? `${Math.floor(s/60)}m ${s%60}s` : `${s}s`;
@@ -3190,28 +3193,6 @@ function refreshRemoteSelect() {
   // reflect the selected machine's default cores in the placeholder (no clobber)
   const def = sel.value !== "local" ? machineCpus(sel.value) : null;
   $("c-cpus").placeholder = def ? String(def) : "1";
-  loadPrepDirs();
-}
-/* Folders offered by "prepare into folder" for the machine in c-remote: the
-   machine's standard folders plus whatever else sits under its remote_root.
-   Local prepares always land in the local jobs root, so there is nothing to pick. */
-async function loadPrepDirs() {
-  const sel = $("c-prepdir"); if (!sel) return;
-  const keep = sel.value;
-  const r = REMOTES.find(x => x.name === $("c-remote").value);
-  const root = r ? (r.remote_root || "").replace(/\/+$/, "") : "";
-  if (!root) {
-    sel.innerHTML = `<option value="">${r ? "no remote_root set for this machine" : "jobs/ on this computer"}</option>`;
-    return;
-  }
-  const std = [[`${root}/results`, `${root}/results (default)`], [`${root}/inputs`, `${root}/inputs`], [root, root]];
-  sel.innerHTML = std.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join("");
-  try {
-    const data = await api("/api/remote/files", { machine: r.name, dir: root });
-    for (const e of (data.entries || []))
-      if (e.is_dir && !std.some(s => s[0] === e.path)) sel.add(new Option(e.path, e.path));
-  } catch (e) { /* machine unreachable — the standard folders are still offered */ }
-  if ([...sel.options].some(o => o.value === keep)) sel.value = keep;
 }
 /* When the machine changes, pre-fill CPU cores from the machine's default
    (remembering whatever was set for local so it survives a round-trip). */
@@ -3227,7 +3208,6 @@ function machineChanged() {
     cpusEl.placeholder = def ? String(def) : "1";
   }
   prevMachine = sel.value;
-  loadPrepDirs();
 }
 function renderRemotes() {
   const box = $("remotelist");
@@ -3736,7 +3716,7 @@ function toggleResTool(id) {
 function closeAnalysisCards() {
   for (const id of ["anacard", "adscard", "surfcard", "chgdiffcard", "gdiagcard",
                     "magcard", "nebcard", "doscard", "pdoscard", "bandscard",
-                    "volcard", "reportcard"]) {
+                    "volcard"]) {
     const el = $(id); if (el) el.style.display = "none";
   }
 }
@@ -3778,24 +3758,29 @@ function jobQS(r) {
        + (r.remote ? "&machine=" + encodeURIComponent(r.machine) : "");
 }
 function resActions(r, i) {
-  /* Remote rows get the same buttons as local ones — the server syncs the
-     job's output into a local cache, so every viewer works either way. */
-  let h = r.remote
-    ? `<button class="ghost actbtn" onclick="openJob(${i})" title="Browse and download this job's files">📁 files</button>`
-    : "";
+  const options = [];
+  if (r.remote) options.push(["files", "Browse files"]);
   if (!r.remote && r.machine)
-    h += `<button class="ghost actbtn" title="Check this job's status on ${esc(r.machine)}" onclick="remoteStatus(${i})">🛰</button>` +
-         `<button class="ghost actbtn" title="Fetch result files back from ${esc(r.machine)} so the viewers work" onclick="remoteFetch(${i})">⬇</button>`;
-  h += `<button class="ghost actbtn" title="Short Markdown report of setup + results" onclick="showReport(${i})">📄</button>`;
-  h += (r.calculation_type === "tss")
-    ? `<button class="ghost actbtn" title="Minimum energy path / reaction-coordinate plot" onclick="showNeb(${i})">📉</button>`
-    : `<button class="ghost actbtn" title="Density of states" onclick="showDos(${i})">📈</button>` +
-      `<button class="ghost actbtn" title="Projected DOS per element and orbital (needs LORBIT)" onclick="showPdos(${i})">🧬</button>` +
-      `<button class="ghost actbtn" title="Band structure along the k-path" onclick="showBands(${i})">🎼</button>` +
-      `<button class="ghost actbtn" title="Charge density / potential: planar average + slice" onclick="showVolume(${i})">⚡</button>`;
-  h += `<button class="ghost actbtn" title="Animate the relaxation / NEB path" onclick="animateJob(${i})">🎞</button>` +
-       `<button class="ghost actbtn" title="Property analysis: ZPE/Gibbs, d-band, work function, Bader, absorption" onclick="showAnalysis(${i})">🧪</button>`;
-  return h;
+    options.push(["status", "Check remote status"], ["fetch", "Fetch remote results"]);
+  options.push(["parse", "Parse results"], ["report", "Open report"]);
+  if (r.calculation_type === "tss") options.push(["neb", "NEB profile"]);
+  else options.push(["dos", "Density of states"], ["pdos", "Projected DOS"],
+                    ["bands", "Band structure"], ["volume", "Charge density"]);
+  options.push(["animate", "Animate trajectory"], ["analysis", "Property analysis"]);
+  return `<select class="result-actions" aria-label="Actions for ${esc(r.case)}" onchange="runResultAction(${i},this)">` +
+    `<option value="">Actions…</option>` +
+    options.map(([value, label]) => `<option value="${value}">${label}</option>`).join("") +
+    `</select>`;
+}
+function runResultAction(i, select) {
+  const action = select.value;
+  select.value = "";
+  const handlers = {
+    files: openJob, status: remoteStatus, fetch: remoteFetch, parse: parseResult,
+    report: showReport, neb: showNeb, dos: showDos, pdos: showPdos,
+    bands: showBands, volume: showVolume, animate: animateJob, analysis: showAnalysis,
+  };
+  if (handlers[action]) handlers[action](i);
 }
 function renderResults() {
   if (!RES_ROWS) return;
@@ -3992,20 +3977,24 @@ function bulkTerminate() {
   bulkAction("/api/terminate", "Terminated", "Stop {n} running job{s}?");
 }
 async function bulkResume() {
-  const payloads = [...resSel.values()];
-  if (!payloads.length) return;
+  const entries = [...resSel.entries()];
+  if (!entries.length) return;
   const cpus = askResumeCpus();
   if (cpus === undefined) return;
-  if (!confirm(`Resume ${payloads.length} job${payloads.length > 1 ? "s" : ""} in place from the newest CONTCAR? You can edit each job's INCAR first.`)) return;
+  if (!confirm(`Resume ${entries.length} job${entries.length > 1 ? "s" : ""} in place from the newest CONTCAR? You can edit each job's INCAR first.`)) return;
   let ok = 0, fail = 0, skip = 0;
-  for (const p of payloads) {
+  for (const [key, p] of entries) {
     if (!(await editIncarBeforeResume(p.job_dir, p.machine))) { skip++; continue; }
-    try { await api("/api/resume_job", { ...p, cpus }); ok++; }
+    try {
+      await api("/api/resume_job", { ...p, cpus }); ok++;
+      const row = RES_ROWS.find(r => resSelKey(r) === key);
+      if (row && p.machine) row.status = "pending";
+    }
     catch (e) { fail++; }
   }
   banner(`Resumed: ${ok} ok${fail ? `, ${fail} failed` : ""}${skip ? `, ${skip} cancelled` : ""}.`, fail ? "" : "info");
   resSel.clear();
-  loadResults();
+  renderResults();
 }
 async function remoteFetch(i) {
   const r = RESULTS[i];
@@ -4020,17 +4009,37 @@ async function remoteFetch(i) {
   } catch (e) { /* banner shown */ }
 }
 
+async function parseResult(i) {
+  const r = RESULTS[i];
+  banner(`Parsing ${r.case}…`, "info");
+  const data = await api("/api/parse_result", {
+    job_dir: r.remote ? r.path : r.job_dir,
+    machine: r.remote ? r.machine : null,
+    case: r.case,
+  });
+  banner(`Parsed ${r.case}. Excel summary: ${data.excel}`, "info");
+  loadResults();
+}
+
 /* ---------- report / DOS / animation actions ---------- */
 async function showReport(i) {
   const r = RESULTS[i];
-  const data = await api("/api/report",
-    { job_dir: r.remote ? r.path : r.job_dir, machine: r.remote ? r.machine : null, case: r.case });
   $("reportcase").textContent = r.case;
-  $("reportview").textContent = data.text;
-  $("reportdl").href = "/download?path=" + encodeURIComponent(data.path);
-  $("reportcard").style.display = "block";
-  $("reportcard").scrollIntoView({ behavior: "smooth" });
+  $("reportview").textContent = "Loading report…";
+  $("reportdl").style.visibility = "hidden";
+  $("reportmodal").style.display = "block";
+  $("reportclose").focus();
+  try {
+    const data = await api("/api/report",
+      { job_dir: r.remote ? r.path : r.job_dir, machine: r.remote ? r.machine : null, case: r.case });
+    $("reportview").textContent = data.text;
+    $("reportdl").href = "/download?path=" + encodeURIComponent(data.path);
+    $("reportdl").style.visibility = "visible";
+  } catch (e) {
+    $("reportview").textContent = "Could not build this report. Close the window and check the error above.";
+  }
 }
+function closeReport() { $("reportmodal").style.display = "none"; }
 async function animateJob(i) {
   const r = RESULTS[i];
   const t = await api("/api/trajectory?path=" + jobQS(r));
@@ -4942,6 +4951,10 @@ function pickerMachineChanged() {
 function closePicker() { $("pickermodal").style.display = "none"; }
 $("pickermodal").onclick = e => { if (e.target === $("pickermodal")) closePicker(); };
 $("jobdetailmodal").onclick = e => { if (e.target === $("jobdetailmodal")) closeJobDetail(); };
+$("reportmodal").onclick = e => { if (e.target === $("reportmodal")) closeReport(); };
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && $("reportmodal").style.display !== "none") closeReport();
+});
 async function pickerGo(path) {
   let data;
   try {

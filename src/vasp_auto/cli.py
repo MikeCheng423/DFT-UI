@@ -273,7 +273,8 @@ def parse_args():
         "--neb-images",
         type=int,
         default=None,
-        help="Number of intermediate images for TSS/NEB preparation. Default: config neb_images or 5.",
+        help="Number of intermediate images for TSS/NEB preparation. "
+        "Required for TSS cases unless config.yaml sets neb_images; there is no default.",
     )
     parser.add_argument(
         "--spin",
@@ -728,14 +729,16 @@ def parse_args():
     parser.add_argument(
         "--ml-model",
         default=None,
-        help='MLIP model name. Default: config ml_model or "uma-s-1p1" '
-        '(OMat24-trained UMA). "emt" = ASE demo potential, no install needed.',
+        help='MLIP model name: uma-s-1p2 (default, every task head), uma-s-1p1, '
+        'uma-m-1p1, or "emt" (ASE demo potential, no install needed). '
+        "Overridden by config ml_model.",
     )
     parser.add_argument(
         "--ml-task",
         default=None,
-        help='UMA task head: omat (inorganic materials, default), oc20 '
-        "(catalysis/adsorbates), omol (molecules), odac (MOFs), omc (crystals).",
+        help="UMA task head: omat (inorganic materials, default), oc20 "
+        "(adsorbates on metals), oc22 (oxide catalysis), oc25 "
+        "((electro)catalysis), odac (MOFs). oc22/oc25 need uma-s-1p2.",
     )
     parser.add_argument(
         "--ml-checkpoint",
@@ -1805,6 +1808,12 @@ def _apply_remote_setup(args, config) -> bool:
     return True
 
 
+def _model_tag(result: dict) -> str:
+    """"model" or "model/task" for printing — UMA heads use different references."""
+    task = result.get("task")
+    return f"{result['model']}/{task}" if task else str(result["model"])
+
+
 def _apply_ml_energy(args, config) -> bool:
     """--ml-energy: single-point MLIP screen; read-only, exits after printing.
 
@@ -1831,7 +1840,7 @@ def _apply_ml_energy(args, config) -> bool:
         print(f"DB source : {result['db_source']} ({result['db_label']})")
         print(f"ML energy : {result['energy_eV']:.6f} eV")
         print(f"max|F|    : {result['max_force_eV_A']:.4f} eV/Å")
-        print(f"model     : {result['model']}")
+        print(f"model     : {_model_tag(result)}")
         return True
 
     if not args.ml_energy:
@@ -1848,7 +1857,7 @@ def _apply_ml_energy(args, config) -> bool:
     )
     print(f"ML energy : {result['energy_eV']:.6f} eV")
     print(f"max|F|    : {result['max_force_eV_A']:.4f} eV/Å")
-    print(f"model     : {result['model']}")
+    print(f"model     : {_model_tag(result)}")
     return True
 
 
@@ -1947,7 +1956,7 @@ def _apply_ml_relax(args, config) -> bool:
             f"DB source : {result['db_source']} ({result['db_label']})\n"
             f"ML relax  : {result['db_query']} -> {result['case_dir']} "
             f"(E = {result['energy_eV']:.6f} eV, max|F| = {result['max_force_eV_A']:.3f} eV/Å, "
-            f"{result['steps']} steps, model {result['model']})"
+            f"{result['steps']} steps, model {_model_tag(result)})"
         )
         return args.ml_only
 
@@ -1967,7 +1976,7 @@ def _apply_ml_relax(args, config) -> bool:
     print(
         f"ML relax  : {case_dir.name} -> {result['case_dir']} "
         f"(E = {result['energy_eV']:.6f} eV, max|F| = {result['max_force_eV_A']:.3f} eV/Å, "
-        f"{result['steps']} steps, model {result['model']})"
+        f"{result['steps']} steps, model {_model_tag(result)})"
     )
     return args.ml_only
 
@@ -2232,6 +2241,11 @@ def _bundle_tss_inputs(case_dir: Path, bundle: Path, case_name: str) -> Path:
         (bundle / "final").mkdir()
         shutil.copy2(initial, bundle / "initial" / "POSCAR")
         shutil.copy2(final, bundle / "final" / "POSCAR")
+        for endpoint in ("initial", "final"):
+            # Carries the endpoint energies, which the remote turns into EFIRST/ELAST.
+            oszicar = case_dir / endpoint / "OSZICAR"
+            if oszicar.exists():
+                shutil.copy2(oszicar, bundle / endpoint / "OSZICAR")
         potcar_src = bundle / "initial" / "POSCAR"
     elif image_dirs:
         for image_dir in image_dirs:
@@ -2745,8 +2759,17 @@ def main():
     mode = info["mode"]
     project_name = info["project_name"]
     case_dirs = filter_case_dirs(info["case_dirs"], args.cases)
-    neb_images = args.neb_images or int(config.get("neb_images", 5))
+    neb_images = args.neb_images or config.get("neb_images")
+    neb_images = int(neb_images) if neb_images else None
     calc_type = parse_calc_type(args.calc_type) if args.calc_type else None
+    if "tss" in info["case_types"].values() and not neb_images:
+        raise SystemExit(
+            "NEB/TSS cases need an image count: pass --neb-images N or set "
+            "neb_images in config.yaml."
+        )
+    # The offload path forwards args.neb_images to the remote engine, so a count
+    # that came from config.yaml has to land there too.
+    args.neb_images = neb_images
     kpoints_spec = _kpoints_spec_from_args(args)
     scheduler = args.scheduler or config.get("scheduler", "local")
 

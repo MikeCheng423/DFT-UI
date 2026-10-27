@@ -119,6 +119,24 @@ result. `--retry-failed` and `--parse-only` act on the latest numbered run.
 A `tss` case holds its two endpoints as `initial/POSCAR` and `final/POSCAR`;
 `--prepare` interpolates the images between them.
 
+Build the case straight from the two finished endpoint relaxations:
+
+```bash
+python -m vasp_auto.neb_endpoints inputs/A_to_B jobs/co2rr/0041_A jobs/co2rr/0042_B
+# EFIRST = -123.456   <- jobs/co2rr/0041_A
+# ELAST  = -122.789   <- jobs/co2rr/0042_B
+```
+
+This copies each run's relaxed `CONTCAR` and its `OSZICAR` into the case, warns
+about an endpoint whose OUTCAR never printed *reached required accuracy*, and
+rejects endpoints that disagree on composition or ordering. `--prepare` then
+writes **EFIRST/ELAST** into the NEB INCAR from those OSZICARs — VASP never
+computes images 00/NN and does not read their OUTCARs, so without them it treats
+both endpoints as 0 eV, which corrupts the terminal tangents and the
+climbing-image choice. Preparing a case with no endpoint energies prints a note
+saying so. In the web UI the NEB tab's endpoint pickers bring the OSZICARs along
+themselves, local or remote.
+
 Endpoints that came from **separate relaxations** usually do not share one atom
 ordering — ASE and pymatgen sort species alphabetically, VASP keeps whatever
 order it was handed — and a band built from mismatched endpoints is rejected

@@ -132,7 +132,7 @@ def _config() -> dict:
 def api_meta(_query, _body):
     from vasp_auto.ai_providers import DEFAULT_PROVIDER, provider_catalog
     from vasp_auto.ase_engine import ASE_CALCULATORS, ASE_SUPPORTED_CALC_TYPES
-    from vasp_auto.ml_tools import ML_MODELS
+    from vasp_auto.ml_tools import DEFAULT_ML_TASK, ML_MODELS, ML_TASKS
     from vasp_auto.qe_tools import QE_ALL_CALC_TYPES, QE_COMPANION_PROGRAMS
 
     config = _config()
@@ -141,6 +141,7 @@ def api_meta(_query, _body):
         "calc_type_info": {t.value: CALC_TYPE_INFO.get(t, "") for t in CalcType},
         "kpath_presets": sorted(KPATH_PRESETS),
         "ml_models": ML_MODELS,
+        "ml_tasks": ML_TASKS,
         "ai_providers": provider_catalog(),
         "ai_provider_default": DEFAULT_PROVIDER,
         "ase_calculators": list(ASE_CALCULATORS),
@@ -150,6 +151,7 @@ def api_meta(_query, _body):
         # UI default: the user's configured model if set, else 'emt' (always runs,
         # no download) — the gated UMA models would otherwise fail on first click.
         "ml_model_default": config.get("ml_model") or "emt",
+        "ml_task_default": config.get("ml_task") or DEFAULT_ML_TASK,
         "repo_root": str(REPO_ROOT),
         "inputs_root": str(REPO_ROOT / "inputs"),
         "config": {
@@ -341,7 +343,9 @@ def _fetch_remote_case(marker: dict, dest: Path, names=None) -> Path:
     remote_dir = str(marker["remote_dir"]).rstrip("/")
     dest.mkdir(parents=True, exist_ok=True)
     if marker.get("type") == "tss":
-        wanted = ["initial/POSCAR", "final/POSCAR", "INCAR", "KPOINTS"]
+        # The endpoint OSZICARs are optional but carry EFIRST/ELAST into the run.
+        wanted = ["initial/POSCAR", "final/POSCAR", "initial/OSZICAR", "final/OSZICAR",
+                  "INCAR", "KPOINTS"]
         required = {"initial/POSCAR", "final/POSCAR"}
     else:
         wanted = list(names or ["POSCAR", "INCAR", "KPOINTS", "workflow.yaml"])
@@ -636,6 +640,28 @@ def _endpoint_structure(source_text: str, machine, endpoint: str) -> tuple[bytes
     raise FileNotFoundError(f"No CONTCAR or POSCAR for the {endpoint} state: {source}")
 
 
+def _endpoint_oszicar(source_text: str, machine) -> bytes | None:
+    """The endpoint run's OSZICAR, when the source is a finished run folder.
+
+    It carries the relaxed endpoint energy into the case, where preparing the NEB
+    turns it into EFIRST/ELAST — VASP never computes images 00/NN itself, so
+    without them it treats both endpoints as 0 eV. None when the source is a bare
+    structure file or an unfinished run."""
+    base = str(source_text).rstrip("/")
+    if machine and machine != "local":
+        remote = _resolve_remote(machine)
+        with tempfile.TemporaryDirectory(prefix="vasp_auto_oz_") as tmp:
+            local = Path(tmp) / "OSZICAR"
+            try:
+                fetch_remote_file(remote, f"{base}/OSZICAR", local)
+            except Exception:
+                return None
+            return local.read_bytes() if local.exists() and local.stat().st_size else None
+    source = Path(base).expanduser().resolve()
+    oszicar = (source.parent if source.is_file() else source) / "OSZICAR"
+    return oszicar.read_bytes() if oszicar.is_file() and oszicar.stat().st_size else None
+
+
 def api_atom_order(_query, body):
     """Re-index the final endpoint's atoms onto the initial endpoint's ordering.
 
@@ -850,6 +876,9 @@ def api_build(_query, body):
             target = case_dir / endpoint / "POSCAR"
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
+            oszicar = _endpoint_oszicar(str(source_text), machine)
+            if oszicar:
+                (target.parent / "OSZICAR").write_bytes(oszicar)
         case_dir = case_dir.resolve()
         return _finalize_built_case(
             {"case": str(case_dir), "poscar": str(case_dir / "initial" / "POSCAR")},
@@ -1056,6 +1085,7 @@ def _preview_for_target(target: Path, body):
             potcar_map=config.get("potcar_map"),
             calc_type=body.get("calc_type") or None,
             kpoints_spec=kpoints,
+            neb_images=body.get("neb_images") or config.get("neb_images"),
             spin=bool(body.get("spin")),
             magmom_map=config.get("magmom_map"),
             engine=engine,
@@ -1150,6 +1180,32 @@ def api_results(query, _body):
         jobs_root / f"{info['project_name']}.xlsx",
     )
     return {"project": info["project_name"], "rows": rows, "excel": excel}
+
+
+def api_parse_result(_query, body):
+    """Re-parse one Results-row job and rebuild its Excel summary."""
+    source = str(body["job_dir"])
+    machine = body.get("machine")
+    job_dir = _analysis_dir(source, machine)
+    if not _job_has_output(job_dir):
+        raise FileNotFoundError(f"No calculation output found in {source}")
+
+    case_name = Path(str(body.get("case") or Path(source.rstrip("/")).name)).name or "job"
+    case_info = _job_dir_case_info(job_dir)
+    case_info["case_name"] = case_name
+    row = _result_row(job_dir.parent.name, "single", case_info)
+
+    from vasp_auto.excel_writer import write_results_to_excel
+    excel = job_dir / f"{case_name}.xlsx"
+    write_results_to_excel(str(excel), [row])
+
+    result_path = str(excel)
+    if _is_remote_machine(machine):
+        from vasp_auto.runner import _ship_file, _ssh_options, _ssh_target
+        remote = _resolve_remote(machine)
+        result_path = f"{source.rstrip('/')}/{excel.name}"
+        _ship_file(excel, _ssh_target(remote), result_path, remote, _ssh_options(remote))
+    return {"row": row, "excel": result_path}
 
 
 def api_template(query, _body):
@@ -2840,6 +2896,7 @@ POST_ROUTES = {
     "/api/cache_clear": api_cache_clear,
     "/api/bader": api_bader,
     "/api/preview": api_preview,
+    "/api/parse_result": api_parse_result,
     "/api/incar_apply": api_incar_apply,
     "/api/run": api_run,
     "/api/resume": api_resume,
@@ -2889,11 +2946,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_json(self, payload, status=200):
         data = json.dumps(payload).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the browser left; the API action has already completed
 
     def _dispatch(self, routes, body):
         parsed = urlparse(self.path)

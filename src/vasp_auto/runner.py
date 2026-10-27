@@ -1538,7 +1538,8 @@ def submit_job_detached(
 
     with tempfile.TemporaryDirectory() as tmp:
         cfg = Path(tmp) / "config.yaml"
-        cfg_lines = [f"jobs_root: {results_base}", "neb_images: 5"]
+        # No neb_images here: the local run forwards --neb-images to the remote.
+        cfg_lines = [f"jobs_root: {results_base}"]
         if engine == "qe":
             cfg_lines.append(f"qe_executable: {exe}")
             # The machine's own UPF library, if it has one; otherwise the caller
@@ -2108,13 +2109,16 @@ def list_remote_jobs(remote: dict, root: str) -> list[dict]:
     """
     root = (root or "").rstrip("/") or "/"
     rq = shlex.quote(root)
+    runroot = shlex.quote(
+        f"{(remote.get('remote_root') or '').rstrip('/')}/{ENGINE_SUBDIR}/runs"
+    )
     # POSIX sh: a job dir has any VASP I/O; emit
     # "<mtime>\t<o><v><z>\t<type><converged>\t<energy>\t<path>" per job, where
     # type is n(eb)/c(onvergence)/s(cf) and energy is the last OSZICAR E0=
     # (or "-"). Mirrors the local _result_calc_type / CONVERGENCE_MARKERS /
     # parse_outcar_summary semantics so remote rows fill the same columns.
     script = (
-        f"r={rq}; "
+        f"r={rq}; runroot={runroot}; "
         # One snapshot of every visible *calculation* process's cwd, shared by all
         # dirs below (only this user's /proc entries are readable — VASP runs as
         # this user). Shells are excluded to match workflow.proc_cwds: an ssh
@@ -2140,9 +2144,10 @@ def list_remote_jobs(remote: dict, root: str) -> list[dict]:
         'grep -q "JOB DONE" "$d/pw.out" 2>/dev/null; } && g=1; '
         'k=0; [ -e "$d/.terminated" ] && k=1; '
         # q: waiting at the per-machine concurrency gate. Scheduler jobs place
-        # their state in the job dir; detached jobs are visible via their local
-        # marker/status endpoint until the remote engine allocates this dir.
-        'q=0; [ "$(cat "$d/.vasp_auto_state" 2>/dev/null)" = pending ] && q=1; '
+        # state in the job dir; detached resumes use their basename-keyed control dir.
+        'q=0; bn=${d##*/}; { '
+        '[ "$(cat "$d/.vasp_auto_state" 2>/dev/null)" = pending ] || '
+        '[ "$(cat "$runroot/$bn/state" 2>/dev/null)" = pending ]; } && q=1; '
         # p: a .pid is recorded; a: the job is actually alive right now — its
         # recorded PID exists, or some live process has its cwd inside the dir
         # (real liveness, not just "output file exists"). pd: PID for display.
@@ -2158,8 +2163,12 @@ def list_remote_jobs(remote: dict, root: str) -> list[dict]:
         'y=s; [ -d "$d/scf_convergence" ] && y=c; '
         '{ [ -e "$d/initial/POSCAR" ] && [ -e "$d/final/POSCAR" ]; } && y=n; '
         '{ [ -d "$d/00" ] && [ -d "$d/01" ]; } && y=n; '
-        'c=0; grep -q -e "reached required accuracy" '
-        '-e "aborting loop because EDIFF is reached" "$d/OUTCAR" 2>/dev/null && c=1; '
+        # c: converged. "EDIFF is reached" is electronic SCF only, so it counts
+        # just for a static run (NSW = 0); a relaxation needs the ionic marker.
+        'c=0; if grep -q "reached required accuracy" "$d/OUTCAR" 2>/dev/null; then c=1; '
+        'elif grep -q "aborting loop because EDIFF is reached" "$d/OUTCAR" 2>/dev/null && '
+        '{ grep -q "NSW *= *0 *number of steps" "$d/OUTCAR" 2>/dev/null || '
+        '! grep -q "number of steps for IOM" "$d/OUTCAR" 2>/dev/null; }; then c=1; fi; '
         "e=$(awk '$4==\"E0=\"{x=$5} END{print x}' \"$d/OSZICAR\" 2>/dev/null); "
         '[ -n "$e" ] || e=-; '
         'printf "%s\\t%s%s%s%s%s%s%s%s\\t%s%s\\t%s\\t%s\\t%s\\n" "$n" "$o" "$v" "$z" "$g" "$k" "$p" "$a" "$q" "$y" "$c" "$e" "$pd" "$d"; }; '
@@ -2187,11 +2196,12 @@ def list_remote_jobs(remote: dict, root: str) -> list[dict]:
         pending = flags[7] == "1"
         type_conv = (type_conv + "s0")[:2]
         rel = path[len(root):].lstrip("/") if path.startswith(root) else path
-        # Same rule as _local_job_rows: terminated > finished > actually alive
+        # A queued resume overrides stale output from its previous completed run:
+        # terminated > pending > finished > actually alive
         # (live PID or a process working in the dir) > output-without-a-process
         # = stalled. A created file alone never counts as "running".
-        status = ("terminated" if killed else "done" if has_log
-                  else "pending" if pending
+        status = ("terminated" if killed else "pending" if pending
+                  else "done" if has_log
                   else "running" if alive
                   else "stalled" if (has_pid or has_osz or has_out)
                   else "prepared")

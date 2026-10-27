@@ -11,9 +11,45 @@ def test_job_log_finished(finished_job):
     text = build_job_log(finished_job, case_name="Al", calc_type="relax")
     assert "Status       : finished" in text
     assert "geometry optimization" in text
+    assert "Geometry convergence   : no" in text
+    assert "Electronic convergence : yes" in text
     assert "Cutoff ENCUT : 450 eV" in text
     assert "Methfessel-Paxton" in text
     assert "RESULTS" in text and "Final energy" in text
+
+
+def test_job_log_relaxation_hitting_nsw_is_not_converged(tmp_path):
+    # A relaxation that ran out of ionic steps: every step converged
+    # electronically ("EDIFF is reached") but the ionic criterion
+    # ("reached required accuracy") never appeared → not converged.
+    (tmp_path / "INCAR").write_text("IBRION = 2\nNSW = 60\n", encoding="utf-8")
+    (tmp_path / "OUTCAR").write_text(
+        "   NSW    =     60    number of steps for IOM\n"
+        + "  aborting loop because EDIFF is reached\n"
+          "  free  energy   TOTEN  =       -10.00000000 eV\n" * 60
+        + " General timing and accounting informations for this run:\n",
+        encoding="utf-8",
+    )
+    text = build_job_log(tmp_path, case_name="relax")
+    assert "Status       : finished" in text
+    assert "Converged    : no" in text
+    assert "Geometry convergence   : no" in text
+    assert "Electronic convergence : yes" in text
+    assert "did not converge" in text
+
+
+def test_job_log_reports_geometry_and_electronic_convergence(tmp_path):
+    (tmp_path / "INCAR").write_text("IBRION = 2\nNSW = 60\n", encoding="utf-8")
+    (tmp_path / "OUTCAR").write_text(
+        "  NSW = 60 number of steps for IOM\n"
+        "  aborting loop because EDIFF is reached\n"
+        "  free  energy   TOTEN  =       -10.00000000 eV\n"
+        "  reached required accuracy - stopping structural energy minimisation\n",
+        encoding="utf-8",
+    )
+    text = build_job_log(tmp_path)
+    assert "Geometry convergence   : yes" in text
+    assert "Electronic convergence : yes" in text
 
 
 def test_job_log_failed(tmp_path):

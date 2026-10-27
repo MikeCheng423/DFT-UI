@@ -182,6 +182,9 @@ def build_job_log(job_dir: Path, case_name: str | None = None,
     system = get_incar_value(incar_text, "SYSTEM")
     if not system and cell:
         system = _formula(cell["struct"])
+    geometry_status = "n/a (fixed geometry)"
+    if is_neb or calc_label.startswith("geometry optimization"):
+        geometry_status = "yes" if summary["geometry_converged"] else "no"
 
     lines = [
         "=" * 72,
@@ -192,6 +195,8 @@ def build_job_log(job_dir: Path, case_name: str | None = None,
         f"  Calculation  : {calc_label}" + (f"   [{calc_type}]" if calc_type else ""),
         f"  Status       : {status}",
         f"  Converged    : {'yes' if summary['converged'] else 'no'}",
+        f"  Geometry convergence   : {geometry_status}",
+        f"  Electronic convergence : {'yes' if summary['electronic_converged'] else 'no'}",
         f"  Completed    : {datetime.now():%Y-%m-%d %H:%M}",
     ]
     if return_code is not None:

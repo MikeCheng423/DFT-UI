@@ -11,14 +11,13 @@ _JOB_NUMBER_RE = re.compile(r"^(\d+)_(.*)$")
 _JOB_NUMBER_WIDTH = 4
 
 from vasp_auto.ase_tools import interpolate_neb_with_ase
-from vasp_auto.incar import apply_spin_to_incar, spin_incar_text
+from vasp_auto.incar import apply_spin_to_incar, set_incar_value, spin_incar_text
 from vasp_auto.kpoints import kpoints_text_from_spec
 from vasp_auto.potcar_finder import build_potcar, get_elements_from_poscar, map_potcar_dirs
 from vasp_auto.target_utils import get_case_type
 
 
 OPTIONAL_INPUTS = ["POTCAR"]
-DEFAULT_NEB_IMAGES = 5
 
 INCAR_TEMPLATE_FILES = {
     "scf": "INCAR_scf",
@@ -254,6 +253,33 @@ def _copy_or_build_potcar(case_dir: Path, job_dir: Path, poscar_path: Path, potc
         )
 
 
+def _apply_endpoint_energies(case_dir: Path, incar_path: Path):
+    """Fill EFIRST/ELAST from the endpoints' OSZICARs, or say why they are missing.
+
+    VASP does not compute images 00/NN and does not read their OUTCARs: with
+    EFIRST/ELAST unset it treats both endpoints as E = 0 eV, wrecking the
+    terminal tangents and the climbing-image pick. The energies are here whenever
+    the endpoints were brought in with ``python -m vasp_auto.neb_endpoints`` or
+    the NEB tab's endpoint pickers, both of which leave the OSZICARs in the case.
+    """
+    from vasp_auto.neb_endpoints import endpoint_energies
+
+    energies = endpoint_energies(case_dir)
+    if None not in energies.values():
+        set_incar_value(incar_path, "EFIRST", energies["initial"])
+        set_incar_value(incar_path, "ELAST", energies["final"])
+        return
+
+    text = incar_path.read_text(encoding="utf-8")
+    if all(re.search(rf"(?mi)^\s*{tag}\s*=", text) for tag in ("EFIRST", "ELAST")):
+        return  # set by hand in the case INCAR — leave them alone
+    print(
+        f"Note      : {case_dir.name} has no endpoint energies, so EFIRST/ELAST are "
+        "unset and VASP will treat both endpoints as 0 eV. Fix with: "
+        "python -m vasp_auto.neb_endpoints CASE INITIAL_RUN FINAL_RUN"
+    )
+
+
 def _write_neb_incar(case_dir: Path, job_dir: Path, neb_images: int):
     template_path = case_dir / "INCAR.neb"
     if not template_path.exists():
@@ -275,6 +301,8 @@ def _write_neb_incar(case_dir: Path, job_dir: Path, neb_images: int):
     else:
         default_text = load_incar_template("neb") + f"IMAGES = {neb_images}\n"
         (job_dir / "INCAR").write_text(default_text, encoding="utf-8")
+
+    _apply_endpoint_energies(case_dir, job_dir / "INCAR")
 
 
 def _select_incar_text(case_dir: Path, calc_type: str | None) -> str:
@@ -390,10 +418,20 @@ def _write_poscar(template, coords, output_path: Path):
     output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _require_neb_images(neb_images) -> int:
+    """NEB has no default image count -- the caller has to pick one."""
+    if not neb_images:
+        raise ValueError(
+            "NEB/TSS needs an image count: pass --neb-images N or set neb_images "
+            "in config.yaml (there is no default)."
+        )
+    return int(neb_images)
+
+
 def _copy_neb_inputs(
     case_dir: Path,
     job_dir: Path,
-    neb_images: int,
+    neb_images,
     use_ase_neb: bool = False,
     ase_neb_method: str = "idpp",
 ):
@@ -415,6 +453,10 @@ def _copy_neb_inputs(
         raise FileNotFoundError(
             f"TSS case requires initial/POSCAR and final/POSCAR in {case_dir}"
         )
+
+    # Only the interpolating path needs a count; an already-expanded case above
+    # takes its image count from the folders on disk.
+    neb_images = _require_neb_images(neb_images)
 
     if use_ase_neb:
         interpolate_neb_with_ase(
@@ -465,7 +507,7 @@ def create_job_from_case(
     case_info,
     potcar_root=None,
     clean_job=True,
-    neb_images=DEFAULT_NEB_IMAGES,
+    neb_images=None,
     use_ase_neb=False,
     ase_neb_method="idpp",
     potcar_map=None,
@@ -493,7 +535,7 @@ def create_job_from_case(
         from vasp_auto.qe_tools import create_qe_job, create_qe_neb_job
         if calculation_type == "tss":
             return create_qe_neb_job(
-                case_info, config or {}, neb_images=int(neb_images),
+                case_info, config or {}, neb_images=_require_neb_images(neb_images),
                 kpoints_spec=kpoints_spec, spin=spin, magmom_map=magmom_map,
             )
         return create_qe_job(
@@ -524,7 +566,7 @@ def create_job_from_case(
         _copy_neb_inputs(
             case_dir,
             job_dir,
-            int(neb_images),
+            neb_images,
             use_ase_neb=use_ase_neb,
             ase_neb_method=ase_neb_method,
         )
@@ -550,7 +592,7 @@ def preview_job_from_case(
     potcar_map=None,
     calc_type=None,
     kpoints_spec=None,
-    neb_images=DEFAULT_NEB_IMAGES,
+    neb_images=None,
     spin=False,
     magmom_map=None,
     engine="vasp",
@@ -577,7 +619,7 @@ def preview_job_from_case(
             text = build_neb_input(
                 initial, final, pseudos=pseudos,
                 kpoints_card=_kpoints_card(kpoints_spec, initial, initial_path, "scf"),
-                images=int(neb_images), qe_params=_qe_params_from_config(cfg),
+                images=_require_neb_images(neb_images), qe_params=_qe_params_from_config(cfg),
                 spin=spin, magmom_map=magmom_map,
             )
             return {
@@ -610,6 +652,7 @@ def preview_job_from_case(
         )
 
     if calculation_type == "tss":
+        neb_images = _require_neb_images(neb_images)
         incar_text = load_incar_template(calc_type or "neb") + f"IMAGES = {neb_images}\n"
         case_incar = case_dir / "INCAR"
         if (case_dir / "INCAR.neb").exists():

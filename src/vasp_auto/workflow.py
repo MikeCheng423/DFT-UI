@@ -25,6 +25,10 @@ CONVERGENCE_MARKERS = (
     "reached required accuracy",
     "aborting loop because EDIFF is reached",
 )
+# "reached required accuracy" is the ionic criterion; "EDIFF is reached" is only
+# electronic SCF convergence and VASP prints it for *every* ionic step, so it
+# means "converged" only for a static run (NSW = 0).
+IONIC_CONVERGENCE_MARKER = CONVERGENCE_MARKERS[0]
 
 # Known VASP failure signatures: (code, text to find in run.log/OUTCAR, suggested fix).
 # Specific errors are checked first; generic fallback signatures are listed separately
@@ -79,12 +83,17 @@ def parse_outcar_summary(outcar_path: Path) -> dict:
     summary = {
         "energy_eV": None,
         "converged": False,
+        "geometry_converged": False,
+        "electronic_converged": False,
         "energy_without_entropy_eV": None,
         "magmom_total": None,
     }
     if not outcar_path.exists():
         return summary
 
+    ionic_ok = False   # "reached required accuracy" — the ionic criterion
+    ediff_ok = False   # electronic SCF status for the current ionic step
+    nsw = None
     with open(outcar_path, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
             if "free  energy   TOTEN" in line:
@@ -93,6 +102,8 @@ def parse_outcar_summary(outcar_path: Path) -> dict:
                     summary["energy_eV"] = float(parts[4])
                 except (IndexError, ValueError):
                     pass
+                summary["electronic_converged"] = ediff_ok
+                ediff_ok = False
             elif "energy  without entropy" in line:
                 try:
                     summary["energy_without_entropy_eV"] = float(line.split("=")[1].split()[0])
@@ -104,8 +115,20 @@ def parse_outcar_summary(outcar_path: Path) -> dict:
                     summary["magmom_total"] = float(parts[-1])
                 except (IndexError, ValueError):
                     pass
-            elif not summary["converged"] and any(marker in line for marker in CONVERGENCE_MARKERS):
-                summary["converged"] = True
+            elif IONIC_CONVERGENCE_MARKER in line:
+                ionic_ok = True
+            elif "aborting loop because EDIFF is reached" in line:
+                ediff_ok = True
+            elif nsw is None and "number of steps for IOM" in line:
+                match = re.search(r"NSW\s*=\s*(\d+)", line)
+                if match:
+                    nsw = int(match.group(1))
+    # A relaxation counts as converged only when VASP reports the ionic
+    # criterion; EDIFF alone is electronic convergence of one ionic step.
+    # NSW unknown (no OUTCAR header) → fall back to the old, lenient rule.
+    summary["geometry_converged"] = ionic_ok
+    summary["electronic_converged"] = ediff_ok or summary["electronic_converged"]
+    summary["converged"] = ionic_ok or (summary["electronic_converged"] and not nsw)
     return summary
 
 
@@ -208,8 +231,8 @@ def geometry_converged(job_dir: Path) -> bool:
     """Return True when the geometry appears to have reached its minimum.
 
     Checks (in order):
-    1. OUTCAR/run.log contains a CONVERGENCE_MARKER ("reached required accuracy"
-       or "aborting loop because EDIFF is reached").
+    1. OUTCAR says converged (parse_outcar_summary: the ionic marker, or EDIFF
+       for a static run), or run.log carries the ionic marker.
     2. The parsed max force from OUTCAR is at or below the force criterion read
        from INCAR (|EDIFFG| when EDIFFG < 0, default 0.02 eV/Å).
 
@@ -217,15 +240,18 @@ def geometry_converged(job_dir: Path) -> bool:
     """
     job_dir = Path(job_dir)
 
-    # 1. Check for explicit convergence markers in run.log and OUTCAR.
-    for filename in ("run.log", "OUTCAR"):
-        path = job_dir / filename
-        if not path.exists():
-            continue
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                if any(marker in line for marker in CONVERGENCE_MARKERS):
-                    return True
+    # 1. Explicit convergence, judged per NSW (see parse_outcar_summary).
+    outcar = job_dir / "OUTCAR"
+    if parse_outcar_summary(outcar)["converged"]:
+        return True
+    # In run.log the ionic marker always counts; EDIFF only when there is no
+    # OUTCAR to say whether this was a relaxation (same lenience as above).
+    markers = (IONIC_CONVERGENCE_MARKER,) if outcar.exists() else CONVERGENCE_MARKERS
+    log = job_dir / "run.log"
+    if log.exists():
+        with open(log, "r", encoding="utf-8", errors="ignore") as f:
+            if any(m in line for line in f for m in markers):
+                return True
 
     # 2. Fallback: compare max force from vasprun.xml to EDIFFG force criterion.
     # Read EDIFFG from INCAR (negative value → force criterion).

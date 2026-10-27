@@ -137,3 +137,42 @@ def test_cli_ml_energy_prints_result(rattled_case, capsys):
     assert "ML energy" in captured.out
     assert "eV" in captured.out
     assert "model" in captured.out.lower() or "model" in captured.out
+
+
+# ---------------------------------------------------------------- UMA task heads
+
+def test_check_ml_task_rejects_unknown_task():
+    from vasp_auto.ml_tools import check_ml_task
+
+    with pytest.raises(ValueError, match="Unknown ML task"):
+        check_ml_task("uma-s-1p2", "omol")
+
+
+def test_check_ml_task_rejects_oc22_on_older_model():
+    """oc22/oc25 heads only exist in uma-s-1p2 — fail before the GB download."""
+    from vasp_auto.ml_tools import check_ml_task
+
+    for task in ("oc22", "oc25"):
+        with pytest.raises(ValueError, match="uma-s-1p2"):
+            check_ml_task("uma-s-1p1", task)
+        check_ml_task("uma-s-1p2", task)  # supported pairing: no raise
+
+
+def test_check_ml_task_allows_shared_heads():
+    from vasp_auto.ml_tools import check_ml_task
+
+    for model in ("uma-s-1p1", "uma-s-1p2", "uma-m-1p1"):
+        for task in ("omat", "oc20", "odac"):
+            check_ml_task(model, task)
+
+
+def test_api_meta_exposes_ml_tasks():
+    meta = ui_server.api_meta(None, None)
+    assert [t["name"] for t in meta["ml_tasks"]] == ["omat", "oc20", "oc22", "oc25", "odac"]
+    assert meta["ml_task_default"] == "omat"
+
+
+def test_results_record_the_task_head(rattled_case):
+    """Energies are head-specific, so results carry the head (None for emt)."""
+    assert ml_energy(rattled_case, model="emt")["task"] is None
+    assert ml_relax_case(rattled_case, model="emt", steps=5)["task"] is None

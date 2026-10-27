@@ -503,7 +503,7 @@ def create_qe_neb_job(
     case_info: dict,
     config: dict,
     *,
-    neb_images: int = 5,
+    neb_images: int,
     kpoints_spec: dict | None = None,
     spin: bool = False,
     magmom_map: dict | None = None,
